@@ -3,6 +3,7 @@ import urllib.request
 import os
 import re
 import ast
+from collections import defaultdict
 from typing import List, Dict, Callable, Union, Tuple, Set
 
 # --- КОНФИГУРАЦИЯ ---
@@ -35,13 +36,14 @@ def call_api(messages: List[Dict], temp: float, timeout: int, thinking: bool = F
 class FS:
     @staticmethod
     def read(path: str) -> str:
-        """Returns content of either file or directory"""
-        try:
-            if not os.path.exists(path):
-                return f"Path not found: {path}"
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"Path not found: {path}")
 
+        try:
             if os.path.isfile(path):
-                return f"File {path} content: {open(path, encoding='utf-8').read()}"
+                with open(path, encoding='utf-8') as f:
+                    content = f.read()
+                return f"File {path} content:\n{content}"
             elif os.path.isdir(path):
                 items = os.listdir(path)
                 dirs = [i for i in items if os.path.isdir(os.path.join(path, i))]
@@ -52,24 +54,63 @@ class FS:
                 result += f"Files ({len(files)}):\n" + "\n".join([f"- {f}" for f in files])
                 return result
             else:
-                return f"Unknown path type: {path}"
+                raise ValueError(f"Unknown path type: {path}")
         except Exception as e:
-            return f"Error accessing {path}: {e}"
+            raise PermissionError(f"Error accessing {path}: {e}") from e
 
     @staticmethod
     def search_files(pattern: str, path: str = ".") -> str:
-        """Searches for files recursively"""
+        if not os.path.isdir(path):
+            raise FileNotFoundError(f"Base path not found: {path}")
+
+        matches = []
         try:
-            if not os.path.isdir(path): return f"Base path not found: {path}"
-            matches = []
             for root, _, files in os.walk(path):
-                matches.extend([os.path.join(root, f) for f in files if re.search(pattern, f)])
-            return "\n".join(matches) or "No matches found."
-        except Exception as e: return f"Error: {e}"
+                # Фильтруем файлы по имени
+                matched_files = [f for f in files if re.search(pattern, f)]
+                for f in matched_files:
+                    full_path = os.path.join(root, f)
+                    matches.append(full_path)
+        except Exception as e:
+            raise RuntimeError(f"Error during search: {e}") from e
+
+        if not matches:
+            return "No matches found."
+
+        # Группируем файлы по родительским папкам
+        folders_map = defaultdict(list)
+
+        for full_path in matches:
+            parent_dir, filename = os.path.split(full_path)
+
+            # Вычисляем относительный путь от базы поиска до папки файла
+            rel_parent = os.path.relpath(parent_dir, path)
+
+            # Если файл лежит прямо в корне поиска, используем "."
+            if rel_parent == ".":
+                folder_key = "."
+            else:
+                folder_key = rel_parent
+
+            folders_map[folder_key].append(filename)
+
+        # Формируем вывод
+        lines = []
+        # Сортируем папки для предсказуемого порядка вывода
+        for folder in sorted(folders_map.keys()):
+            files = sorted(folders_map[folder])
+
+            # Добавляем заголовок папки
+            lines.append(f"{folder}/:")
+
+            # Добавляем файлы внутри папки с отступом
+            for file_name in files:
+                lines.append(f"  - {file_name}")
+
+        return "\n".join(lines)
 
     @staticmethod
     def cwd() -> str:
-        """Returns current working directory path like '.'"""
         return f"Current working dir: {os.getcwd()}"
 
 TOOLS_REGISTRY = {
@@ -112,9 +153,30 @@ def gen_tools_desc(tools: Dict[str, Callable]) -> str:
     parts.extend([
         "",
         "- You can interact with file system using tools.",
+        "- User can not use these tools but you can.",
+        "- If a tool fails due to syntax or arguments - ERROR message will be returned to you",
         "- You can write MULTIPLE tool calls with different arguments.",
     ])
     return "\n".join(parts)
+
+class ConfirmationResult:
+    """Результат проверки подтверждения"""
+    CONFIRMED = "CONFIRMED"
+    DECLINED = "DECLINED"
+
+    @staticmethod
+    def check(content: str) -> str:
+        """Проверяет ответ агента на подтверждение/отклонение"""
+        if not content:
+            return ConfirmationResult.DECLINED
+
+        # "yes" - подтверждено
+        if content.lower().startswith("yes"):
+            return ConfirmationResult.CONFIRMED
+
+        # Любое другое - отклонено
+        return ConfirmationResult.DECLINED
+
 
 class LLMAgent:
     def __init__(self, system_prompt: str = "", temp: float = 0.15, timeout: int = 1800,
@@ -153,6 +215,35 @@ class LLMAgent:
         else:
             return "[Regen Error] Not enough history to regenerate."
 
+    def _compress_history(self) -> List[Dict]:
+        if len(self.history) <= 2:
+            return self.history
+
+        system_msg = self.history[0]
+        last_msg = self.history[-1]
+
+        if last_msg["role"] != "user":
+            return self.history
+
+        intermediate = self.history[1:-1]
+
+        if not intermediate:
+            return self.history
+
+        dump_lines = ["---DIALOG HISTORY---"]
+        for msg in intermediate:
+            role_label = "User" if msg["role"] == "user" else "Assistant(you)"
+            dump_lines.append(f"{role_label}: {msg['content']}")
+            dump_lines.append("---")
+
+        history_dump = "\n".join(dump_lines)
+        combined_content = f"{history_dump}\nUser:{last_msg['content']}"
+
+        return [
+            system_msg,
+            {"role": "user", "content": combined_content}
+        ]
+
     def _parse_user_commands(self, content: str) -> Tuple[str|list[str]]:
         match = re.match(r'^/\w+', content.strip())
         if match:
@@ -164,22 +255,19 @@ class LLMAgent:
     def _parse_tools(self, content: str) -> Tuple[List[Dict], List[str]]:
         valid_tools = []
         parse_errors = []
-
-        # Паттерн ищет функцию и всё внутри скобок (включая пустоту)
         pattern = r"(/\w+)\s*\((.*?)\)"
         matches = re.findall(pattern, content, re.DOTALL)
 
         for func_name, args_str in matches:
             if func_name not in self.tools:
                 continue
-
             try:
                 parsed_args = []
-
                 if args_str.strip() == "":
                     parsed_args = []
                 else:
-                    eval_result = ast.literal_eval(f"({args_str},)")
+                    safe_args_str = args_str.replace('\\', '\\\\')
+                    eval_result = ast.literal_eval(f"({safe_args_str},)")
                     parsed_args = list(eval_result) if isinstance(eval_result, tuple) else [eval_result]
 
                 valid_tools.append({
@@ -195,23 +283,65 @@ class LLMAgent:
 
         return valid_tools, parse_errors
 
+    def _process_confirmation_request(self, tool_calls: List[Dict], temp: float, force_think: bool) -> str:
+        """Запрашивает подтверждение у агента и получает результат"""
+        if not tool_calls:
+            return ConfirmationResult.DECLINED
+
+        # Формируем запрос подтверждения БЕЗ добавления в историю
+        calls_summary = []
+        for tc in tool_calls:
+            name = tc["name"]
+            calls_summary.append(f"- {name}({tc.get('raw_args', '')})")
+
+        summary_text = "\n".join(calls_summary)
+        confirm_prompt = (
+            "SAFETY CHECK: \n"
+            "You (AI) just wrote these tool calls in your previous message:\n"
+            f"{summary_text}\n\n"
+            "Now you decide if you really wanna call them now. Start answering with YES or NO and short reason"
+        )
+
+        # Добавляем временное сообщение для получения ответа
+        self.history.append({"role": "user", "content": confirm_prompt})
+
+        # Вызываем API
+        confirm_content, confirm_err = call_api(self._compress_history(), temp, self.timeout, force_think)
+
+        # Сразу убираем из истории, если что-то пошло не так
+        self.history.pop()
+
+        if confirm_err or not confirm_content:
+            return ConfirmationResult.DECLINED
+
+        print(f"\n[CONFIRMATION RESPONSE]: {confirm_content}")
+
+        return ConfirmationResult.check(confirm_content)
+
     def chat(self, message: str, max_iter: int = 5, force_think: bool = False) -> str:
         self.history.append({"role": "user", "content": message})
 
         for iteration in range(max_iter):
-            content, err = call_api(self.history, self.temp, self.timeout, force_think)
-            if err: return f"API Error: {err}"
-            if not content: return "Empty response"
+            messages_payload = self._compress_history()
+
+            content, err = call_api(messages_payload, self.temp, self.timeout, force_think)
+
+            if err:
+                return f"API Error: {err}"
+            if not content:
+                return "Empty response"
 
             self._last_assistant_content = content
-
             clean_content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL | re.IGNORECASE).strip()
 
+            print('\n'+'='*15)
             print(f"Agent: {content}")
+            print('='*15)
 
             tool_calls, parse_errors = self._parse_tools(clean_content)
 
             if tool_calls or parse_errors:
+                # Сохраняем сообщение ассистента с вызовами инструментов
                 self.history.append({"role": "assistant", "content": clean_content})
 
                 results = []
@@ -222,13 +352,32 @@ class LLMAgent:
                     for err in parse_errors:
                         execution_errors.append(err)
 
+                # --- НОВАЯ ЛОГИКА ПОДТВЕРЖДЕНИЯ ---
+                if tool_calls:
+                    print("\n[SAFETY] Detected tool calls. Requesting confirmation from agent...")
+
+                    # Получаем результат подтверждения БЕЗ сохранения в историю
+                    confirm_result = self._process_confirmation_request(tool_calls, self.temp, force_think)
+
+                    if confirm_result == ConfirmationResult.DECLINED:
+                        print("[SAFETY] Confirmation DENIED by agent. Returning control to user.")
+                        # УДАЛЯЕМ сообщение ассистента с инструментами из истории
+                        # Так как отклонение НЕ должно сохраняться
+                        if len(self.history) > 0 and self.history[-1]["role"] == "assistant":
+                            self.history.pop()
+
+                        # Возвращаем управление пользователю - выходим из цикла
+                        return "Tool execution was declined by the agent. Control returned to user."
+
+                    else:
+                        print("[SAFETY] Confirmation GRANTED. Proceeding with tools.")
+
+                # Выполнение инструментов (если подтверждено)
                 for tc in tool_calls:
                     name = tc["name"]
                     args_list = tc.get("arguments", [])
-
                     normalized_args = " ".join(str(a) for a in args_list)
                     call_signature = f"{name}({normalized_args})"
-
                     is_read_only = not TOOL_METADATA.get(name, {}).get("modifies_state", False)
 
                     if is_read_only and call_signature in self.call_history:
@@ -241,21 +390,25 @@ class LLMAgent:
 
                     try:
                         res = self.tools[name](*args_list)
-                        print(f"[RESULT] {str(res)[:500]}")
-                        results.append(f"Tool '{name}':\n{res}")
+                        print(f"[RESULT] {str(res)[:1000]}")
+                        results.append(f"Tool '{name}' Result:\n{res}")
                         self.call_history.add(call_signature)
+
                     except Exception as e:
-                        error_msg = f"Runtime Error in {name}: {e}"
+                        error_msg = f"Tool '{name}' FAILED: {type(e).__name__}: {e}"
                         print(f"[ERROR] {error_msg}")
                         execution_errors.append(error_msg)
 
                 feedback_parts = []
+
                 if results:
-                    feedback_parts.append("--- SUCCESSFUL TOOL OUTPUTS ---")
+                    feedback_parts.append("--- TOOL EXECUTION RESULTS ---")
                     feedback_parts.extend(results)
+
                 if execution_errors:
-                    feedback_parts.append("--- ERRORS AND PARSE MESSAGES ---")
+                    feedback_parts.append("--- TOOL EXECUTION ERRORS ---")
                     feedback_parts.extend(execution_errors)
+                    feedback_parts.append("\nIMPORTANT: One or more tools failed. Please try again with corrected arguments")
 
                 final_feedback = "\n".join(feedback_parts)
                 self.history.append({"role": "user", "content": final_feedback})
@@ -265,6 +418,7 @@ class LLMAgent:
 
                 continue
 
+            # Если инструментов нет, возвращаем финальный ответ
             self.history.append({"role": "assistant", "content": clean_content})
             return clean_content
 
@@ -286,10 +440,12 @@ class LLMAgent:
                 return "Regenerated last message."
         return "Cannot regenerate - no history."
 
+
 if __name__ == "__main__":
     agent = LLMAgent()
     print("Ready. Type 'exit' to quit.")
     print("Special commands: /regen")
+    print("Note: Agent will confirm/decline tool calls itself. Declinations won't be stored in history.")
 
     while True:
         inp = input("\nUser: ")
@@ -309,4 +465,4 @@ if __name__ == "__main__":
         if inp.lower() in ("exit", "quit"):
             break
 
-        agent.chat(inp, max_iter=10, force_think=True)
+        agent.chat(inp, max_iter=5, force_think=True)
