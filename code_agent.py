@@ -66,7 +66,6 @@ class FS:
         matches = []
         try:
             for root, _, files in os.walk(path):
-                # Фильтруем файлы по имени
                 matched_files = [f for f in files if re.search(pattern, f)]
                 for f in matched_files:
                     full_path = os.path.join(root, f)
@@ -77,36 +76,19 @@ class FS:
         if not matches:
             return "No matches found."
 
-        # Группируем файлы по родительским папкам
         folders_map = defaultdict(list)
-
         for full_path in matches:
             parent_dir, filename = os.path.split(full_path)
-
-            # Вычисляем относительный путь от базы поиска до папки файла
             rel_parent = os.path.relpath(parent_dir, path)
-
-            # Если файл лежит прямо в корне поиска, используем "."
-            if rel_parent == ".":
-                folder_key = "."
-            else:
-                folder_key = rel_parent
-
+            folder_key = "." if rel_parent == "." else rel_parent
             folders_map[folder_key].append(filename)
 
-        # Формируем вывод
         lines = []
-        # Сортируем папки для предсказуемого порядка вывода
         for folder in sorted(folders_map.keys()):
             files = sorted(folders_map[folder])
-
-            # Добавляем заголовок папки
             lines.append(f"{folder}/:")
-
-            # Добавляем файлы внутри папки с отступом
             for file_name in files:
                 lines.append(f"  - {file_name}")
-
         return "\n".join(lines)
 
     @staticmethod
@@ -160,23 +142,16 @@ def gen_tools_desc(tools: Dict[str, Callable]) -> str:
     return "\n".join(parts)
 
 class ConfirmationResult:
-    """Результат проверки подтверждения"""
     CONFIRMED = "CONFIRMED"
     DECLINED = "DECLINED"
 
     @staticmethod
     def check(content: str) -> str:
-        """Проверяет ответ агента на подтверждение/отклонение"""
         if not content:
             return ConfirmationResult.DECLINED
-
-        # "yes" - подтверждено
         if content.lower().startswith("yes"):
             return ConfirmationResult.CONFIRMED
-
-        # Любое другое - отклонено
         return ConfirmationResult.DECLINED
-
 
 class LLMAgent:
     def __init__(self, system_prompt: str = "", temp: float = 0.15, timeout: int = 1800,
@@ -230,9 +205,9 @@ class LLMAgent:
         if not intermediate:
             return self.history
 
-        dump_lines = ["---DIALOG HISTORY---"]
+        dump_lines = ["--- DIALOG HISTORY ---"]
         for msg in intermediate:
-            role_label = "User" if msg["role"] == "user" else "Assistant(you)"
+            role_label = "User" if msg["role"] == "user" else "AI-assistant"
             dump_lines.append(f"{role_label}: {msg['content']}")
             dump_lines.append("---")
 
@@ -270,10 +245,12 @@ class LLMAgent:
                     eval_result = ast.literal_eval(f"({safe_args_str},)")
                     parsed_args = list(eval_result) if isinstance(eval_result, tuple) else [eval_result]
 
+                # ДОБАВЛЕНИЕ ФЛАГА ПРИ СОЗДАНИИ ОБЪЕКТА
                 valid_tools.append({
                     "name": func_name,
                     "arguments": parsed_args,
-                    "raw_args": args_str
+                    "raw_args": args_str,
+                    "__is_executed__": False  # Базовый флаг для отслеживания
                 })
             except (ValueError, SyntaxError) as e:
                 error_msg = f"[Parse Error] Could not parse arguments for '{func_name}': '{args_str}'. Reason: {e}"
@@ -284,11 +261,9 @@ class LLMAgent:
         return valid_tools, parse_errors
 
     def _process_confirmation_request(self, tool_calls: List[Dict], temp: float, force_think: bool) -> str:
-        """Запрашивает подтверждение у агента и получает результат"""
         if not tool_calls:
             return ConfirmationResult.DECLINED
 
-        # Формируем запрос подтверждения БЕЗ добавления в историю
         calls_summary = []
         for tc in tool_calls:
             name = tc["name"]
@@ -302,20 +277,14 @@ class LLMAgent:
             "Now you decide if you really wanna call them now. Start answering with YES or NO and short reason"
         )
 
-        # Добавляем временное сообщение для получения ответа
         self.history.append({"role": "user", "content": confirm_prompt})
-
-        # Вызываем API
         confirm_content, confirm_err = call_api(self._compress_history(), temp, self.timeout, force_think)
-
-        # Сразу убираем из истории, если что-то пошло не так
         self.history.pop()
 
         if confirm_err or not confirm_content:
             return ConfirmationResult.DECLINED
 
         print(f"\n[CONFIRMATION RESPONSE]: {confirm_content}")
-
         return ConfirmationResult.check(confirm_content)
 
     def chat(self, message: str, max_iter: int = 5, force_think: bool = False) -> str:
@@ -323,7 +292,6 @@ class LLMAgent:
 
         for iteration in range(max_iter):
             messages_payload = self._compress_history()
-
             content, err = call_api(messages_payload, self.temp, self.timeout, force_think)
 
             if err:
@@ -334,57 +302,78 @@ class LLMAgent:
             self._last_assistant_content = content
             clean_content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL | re.IGNORECASE).strip()
 
-            print('\n'+'='*15)
+            print('\n' + '=' * 15)
             print(f"Agent: {content}")
-            print('='*15)
+            print('=' * 15)
 
             tool_calls, parse_errors = self._parse_tools(clean_content)
 
             if tool_calls or parse_errors:
-                # Сохраняем сообщение ассистента с вызовами инструментов
                 self.history.append({"role": "assistant", "content": clean_content})
 
                 results = []
                 execution_errors = []
                 has_skipped_tool = False
 
+                # Обработка ошибок парсинга
                 if parse_errors:
                     for err in parse_errors:
                         execution_errors.append(err)
 
-                # --- НОВАЯ ЛОГИКА ПОДТВЕРЖДЕНИЯ ---
-                if tool_calls:
-                    print("\n[SAFETY] Detected tool calls. Requesting confirmation from agent...")
+                # Фильтрация дублей и подготовка к подтверждению
+                tools_to_confirm = []
 
-                    # Получаем результат подтверждения БЕЗ сохранения в историю
-                    confirm_result = self._process_confirmation_request(tool_calls, self.temp, force_think)
-
-                    if confirm_result == ConfirmationResult.DECLINED:
-                        print("[SAFETY] Confirmation DENIED by agent. Returning control to user.")
-                        # УДАЛЯЕМ сообщение ассистента с инструментами из истории
-                        # Так как отклонение НЕ должно сохраняться
-                        if len(self.history) > 0 and self.history[-1]["role"] == "assistant":
-                            self.history.pop()
-
-                        # Возвращаем управление пользователю - выходим из цикла
-                        return "Tool execution was declined by the agent. Control returned to user."
-
-                    else:
-                        print("[SAFETY] Confirmation GRANTED. Proceeding with tools.")
-
-                # Выполнение инструментов (если подтверждено)
                 for tc in tool_calls:
                     name = tc["name"]
                     args_list = tc.get("arguments", [])
                     normalized_args = " ".join(str(a) for a in args_list)
                     call_signature = f"{name}({normalized_args})"
+
                     is_read_only = not TOOL_METADATA.get(name, {}).get("modifies_state", False)
 
+                    # ПРОВЕРКА НА ПОВТОР
                     if is_read_only and call_signature in self.call_history:
-                        msg = "[WARNING] Please don't repeat tool calls that are not state modifying with the same arguments"
-                        results.append(f"Tool '{name}':\n{msg}")
+                        print(f"[INFO] Skipped repetitive tool call: {call_signature}")
+
+                        # Маркировка флагом
+                        tc["__marked_as_skipped__"] = True
+
+                        # Выполняем заново для получения результата (безопасно)
+                        try:
+                            res = self.tools[name](*args_list)
+                            results.append(f"[WARNING] Tool '{name}' was already called with these arguments previously.\nResult:\n{res}")
+                        except Exception as e:
+                            results.append(f"[WARNING] Tool '{name}' repeat failed: {e}")
+
                         has_skipped_tool = True
                         continue
+
+                    # Если не дубль, добавляем в список подтверждения
+                    tools_to_confirm.append(tc)
+
+                # Запрос подтверждения только для уникальных
+                if tools_to_confirm:
+                    print("\n[SAFETY] Detected new tool calls. Requesting confirmation from agent...")
+                    confirm_result = self._process_confirmation_request(tools_to_confirm, self.temp, force_think)
+
+                    if confirm_result == ConfirmationResult.DECLINED:
+                        print("[SAFETY] Confirmation DENIED by agent. Returning control to user.")
+                        if len(self.history) > 0 and self.history[-1]["role"] == "assistant":
+                            self.history.pop()
+                        return "Tool execution was declined by the agent. Control returned to user."
+                    else:
+                        print("[SAFETY] Confirmation GRANTED. Proceeding with tools.")
+
+                # Выполнение инструментов (только тех, что прошли фильтр)
+                for tc in tools_to_confirm:
+                    # Дополнительная страховка
+                    if tc.get("__marked_as_skipped__", False):
+                        continue
+
+                    name = tc["name"]
+                    args_list = tc.get("arguments", [])
+                    normalized_args = " ".join(str(a) for a in args_list)
+                    call_signature = f"{name}({normalized_args})"
 
                     print(f"[Tool] Calling {name}{tuple(args_list)}")
 
@@ -393,6 +382,7 @@ class LLMAgent:
                         print(f"[RESULT] {str(res)[:1000]}")
                         results.append(f"Tool '{name}' Result:\n{res}")
                         self.call_history.add(call_signature)
+                        tc["__is_executed__"] = True
 
                     except Exception as e:
                         error_msg = f"Tool '{name}' FAILED: {type(e).__name__}: {e}"
@@ -400,25 +390,18 @@ class LLMAgent:
                         execution_errors.append(error_msg)
 
                 feedback_parts = []
-
                 if results:
-                    feedback_parts.append("--- TOOL EXECUTION RESULTS ---")
+                    feedback_parts.append("[CALLED TOOL RESULTS]")
                     feedback_parts.extend(results)
 
                 if execution_errors:
-                    feedback_parts.append("--- TOOL EXECUTION ERRORS ---")
+                    feedback_parts.append("[CALLED TOOL ERRORS]")
                     feedback_parts.extend(execution_errors)
-                    feedback_parts.append("\nIMPORTANT: One or more tools failed. Please try again with corrected arguments")
 
                 final_feedback = "\n".join(feedback_parts)
                 self.history.append({"role": "user", "content": final_feedback})
-
-                if has_skipped_tool:
-                    print("\n[INFO] Skipped repetitive tool call")
-
                 continue
 
-            # Если инструментов нет, возвращаем финальный ответ
             self.history.append({"role": "assistant", "content": clean_content})
             return clean_content
 
