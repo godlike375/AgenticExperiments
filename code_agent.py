@@ -2,284 +2,311 @@ import json
 import urllib.request
 import os
 import re
-from typing import List, Dict, Tuple, Optional, Callable
+import ast
+from typing import List, Dict, Callable, Union, Tuple, Set
 
-# =============================================================================
-# КОНФИГУРАЦИЯ И УТИЛИТЫ
-# =============================================================================
-
-API_URL = "http://192.168.50.196:1234/v1/chat/completions"
+# --- КОНФИГУРАЦИЯ ---
+API_URL = "http://localhost:1234/v1/chat/completions"
 MODEL_NAME = "local-model"
 
-def call_api(messages: List[Dict], temperature: float, timeout: int, thinking: bool = False) -> Tuple[Optional[str], Optional[str]]:
-    """
-    Базовая функция вызова API LM Studio.
-    Включает трюк с </think>, если thinking=False.
-    """
+def call_api(messages: List[Dict], temp: float, timeout: int, thinking: bool = False):
     if not thinking:
-        # Трюк для принудительного закрытия блока мыслей и начала ответа
         messages.append({"role": "assistant", "content": "<think></think>\n\n"})
 
     payload = {
         "model": MODEL_NAME,
         "messages": messages,
-        "temperature": temperature,
+        "temperature": temp,
         "max_tokens": 65535
     }
 
     req = urllib.request.Request(
-        API_URL,
-        data=json.dumps(payload).encode('utf-8'),
-        headers={'Content-Type': 'application/json'},
-        method='POST'
+        API_URL, data=json.dumps(payload).encode(),
+        headers={'Content-Type': 'application/json'}, method='POST'
     )
 
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as response:
-            data = json.loads(response.read().decode('utf-8'))
-            content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-            return content, None
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode())
+            return data["choices"][0]["message"]["content"], None
     except Exception as e:
-        return None, f"API Error: {str(e)}"
+        return None, str(e)
 
-# =============================================================================
-# ИНСТРУМЕНТЫ (TOOLS)
-# =============================================================================
-
-class FileSystemTools:
+class FS:
     @staticmethod
-    def read_file(path: str) -> str:
+    def read(path: str) -> str:
+        """Returns content of either file or directory"""
         try:
             if not os.path.exists(path):
-                return f"Error: File not found: {path}"
-            with open(path, 'r', encoding='utf-8') as f:
-                return f.read()
+                return f"Path not found: {path}"
+
+            if os.path.isfile(path):
+                return f"File {path} content: {open(path, encoding='utf-8').read()}"
+            elif os.path.isdir(path):
+                items = os.listdir(path)
+                dirs = [i for i in items if os.path.isdir(os.path.join(path, i))]
+                files = [i for i in items if not os.path.isdir(os.path.join(path, i))]
+
+                result = f"Directory: {path}\n"
+                result += f"Subdirectories ({len(dirs)}):\n" + "\n".join([f"- {d}/" for d in dirs]) + "\n"
+                result += f"Files ({len(files)}):\n" + "\n".join([f"- {f}" for f in files])
+                return result
+            else:
+                return f"Unknown path type: {path}"
         except Exception as e:
-            return f"Error reading file: {str(e)}"
+            return f"Error accessing {path}: {e}"
 
     @staticmethod
-    def list_dir(path: str) -> str:
+    def search_files(pattern: str, path: str = ".") -> str:
+        """Searches for files recursively"""
         try:
-            if not os.path.isdir(path):
-                return f"Error: Directory not found: {path}"
-
-            items = os.listdir(path)
-            dirs: List[str] = []
-            files: List[str] = []
-
-            for item in items:
-                full_path = os.path.join(path, item)
-                if os.path.isdir(full_path):
-                    dirs.append(item)
-                else:
-                    files.append(item)
-
-            return f"Directories: {dirs};\nFiles: {files}"
-
-        except Exception as e:
-            return f"Error listing directory: {str(e)}"
-
-    @staticmethod
-    def search_files(pattern: str, base_path: str = ".") -> str:
-        try:
-            if not os.path.isdir(base_path):
-                return f"Error: Base path not found: {base_path}"
-
+            if not os.path.isdir(path): return f"Base path not found: {path}"
             matches = []
-            for root, dirs, files in os.walk(base_path):
-                for filename in files:
-                    if re.search(pattern, filename):
-                        matches.append(os.path.join(root, filename))
+            for root, _, files in os.walk(path):
+                matches.extend([os.path.join(root, f) for f in files if re.search(pattern, f)])
+            return "\n".join(matches) or "No matches found."
+        except Exception as e: return f"Error: {e}"
 
-            if not matches:
-                return "No files found matching the pattern."
+    @staticmethod
+    def cwd() -> str:
+        """Returns current working directory path like '.'"""
+        return f"Current working dir: {os.getcwd()}"
 
-            return "\n".join(matches)
-        except Exception as e:
-            return f"Error searching files: {str(e)}"
-
-TOOLS_DESCRIPTION = """
-You have access to the following tools. To use a tool, append the following block:
-<tool_call>
-{"name": "tool_name", "arguments": {"arg1": "value1"}}
-</tool_call>
-
-Available tools:
-1. read_file: Reads content from a file. Args: {"path": "string"}
-2. list_dir: Lists files in a directory. Args: {"path": "string"}
-3. search_files: Searches files by regex name. Args: {"pattern": "regex_string", "base_path": "string (optional, default '.')"}
-
-IMPORTANT: 
-- You can output text explaining your actions BEFORE the tool calls.
-- You can make MULTIPLE tool calls in one message.
-- Stop generating text immediately after the last tool call block.
-"""
-
-AVAILABLE_TOOLS: Dict[str, Callable] = {
-    "read_file": FileSystemTools.read_file,
-    "list_dir": FileSystemTools.list_dir,
-    "search_files": FileSystemTools.search_files,
+TOOLS_REGISTRY = {
+    "/read": FS.read,
+    "/search_files": FS.search_files,
+    "/cwd": FS.cwd
 }
 
-# =============================================================================
-# АГЕНТ (CORE LOGIC)
-# =============================================================================
+TOOL_ARGS_DESC = {
+    "/read": "path",
+    "/search_files": "regex, path",
+    "/cwd": ""
+}
+
+TOOL_METADATA = {
+    "/read": {"modifies_state": False},
+    "/search_files": {"modifies_state": False},
+    "/cwd": {"modifies_state": False}
+}
+
+def gen_tools_desc(tools: Dict[str, Callable]) -> str:
+    if not tools: return "No tools available."
+
+    parts = [
+        "You are tool-using AI that must use tools by writing like:",
+        "/name(args)",
+        "",
+        "Example:",
+        "/read(\".\")",
+        "",
+        "Your available tools:"
+    ]
+
+    for i, (name, func) in enumerate(tools.items(), 1):
+        desc = TOOL_ARGS_DESC.get(name, "")
+        doc_str = func.__doc__ or ""
+        args_part = ", ".join(desc.split(", ")) if desc else ""
+        parts.append(f"- {name}({args_part}): {doc_str}")
+
+    parts.extend([
+        "",
+        "- You can interact with file system using tools.",
+        "- You can write MULTIPLE tool calls with different arguments.",
+    ])
+    return "\n".join(parts)
 
 class LLMAgent:
-    def __init__(self, system_prompt: Optional[str] = None, temperature: float = 0.7, timeout: int = 1800):
-        self.history: List[Dict] = []
-        self.temperature = temperature
-        self.timeout = timeout
+    def __init__(self, system_prompt: str = "", temp: float = 0.15, timeout: int = 1800,
+                 tools_config: Union[List[str], Dict, None] = None):
 
-        base_system = "You are a helpful AI assistant with access to file system tools."
-        if system_prompt:
-            base_system += f"\n\n{system_prompt}"
+        all_names = set(TOOLS_REGISTRY.keys())
+        if tools_config is None or tools_config == "all":
+            active_names = all_names
+        elif isinstance(tools_config, list):
+            active_names = set(tools_config) & all_names
+        elif isinstance(tools_config, dict) and "exclude" in tools_config:
+            active_names = all_names - set(tools_config["exclude"])
+        else:
+            raise ValueError("Invalid tools_config")
 
-        full_system = f"{base_system}\n\n{TOOLS_DESCRIPTION}"
-        self.history.append({"role": "system", "content": full_system})
+        self.tools = {k: v for k, v in TOOLS_REGISTRY.items() if k in active_names}
+        self.history = [{"role": "system", "content": f"{system_prompt}\n\n{gen_tools_desc(self.tools)}"}]
+        self.temp, self.timeout = temp, timeout
+        self._last_assistant_content = None
+        self.call_history: Set[str] = set()
 
-    def _parse_tool_calls(self, content: str) -> List[Dict]:
-        """Ищет ВСЕ блоки <tool>...</tool_call> в ответе."""
-        pattern = r"<tool_call>\s*(.*?)\s*</tool_call>"
+        self.user_commands = {
+            "/regen": self._handle_regen,
+        }
+
+    def _handle_regen(self, num_messages: int = 1) -> str:
+        if len(self.history) >= 2 * num_messages:
+            for _ in range(num_messages):
+                if self.history[-1]["role"] == "user":
+                    self.history.pop()
+                if self.history[-1]["role"] == "assistant":
+                    self.history.pop()
+
+            self._last_assistant_content = None
+            return f"Removed last {num_messages} assistant messages. Ready to regenerate.\nPlease send your request again."
+        else:
+            return "[Regen Error] Not enough history to regenerate."
+
+    def _parse_user_commands(self, content: str) -> Tuple[str|list[str]]:
+        match = re.match(r'^/\w+', content.strip())
+        if match:
+            cmd = match.group(0).lower()
+            if cmd in self.user_commands:
+                return cmd, []
+        return None, []
+
+    def _parse_tools(self, content: str) -> Tuple[List[Dict], List[str]]:
+        valid_tools = []
+        parse_errors = []
+
+        # Паттерн ищет функцию и всё внутри скобок (включая пустоту)
+        pattern = r"(/\w+)\s*\((.*?)\)"
         matches = re.findall(pattern, content, re.DOTALL)
 
-        tools = []
-        for json_str in matches:
+        for func_name, args_str in matches:
+            if func_name not in self.tools:
+                continue
+
             try:
-                tool_data = json.loads(json_str)
-                tools.append(tool_data)
-            except json.JSONDecodeError:
+                parsed_args = []
+
+                if args_str.strip() == "":
+                    parsed_args = []
+                else:
+                    eval_result = ast.literal_eval(f"({args_str},)")
+                    parsed_args = list(eval_result) if isinstance(eval_result, tuple) else [eval_result]
+
+                valid_tools.append({
+                    "name": func_name,
+                    "arguments": parsed_args,
+                    "raw_args": args_str
+                })
+            except (ValueError, SyntaxError) as e:
+                error_msg = f"[Parse Error] Could not parse arguments for '{func_name}': '{args_str}'. Reason: {e}"
+                parse_errors.append(error_msg)
+                print(f"{error_msg}")
                 continue
-        return tools
 
-    def _execute_tool(self, tool_name: str, arguments: Dict) -> str:
-        """Выполняет инструмент."""
-        if tool_name not in AVAILABLE_TOOLS:
-            return f"Error: Unknown tool '{tool_name}'."
+        return valid_tools, parse_errors
 
-        func = AVAILABLE_TOOLS[tool_name]
-        try:
-            result = func(**arguments)
-            return str(result)
-        except TypeError as e:
-            return f"Error: Invalid arguments for tool '{tool_name}': {str(e)}"
-        except Exception as e:
-            return f"Error executing tool: {str(e)}"
+    def chat(self, message: str, max_iter: int = 5, force_think: bool = False) -> str:
+        self.history.append({"role": "user", "content": message})
 
-    def _truncate_text(self, text: str, max_len: int = 80) -> str:
-        """Обрезает текст до max_len символов."""
-        if len(text) <= max_len:
-            return text
-        return text[:max_len] + "..."
+        for iteration in range(max_iter):
+            content, err = call_api(self.history, self.temp, self.timeout, force_think)
+            if err: return f"API Error: {err}"
+            if not content: return "Empty response"
 
-    def _extract_thoughts(self, content: str) -> Tuple[str, str]:
-        """
-        Извлекает блок мыслей <think>...</think>.
-        Возвращает кортеж: (текст_мыслей, очищенный_контент).
-        Если мыслей нет, возвращает ("", исходный_контент).
-        """
-        # Паттерн ищет <think>, затем любое количество символов (нежадно или жадно до первого закрывающего тега), затем </think>
-        # Используем DOTALL, чтобы точка匹配ала переносы строк
-        pattern = r"<think>(.*?)</think>"
-        match = re.search(pattern, content, re.DOTALL)
+            self._last_assistant_content = content
 
-        if match:
-            thoughts = match.group(1).strip()
-            # Удаляем весь блок мыслей из контента
-            clean_content = content[:match.start()] + content[match.end():]
-            return thoughts, clean_content
-        else:
-            return "", content
+            clean_content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL | re.IGNORECASE).strip()
 
-    def chat(self, user_message: str, max_iterations: int = 5, force_thinking_step: bool = False) -> str:
-        self.history.append({"role": "user", "content": user_message})
+            print(f"Agent: {content}")
 
-        current_iteration = 0
-        final_response = ""
+            tool_calls, parse_errors = self._parse_tools(clean_content)
 
-        while current_iteration < max_iterations:
-            current_iteration += 1
+            if tool_calls or parse_errors:
+                self.history.append({"role": "assistant", "content": clean_content})
 
-            content, error = call_api(self.history, self.temperature, self.timeout, thinking=force_thinking_step)
+                results = []
+                execution_errors = []
+                has_skipped_tool = False
 
-            if error:
-                return f"System Error: {error}"
+                if parse_errors:
+                    for err in parse_errors:
+                        execution_errors.append(err)
 
-            if not content:
-                return "Empty response from model."
+                for tc in tool_calls:
+                    name = tc["name"]
+                    args_list = tc.get("arguments", [])
 
-            # 1. ПАРСИНГ МЫСЛЕЙ
-            thoughts, clean_content = self._extract_thoughts(content)
+                    normalized_args = " ".join(str(a) for a in args_list)
+                    call_signature = f"{name}({normalized_args})"
 
-            if thoughts:
-                print("\n" + "="*40)
-                print("[Agent thoughts]")
-                print("-"*40)
-                print(thoughts)
-                print("="*40 + "\n")
+                    is_read_only = not TOOL_METADATA.get(name, {}).get("modifies_state", False)
 
-            # Далее работаем только с очищенным контентом (без мыслей)
-            content_to_process = clean_content
+                    if is_read_only and call_signature in self.call_history:
+                        msg = "[WARNING] Please don't repeat tool calls that are not state modifying with the same arguments"
+                        results.append(f"Tool '{name}':\n{msg}")
+                        has_skipped_tool = True
+                        continue
 
-            tool_calls = self._parse_tool_calls(content_to_process)
+                    print(f"[Tool] Calling {name}{tuple(args_list)}")
 
-            if tool_calls:
-                # 1. Обработка текста ПЕРЕД инструментами
-                first_tool_match = re.search(r"<tool_call>\s*.*?\s*</tool_call>", content_to_process, re.DOTALL)
-                text_before_tools = ""
+                    try:
+                        res = self.tools[name](*args_list)
+                        print(f"[RESULT] {str(res)[:500]}")
+                        results.append(f"Tool '{name}':\n{res}")
+                        self.call_history.add(call_signature)
+                    except Exception as e:
+                        error_msg = f"Runtime Error in {name}: {e}"
+                        print(f"[ERROR] {error_msg}")
+                        execution_errors.append(error_msg)
 
-                if first_tool_match:
-                    text_before_tools = content_to_process[:first_tool_match.start()].strip()
+                feedback_parts = []
+                if results:
+                    feedback_parts.append("--- SUCCESSFUL TOOL OUTPUTS ---")
+                    feedback_parts.extend(results)
+                if execution_errors:
+                    feedback_parts.append("--- ERRORS AND PARSE MESSAGES ---")
+                    feedback_parts.extend(execution_errors)
 
-                # Если есть текст перед инструментами, выводим его и сохраняем в историю
-                if text_before_tools:
-                    print(f"Agent: {text_before_tools}")
-                    self.history.append({"role": "assistant", "content": text_before_tools})
+                final_feedback = "\n".join(feedback_parts)
+                self.history.append({"role": "user", "content": final_feedback})
 
-                # 2. Выполнение всех инструментов
-                tool_results_output = []
-
-                for tool_call in tool_calls:
-                    tool_name = tool_call.get("name")
-                    args = tool_call.get("arguments", {})
-
-                    print(f"[Agent] Calling tool: {tool_name} with args: {args}")
-
-                    raw_result = self._execute_tool(tool_name, args)
-
-                    # Создаем краткую версию для вывода и истории
-                    short_result = self._truncate_text(raw_result, 80)
-
-                    print(f"[Tool Result]: {short_result}")
-
-                    tool_results_output.append(f"Tool '{tool_name}' result:\n{raw_result}")
-
-                # 3. Отправка результатов модели
-                combined_results = "\n\n---\n\n".join(tool_results_output)
-                self.history.append({"role": "user", "content": f"[TOOL OUTPUTS]:\n{combined_results}"})
+                if has_skipped_tool:
+                    print("\n[INFO] Skipped repetitive tool call")
 
                 continue
-            else:
-                # Финальный ответ без инструментов
-                final_response = content_to_process
-                print(f"Agent: {content_to_process}")
-                self.history.append({"role": "assistant", "content": content_to_process})
-                break
 
-        return final_response
+            self.history.append({"role": "assistant", "content": clean_content})
+            return clean_content
 
-# =============================================================================
-# ПРИМЕР ИСПОЛЬЗОВАНИЯ
-# =============================================================================
+        return "Max iterations reached without final answer."
+
+    def regen_last(self) -> str:
+        if not self._last_assistant_content:
+            return "No previous message to regenerate."
+
+        while self.history and self.history[-1]["role"] == "assistant":
+            self.history.pop()
+        if self.history and self.history[-1]["role"] == "user":
+            self.history.pop()
+
+        if self.history:
+            last_content = self.history[-1]["content"] if self.history[-1]["role"] == "user" else None
+            if last_content:
+                self.chat(last_content, force_think=True)
+                return "Regenerated last message."
+        return "Cannot regenerate - no history."
 
 if __name__ == "__main__":
-    agent = LLMAgent(system_prompt="Be concise and accurate when handling file paths.")
-
-    print("=== Агент запущен. Введите команду или 'exit' ===")
+    agent = LLMAgent()
+    print("Ready. Type 'exit' to quit.")
+    print("Special commands: /regen")
 
     while True:
-        user_input = input("\nUser: ")
-        if user_input.lower() in ["exit", "quit"]:
+        inp = input("\nUser: ")
+
+        if inp.startswith("/"):
+            parts = inp.split()
+            cmd = parts[0].lower()
+
+            if cmd == "/regen":
+                n = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 1
+                print(agent._handle_regen(n))
+                continue
+
+            print(f"Unknown command: {cmd}")
+            continue
+
+        if inp.lower() in ("exit", "quit"):
             break
 
-        response = agent.chat(user_input, max_iterations=30, force_thinking_step=True)
+        agent.chat(inp, max_iter=10, force_think=True)
