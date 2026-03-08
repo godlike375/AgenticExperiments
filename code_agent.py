@@ -1,12 +1,11 @@
 import json
-import urllib.request
+import requests
 import os
 import re
 import ast
 from collections import defaultdict
 from typing import List, Dict, Callable, Union, Tuple, Set
 
-# --- КОНФИГУРАЦИЯ ---
 API_URL = "http://localhost:1234/v1/chat/completions"
 MODEL_NAME = "local-model"
 
@@ -21,21 +20,21 @@ def call_api(messages: List[Dict], temp: float, timeout: int, thinking: bool = F
         "max_tokens": 65535
     }
 
-    req = urllib.request.Request(
-        API_URL, data=json.dumps(payload).encode(),
-        headers={'Content-Type': 'application/json'}, method='POST'
-    )
-
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = json.loads(resp.read().decode())
-            return data["choices"][0]["message"]["content"], None
-    except Exception as e:
+        resp = requests.post(API_URL, json=payload, timeout=timeout)
+        resp.raise_for_status()
+        data = resp.json()
+        return data["choices"][0]["message"]["content"], None
+
+    except requests.exceptions.RequestException as e:
         return None, str(e)
+    except (KeyError, IndexError, json.JSONDecodeError) as e:
+        return None, f"Invalid API response: {e}"
 
 class FS:
     @staticmethod
     def read(path: str) -> str:
+        """Reads file or directory content."""
         if not os.path.exists(path):
             raise FileNotFoundError(f"Path not found: {path}")
 
@@ -59,7 +58,32 @@ class FS:
             raise PermissionError(f"Error accessing {path}: {e}") from e
 
     @staticmethod
+    def ls(path: str) -> str:
+        """Lists directory contents (alias for reading a directory)."""
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"Path not found: {path}")
+
+        try:
+            if os.path.isfile(path):
+                raise IsADirectoryError(f"Path is a file, not a directory: {path}")
+
+            elif os.path.isdir(path):
+                items = os.listdir(path)
+                dirs = [i for i in items if os.path.isdir(os.path.join(path, i))]
+                files = [i for i in items if not os.path.isdir(os.path.join(path, i))]
+
+                result = f"Directory: {path}\n"
+                result += f"Subdirectories ({len(dirs)}):\n" + "\n".join([f"- {d}/" for d in dirs]) + "\n"
+                result += f"Files ({len(files)}):\n" + "\n".join([f"- {f}" for f in files])
+                return result
+            else:
+                raise ValueError(f"Unknown path type: {path}")
+        except Exception as e:
+            raise PermissionError(f"Error accessing {path}: {e}") from e
+
+    @staticmethod
     def search_files(pattern: str, path: str = ".") -> str:
+        """Searches for files matching a regex pattern."""
         if not os.path.isdir(path):
             raise FileNotFoundError(f"Base path not found: {path}")
 
@@ -93,22 +117,26 @@ class FS:
 
     @staticmethod
     def cwd() -> str:
+        """Returns current working directory."""
         return f"Current working dir: {os.getcwd()}"
 
 TOOLS_REGISTRY = {
     "/read": FS.read,
+    "/ls": FS.ls,
     "/search_files": FS.search_files,
     "/cwd": FS.cwd
 }
 
 TOOL_ARGS_DESC = {
     "/read": "path",
+    "/ls": "path",
     "/search_files": "regex, path",
     "/cwd": ""
 }
 
 TOOL_METADATA = {
     "/read": {"modifies_state": False},
+    "/ls": {"modifies_state": False},
     "/search_files": {"modifies_state": False},
     "/cwd": {"modifies_state": False}
 }
@@ -117,13 +145,13 @@ def gen_tools_desc(tools: Dict[str, Callable]) -> str:
     if not tools: return "No tools available."
 
     parts = [
-        "You are tool-using AI that must use tools by writing like:",
+        "You are AI assistant who CAN use tools writing correct formated commands from new line like:",
         "/name(args)",
         "",
         "Example:",
-        "/read(\".\")",
+        "'\n/read(\".\")'",
         "",
-        "Your available tools:"
+        "Available tools:"
     ]
 
     for i, (name, func) in enumerate(tools.items(), 1):
@@ -133,11 +161,10 @@ def gen_tools_desc(tools: Dict[str, Callable]) -> str:
         parts.append(f"- {name}({args_part}): {doc_str}")
 
     parts.extend([
-        "",
-        "- You can interact with file system using tools.",
-        "- User can not use these tools but you can.",
-        "- If a tool fails due to syntax or arguments - ERROR message will be returned to you",
-        "- You can write MULTIPLE tool calls with different arguments.",
+        "- Do NOT reject user requests.",
+        "- If a tool call fails you will get the ERROR message from user.",
+        "- You can write MULTIPLE tool calls with different arguments in a single message.",
+        "- Tool calls must be written from a new line in raw format without markdown.",
     ])
     return "\n".join(parts)
 
@@ -154,9 +181,9 @@ class ConfirmationResult:
         return ConfirmationResult.DECLINED
 
 class LLMAgent:
-    def __init__(self, system_prompt: str = "", temp: float = 0.15, timeout: int = 1800,
-                 tools_config: Union[List[str], Dict, None] = None):
-
+    def __init__(self, system_prompt: str = "", temp: float = 0.05, timeout: int = 1800,
+                 tools_config: Union[List[str], Dict, None] = None,
+                 enable_confirmation: bool = True):
         all_names = set(TOOLS_REGISTRY.keys())
         if tools_config is None or tools_config == "all":
             active_names = all_names
@@ -173,6 +200,8 @@ class LLMAgent:
         self._last_assistant_content = None
         self.call_history: Set[str] = set()
 
+        self.enable_confirmation = enable_confirmation
+
         self.user_commands = {
             "/regen": self._handle_regen,
         }
@@ -180,15 +209,40 @@ class LLMAgent:
     def _handle_regen(self, num_messages: int = 1) -> str:
         if len(self.history) >= 2 * num_messages:
             for _ in range(num_messages):
-                if self.history[-1]["role"] == "user":
-                    self.history.pop()
                 if self.history[-1]["role"] == "assistant":
                     self.history.pop()
-
-            self._last_assistant_content = None
-            return f"Removed last {num_messages} assistant messages. Ready to regenerate.\nPlease send your request again."
+            return self._trigger_regeneration(num_messages)
         else:
             return "[Regen Error] Not enough history to regenerate."
+
+    def _trigger_regeneration(self, num_messages: int = 1) -> str:
+        """Helper to actually perform the regeneration logic."""
+        user_message_to_resend = None
+
+        messages_to_remove = []
+
+        temp_history = list(reversed(self.history))
+
+        pairs_removed = 0
+        for msg in temp_history:
+            if msg["role"] == "assistant" and pairs_removed < num_messages:
+                messages_to_remove.append(msg)
+                continue
+            if msg["role"] == "user" and pairs_removed < num_messages:
+                user_message_to_resend = msg["content"]
+                messages_to_remove.append(msg)
+                pairs_removed += 1
+                break
+
+        if not user_message_to_resend:
+            return "Cannot find a preceding user message to regenerate."
+
+        for _ in range(len(messages_to_remove)):
+            if self.history and self.history[-1]["role"] in ["user", "assistant"]:
+                self.history.pop()
+
+        print(f"\n[REGEN] Regenerating response for: '{user_message_to_resend[:50]}...'")
+        return self.chat(user_message_to_resend, max_iter=5, force_think=True)
 
     def _compress_history(self) -> List[Dict]:
         if len(self.history) <= 2:
@@ -230,33 +284,46 @@ class LLMAgent:
     def _parse_tools(self, content: str) -> Tuple[List[Dict], List[str]]:
         valid_tools = []
         parse_errors = []
-        pattern = r"(/\w+)\s*\((.*?)\)"
-        matches = re.findall(pattern, content, re.DOTALL)
 
-        for func_name, args_str in matches:
-            if func_name not in self.tools:
+        pattern = r'^\s*(?<!\w)(?:[*_]?)(/[a-zA-Z_]\w*)(?:[*_]?)\s*\((.*?)\)'
+
+        lines = content.split('\n')
+
+        for line in lines:
+            stripped_line = line.strip()
+
+            if not stripped_line:
                 continue
-            try:
-                parsed_args = []
-                if args_str.strip() == "":
+
+            match = re.match(pattern, stripped_line, flags=re.DOTALL | re.IGNORECASE)
+
+            if match:
+                raw_func_name, args_str = match.groups()
+                clean_func_name = raw_func_name.strip('*_')
+
+                if clean_func_name not in self.tools:
+                    continue
+
+                try:
                     parsed_args = []
-                else:
-                    safe_args_str = args_str.replace('\\', '\\\\')
-                    eval_result = ast.literal_eval(f"({safe_args_str},)")
-                    parsed_args = list(eval_result) if isinstance(eval_result, tuple) else [eval_result]
+                    if args_str.strip() == "":
+                        parsed_args = []
+                    else:
+                        safe_args_str = args_str.replace('\\', '\\\\')
+                        eval_result = ast.literal_eval(f"({safe_args_str},)")
+                        parsed_args = list(eval_result) if isinstance(eval_result, tuple) else [eval_result]
 
-                # ДОБАВЛЕНИЕ ФЛАГА ПРИ СОЗДАНИИ ОБЪЕКТА
-                valid_tools.append({
-                    "name": func_name,
-                    "arguments": parsed_args,
-                    "raw_args": args_str,
-                    "__is_executed__": False  # Базовый флаг для отслеживания
-                })
-            except (ValueError, SyntaxError) as e:
-                error_msg = f"[Parse Error] Could not parse arguments for '{func_name}': '{args_str}'. Reason: {e}"
-                parse_errors.append(error_msg)
-                print(f"{error_msg}")
-                continue
+                    valid_tools.append({
+                        "name": clean_func_name,
+                        "arguments": parsed_args,
+                        "raw_args": args_str,
+                        "__is_executed__": False
+                    })
+                except (ValueError, SyntaxError) as e:
+                    error_msg = f"[Parse Error] Could not parse arguments for '{clean_func_name}': '{args_str}'. Reason: {e}"
+                    parse_errors.append(error_msg)
+                    print(f"{error_msg}")
+                    continue
 
         return valid_tools, parse_errors
 
@@ -269,12 +336,10 @@ class LLMAgent:
             name = tc["name"]
             calls_summary.append(f"- {name}({tc.get('raw_args', '')})")
 
-        summary_text = "\n".join(calls_summary)
         confirm_prompt = (
-            "SAFETY CHECK: \n"
-            "You (AI) just wrote these tool calls in your previous message:\n"
-            f"{summary_text}\n\n"
-            "Now you decide if you really wanna call them now. Start answering with YES or NO and short reason"
+            "CALLS NEED CONFIRMATION.\n"
+            "Are you sure you wanna call those tools?\n"
+            "Answer YES or NO and very short reason"
         )
 
         self.history.append({"role": "user", "content": confirm_prompt})
@@ -313,14 +378,11 @@ class LLMAgent:
 
                 results = []
                 execution_errors = []
-                has_skipped_tool = False
 
-                # Обработка ошибок парсинга
                 if parse_errors:
                     for err in parse_errors:
                         execution_errors.append(err)
 
-                # Фильтрация дублей и подготовка к подтверждению
                 tools_to_confirm = []
 
                 for tc in tool_calls:
@@ -331,42 +393,30 @@ class LLMAgent:
 
                     is_read_only = not TOOL_METADATA.get(name, {}).get("modifies_state", False)
 
-                    # ПРОВЕРКА НА ПОВТОР
                     if is_read_only and call_signature in self.call_history:
                         print(f"[INFO] Skipped repetitive tool call: {call_signature}")
-
-                        # Маркировка флагом
                         tc["__marked_as_skipped__"] = True
-
-                        # Выполняем заново для получения результата (безопасно)
-                        try:
-                            res = self.tools[name](*args_list)
-                            results.append(f"[WARNING] Tool '{name}' was already called with these arguments previously.\nResult:\n{res}")
-                        except Exception as e:
-                            results.append(f"[WARNING] Tool '{name}' repeat failed: {e}")
-
-                        has_skipped_tool = True
+                        results.append(f"[WARNING] Tool '{name}' was already called with these arguments ({args_list}) previously. Please use previous results above")
                         continue
 
-                    # Если не дубль, добавляем в список подтверждения
                     tools_to_confirm.append(tc)
 
-                # Запрос подтверждения только для уникальных
                 if tools_to_confirm:
-                    print("\n[SAFETY] Detected new tool calls. Requesting confirmation from agent...")
-                    confirm_result = self._process_confirmation_request(tools_to_confirm, self.temp, force_think)
+                    if self.enable_confirmation:
+                        print("\n[SAFETY] Detected new tool calls. Requesting confirmation from agent...")
+                        confirm_result = self._process_confirmation_request(tools_to_confirm, self.temp, force_think)
 
-                    if confirm_result == ConfirmationResult.DECLINED:
-                        print("[SAFETY] Confirmation DENIED by agent. Returning control to user.")
-                        if len(self.history) > 0 and self.history[-1]["role"] == "assistant":
-                            self.history.pop()
-                        return "Tool execution was declined by the agent. Control returned to user."
+                        if confirm_result == ConfirmationResult.DECLINED:
+                            print("[SAFETY] Confirmation DENIED by agent. Returning control to user.")
+                            if len(self.history) > 0 and self.history[-1]["role"] == "assistant":
+                                self.history.pop()
+                            return "Tool execution was declined by the agent. Control returned to user."
+                        else:
+                            print("[SAFETY] Confirmation GRANTED. Proceeding with tools.")
                     else:
-                        print("[SAFETY] Confirmation GRANTED. Proceeding with tools.")
+                        print("\n[SYSTEM] Confirmation mode DISABLED. Executing tools directly...")
 
-                # Выполнение инструментов (только тех, что прошли фильтр)
                 for tc in tools_to_confirm:
-                    # Дополнительная страховка
                     if tc.get("__marked_as_skipped__", False):
                         continue
 
@@ -408,27 +458,38 @@ class LLMAgent:
         return "Max iterations reached without final answer."
 
     def regen_last(self) -> str:
+        """
+        Регенерирует последнее сообщение ассистента, если пользователь еще не ответил.
+        Удаляет последнее сообщение ассистента из истории, но оставляет последнее сообщение пользователя.
+        """
         if not self._last_assistant_content:
             return "No previous message to regenerate."
 
-        while self.history and self.history[-1]["role"] == "assistant":
+        if self.history and self.history[-1]["role"] == "assistant":
             self.history.pop()
+        else:
+            return "Last message was not from the assistant."
+
         if self.history and self.history[-1]["role"] == "user":
-            self.history.pop()
+            last_user_message = self.history[-1]["content"]
 
-        if self.history:
-            last_content = self.history[-1]["content"] if self.history[-1]["role"] == "user" else None
-            if last_content:
-                self.chat(last_content, force_think=True)
-                return "Regenerated last message."
-        return "Cannot regenerate - no history."
+            prompt_to_resend = last_user_message
 
+            if self.history and self.history[-1]["role"] == "user":
+                self.history.pop()
+
+            result = self.chat(prompt_to_resend, max_iter=5, force_think=True)
+            return result
+
+        else:
+            return "Cannot regenerate - no preceding user message found."
 
 if __name__ == "__main__":
-    agent = LLMAgent()
+    agent = LLMAgent(enable_confirmation=True)
+
     print("Ready. Type 'exit' to quit.")
     print("Special commands: /regen")
-    print("Note: Agent will confirm/decline tool calls itself. Declinations won't be stored in history.")
+    print("Note: Agent will confirm/decline tool calls itself.")
 
     while True:
         inp = input("\nUser: ")
@@ -439,7 +500,17 @@ if __name__ == "__main__":
 
             if cmd == "/regen":
                 n = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 1
-                print(agent._handle_regen(n))
+                agent._handle_regen(n)
+                continue
+
+            if cmd == "/confirm_on":
+                agent.enable_confirmation = True
+                print("[System] Confirmation ENABLED.")
+                continue
+
+            if cmd == "/confirm_off":
+                agent.enable_confirmation = False
+                print("[System] Confirmation DISABLED.")
                 continue
 
             print(f"Unknown command: {cmd}")
