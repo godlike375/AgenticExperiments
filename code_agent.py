@@ -128,9 +128,9 @@ TOOLS_REGISTRY = {
 }
 
 TOOL_ARGS_DESC = {
-    "/read": "path",
-    "/ls": "path",
-    "/search_files": "regex, path",
+    "/read": '"path"',
+    "/ls": '"path"',
+    "/search_files": '"regex", "path"',
     "/cwd": ""
 }
 
@@ -145,11 +145,11 @@ def gen_tools_desc(tools: Dict[str, Callable]) -> str:
     if not tools: return "No tools available."
 
     parts = [
-        "You are AI assistant who CAN use tools writing correct formated commands from new line like:",
-        "/name(args)",
+        "You are AI who CAN use tools writing correct formated commands from new line like:",
+        "/name(\"arg1\", ...)",
         "",
-        "Example:",
-        "'\n/read(\".\")'",
+        "For example:",
+        '"\n/read(".")"',
         "",
         "Available tools:"
     ]
@@ -163,7 +163,7 @@ def gen_tools_desc(tools: Dict[str, Callable]) -> str:
     parts.extend([
         "- Do NOT reject user requests.",
         "- If a tool call fails you will get the ERROR message from user.",
-        "- You can write MULTIPLE tool calls with different arguments in a single message.",
+        "- You can write MULTIPLE tool calls with different arguments in a single message but to execute them you have to end your turn.",
         "- Tool calls must be written from a new line in raw format without markdown.",
     ])
     return "\n".join(parts)
@@ -181,9 +181,9 @@ class ConfirmationResult:
         return ConfirmationResult.DECLINED
 
 class LLMAgent:
-    def __init__(self, system_prompt: str = "", temp: float = 0.05, timeout: int = 1800,
+    def __init__(self, system_prompt: str = "", temp: float = 0.4, timeout: int = 1800,
                  tools_config: Union[List[str], Dict, None] = None,
-                 enable_confirmation: bool = True):
+                 enable_confirmation: bool = False):
         all_names = set(TOOLS_REGISTRY.keys())
         if tools_config is None or tools_config == "all":
             active_names = all_names
@@ -201,6 +201,7 @@ class LLMAgent:
         self.call_history: Set[str] = set()
 
         self.enable_confirmation = enable_confirmation
+        self.force_think_default = False
 
         self.user_commands = {
             "/regen": self._handle_regen,
@@ -261,7 +262,7 @@ class LLMAgent:
 
         dump_lines = ["--- DIALOG HISTORY ---"]
         for msg in intermediate:
-            role_label = "User" if msg["role"] == "user" else "AI-assistant"
+            role_label = "User" if msg["role"] == "user" else "AI"
             dump_lines.append(f"{role_label}: {msg['content']}")
             dump_lines.append("---")
 
@@ -352,7 +353,10 @@ class LLMAgent:
         print(f"\n[CONFIRMATION RESPONSE]: {confirm_content}")
         return ConfirmationResult.check(confirm_content)
 
-    def chat(self, message: str, max_iter: int = 5, force_think: bool = False) -> str:
+    def chat(self, message: str, max_iter: int = 5, force_think: bool = None) -> str:
+        if force_think is None:
+            force_think = self.force_think_default
+
         self.history.append({"role": "user", "content": message})
 
         for iteration in range(max_iter):
@@ -413,8 +417,6 @@ class LLMAgent:
                             return "Tool execution was declined by the agent. Control returned to user."
                         else:
                             print("[SAFETY] Confirmation GRANTED. Proceeding with tools.")
-                    else:
-                        print("\n[SYSTEM] Confirmation mode DISABLED. Executing tools directly...")
 
                 for tc in tools_to_confirm:
                     if tc.get("__marked_as_skipped__", False):
@@ -485,10 +487,10 @@ class LLMAgent:
             return "Cannot regenerate - no preceding user message found."
 
 if __name__ == "__main__":
-    agent = LLMAgent(enable_confirmation=True)
+    agent = LLMAgent()
 
     print("Ready. Type 'exit' to quit.")
-    print("Special commands: /regen")
+    print("Special commands: /regen, /think_on, /think_off, /confirm_on, /confirm_off")
     print("Note: Agent will confirm/decline tool calls itself.")
 
     while True:
@@ -512,6 +514,15 @@ if __name__ == "__main__":
                 agent.enable_confirmation = False
                 print("[System] Confirmation DISABLED.")
                 continue
+            if cmd == "/think_on":
+                agent.force_think_default = True
+                print("[System] Force think ENABLED - model will use <think> reasoning.")
+                continue
+
+            if cmd == "/think_off":
+                agent.force_think_default = False
+                print("[System] Force think DISABLED - model will skip <think> block.")
+                continue
 
             print(f"Unknown command: {cmd}")
             continue
@@ -519,4 +530,4 @@ if __name__ == "__main__":
         if inp.lower() in ("exit", "quit"):
             break
 
-        agent.chat(inp, max_iter=5, force_think=True)
+        agent.chat(inp, max_iter=15)
