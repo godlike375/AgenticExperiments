@@ -21,7 +21,7 @@ def call_api(messages: List[Dict], temp: float, timeout: int, thinking: bool = F
         "model": MODEL_NAME,
         "messages": messages,
         "temperature": temp,
-        "max_tokens": 65535
+        "max_tokens": 11500
     }
 
     try:
@@ -81,7 +81,7 @@ def _count_hidden_size(root_path: str) -> int:
 
 
 def _build_tree(root_path: str, current_depth: int = 0) -> str:
-    DENSITY_LIMIT = 7
+    DENSITY_LIMIT = 4
     result_lines = []
 
     try:
@@ -97,7 +97,7 @@ def _build_tree(root_path: str, current_depth: int = 0) -> str:
         indent = '  ' * current_depth
         hidden_size_bytes = _count_hidden_size(root_path)
         size_str = _format_size(hidden_size_bytes)
-        return f"{indent}[TRUNCATED: Dir has {total_count} items (>{DENSITY_LIMIT}), size: {size_str}]"
+        return f"{indent}[{total_count} nested items were TRUNCATED, size={size_str}]"
 
     dirs = [e for e in entries if e.is_dir()]
     files = [e for e in entries if e.is_file()]
@@ -127,7 +127,7 @@ def _build_tree(root_path: str, current_depth: int = 0) -> str:
 
 class FS:
     @staticmethod
-    def ls_read(path: str) -> str:
+    def open(path: str) -> str:
         """Gets file or directory content."""
         if not os.path.exists(path):
             raise FileNotFoundError(f"Path not found: {path}")
@@ -152,7 +152,7 @@ class FS:
                     _, ext = os.path.splitext(path)
                     return f"Error reading file {path}: Access denied. Cannot read binary files (failed UTF-8 decode)"
 
-                return f"File: {path}\nModified: {mtime}\nSize: {size} bytes\nContent:\n{content}"
+                return f"File: {path}\nModified: {mtime}\nContent:\n---\n{content}"
 
             elif os.path.isdir(path):
                 tree_content = _build_tree(path, 0)
@@ -206,10 +206,10 @@ class FS:
 
 TOOLS_CONFIG = {
     "read_group": ToolDefinition(
-        func=FS.ls_read,
+        func=FS.open,
         args_desc='"path"',
         metadata={"modifies_state": False, "type": "read"},
-        aliases=["/open", "/ls"]
+        aliases=["/open"]
     ),
     "/search_files": ToolDefinition(
         func=FS.search_files,
@@ -234,9 +234,9 @@ def gen_tools_desc(tools_config: Dict[str, ToolDefinition]) -> str:
         "/name(\"arg1\", ...)",
         "",
         "For example:",
-        '"\n/read(".")"',
+        '"\n/open(".")"',
         "",
-        "Available tools:"
+        "All your tools:"
     ]
 
     seen_funcs = set()
@@ -256,13 +256,14 @@ def gen_tools_desc(tools_config: Dict[str, ToolDefinition]) -> str:
 
         parts.append(f"- {names_str}({args_part}): {doc_str}")
 
-    parts.extend([
-        "If a tool call fails you will get the ERROR message from tool via user.",
-        "You can write MULTIPLE tool calls with different arguments at the end of a single message.",
-        "Tool calls must be written from a new line in raw format without markdown.",
-        "To show full content of truncated items make individual /ls() on them"
-    ])
     return "\n".join(parts)
+    parts.extend([
+        "If a tool call fails you will get the ERROR from tool via user.",
+        "You can write up to 3 tool calls with different args in a single message.",
+        "Each tool call must be on a new line without markdown or anything extra.",
+        "To show full content of truncated items make individual call on them."
+        "Use single '/' in paths."
+    ])
 
 
 class ConfirmationResult:
@@ -283,13 +284,13 @@ class ConfirmationResult:
     def check_retention(content: str) -> str:
         if not content:
             return ConfirmationResult.DISCARD
-        if content.upper().startswith("YES"):
+        if content.strip().upper().startswith("SAVE"):
             return ConfirmationResult.KEEP
         return ConfirmationResult.DISCARD
 
 
 class LLMAgent:
-    def __init__(self, system_prompt: str = "", temp: float = 0.4, timeout: int = 1800,
+    def __init__(self, system_prompt: str = "", temp: float = 0.65, timeout: int = 1800,
                  tools_config: Union[List[str], Dict, None] = None,
                  enable_confirmation: bool = False):
 
@@ -324,7 +325,8 @@ class LLMAgent:
         self.history = [{"role": "system", "content": f"{system_prompt}\n\n{gen_tools_desc(active_config_subset)}"}]
         self.temp, self.timeout = temp, timeout
         self._last_assistant_content = None
-        self.call_history: Set[str] = set()
+
+        self.confirmed_reads: Set[str] = set()
 
         self.enable_confirmation = enable_confirmation
         self.force_think_default = False
@@ -465,11 +467,24 @@ class LLMAgent:
         confirm_prompt = (
             "CALLS NEED CONFIRMATION.\n"
             "Are you sure you wanna call those tools?\n"
-            "Say YES or NO"
+            "Say only YES or NO"
         )
         confirm_content = self._query_agent_decision(confirm_prompt, context_data="\n".join(calls_summary), force_think=force_think)
 
         return ConfirmationResult.check(confirm_content)
+
+    def _get_canonical_name_and_signature(self, name: str, args_list: List[Any]) -> Tuple[str, str]:
+        target_func = self.tools_registry.get(name)
+        canonical_name = name
+        if target_func:
+            for alias, func in self.alias_map.items():
+                if func == target_func:
+                    canonical_name = alias
+                    break
+
+        normalized_args = " ".join(str(a) for a in args_list)
+        call_signature = f"{canonical_name}({normalized_args})"
+        return canonical_name, call_signature
 
     def chat(self, message: str, max_iter: int = 5, force_think: bool = None) -> str:
         if force_think is None:
@@ -506,37 +521,35 @@ class LLMAgent:
                         execution_errors.append(err)
 
                 tools_to_confirm = []
+                skipped_results = []
+
+                seen_in_current_batch = set()
 
                 for tc in tool_calls:
                     name = tc["name"]
                     args_list = tc.get("arguments", [])
-                    normalized_args = " ".join(str(a) for a in args_list)
 
-                    target_func = self.tools_registry.get(name)
-                    if not target_func:
-                        continue
+                    canonical_name, call_signature = self._get_canonical_name_and_signature(name, args_list)
 
-                    canonical_name = None
-                    for alias, func in self.alias_map.items():
-                        if func == target_func:
-                            canonical_name = alias
-                            break
-
-                    if canonical_name is None:
-                        canonical_name = name
-
-                    call_signature = f"{canonical_name}({normalized_args})"
-
-                    is_read_only = not self.tools_metadata.get(name, {}).get("modifies_state", False)
-
-                    if is_read_only and call_signature in self.call_history:
-                        print(f"[INFO] Skipped repetitive tool call: {call_signature}")
+                    if call_signature in self.confirmed_reads:
+                        print(f"[INFO] Skipped globally confirmed read: {call_signature}")
                         tc["__marked_as_skipped__"] = True
-                        results.append(
-                            f"[WARNING] Tool '{name}' (alias for {canonical_name}) was already called with these arguments ({args_list}) previously. Please use previous results above")
+                        skipped_results.append(
+                            f"[WARNING] Tool '{name}' (alias for {canonical_name}) was already processed and content kept in memory. No need to reopen.")
                         continue
 
+                    if call_signature in seen_in_current_batch:
+                        print(f"[INFO] Skipped repetitive tool call within same message: {call_signature}")
+                        tc["__marked_as_skipped__"] = True
+                        skipped_results.append(
+                            f"[WARNING] Tool '{name}' (alias for {canonical_name}) was already called with these arguments ({args_list}) in this message. Skipping duplicate execution.")
+                        continue
+
+                    seen_in_current_batch.add(call_signature)
                     tools_to_confirm.append(tc)
+
+                if skipped_results:
+                    results.extend(skipped_results)
 
                 if tools_to_confirm:
                     if self.enable_confirmation:
@@ -558,6 +571,8 @@ class LLMAgent:
                     name = tc["name"]
                     args_list = tc.get("arguments", [])
 
+                    canonical_name, call_signature = self._get_canonical_name_and_signature(name, args_list)
+
                     print(f"[Tool] Calling {name}{tuple(args_list)}")
 
                     try:
@@ -566,24 +581,23 @@ class LLMAgent:
                         tool_meta = self.tools_metadata.get(name, {})
                         is_file_read = tool_meta.get("type") == "read"
 
-                        should_add_to_history = True
+                        final_result_text = full_result
+                        should_add_to_global_history = False
 
                         if is_file_read and isinstance(full_result, str) and full_result.startswith("File:"):
                             lines = full_result.split('\n', 3)
                             if len(lines) >= 4 and lines[0].startswith("File:"):
                                 file_path_line = lines[0]
                                 file_path = file_path_line.replace("File: ", "").strip()
-
                                 content_start_marker = "\nContent:\n"
                                 marker_pos = full_result.find(content_start_marker)
 
                                 if marker_pos != -1:
                                     full_file_content = full_result[marker_pos + len(content_start_marker):]
-
                                     decision_prompt = (
                                         f"This is '{file_path}' content sent to you by tool.\n"
-                                        f"Is this file relevant for answering user request?\n"
-                                        f"Say YES or NO. Saying NO you will forget the text"
+                                        f"Is this content useful to remember?\n"
+                                        f"Say only SAVE or FORGET and end your message."
                                     )
 
                                     decision_response = self._query_agent_decision(
@@ -595,12 +609,11 @@ class LLMAgent:
                                     decision = ConfirmationResult.check_retention(decision_response)
 
                                     if decision == ConfirmationResult.KEEP:
-                                        print(f"[RETENTION] Agent decided to KEEP full content of {file_path} in context.")
+                                        print(f"[RETENTION] Agent decided to KEEP full content of {file_path}. Adding to global blocklist.")
                                         final_result_text = full_result
+                                        should_add_to_global_history = True
                                     else:
-                                        print(f"[RETENTION] Agent decided to DISCARD full content of {file_path}.")
-
-                                        should_add_to_history = False
+                                        print(f"[RETENTION] Agent decided to DISCARD full content of {file_path}. reopen allowed later.")
 
                                         stat_info = os.stat(file_path)
                                         mtime = datetime.datetime.fromtimestamp(stat_info.st_mtime).strftime("%Y-%m-%d %H:%M:%S")
@@ -608,9 +621,8 @@ class LLMAgent:
                                         final_result_text = (
                                             f"File: {file_path}\n"
                                             f"Modified: {mtime}\n"
-                                            f"Size: {size} bytes\n"
-                                            f"[CONTENT DISCARDED BY AI]\n"
-                                            f"The full text was removed to save memory. If you need it later pls reopen the file."
+                                            f"[CONTENT LOADING DISCARDED BY AI]\n"
+                                            f"Text was removed to save memory. You can reopen file if you need it later."
                                         )
                                 else:
                                     final_result_text = full_result
@@ -622,20 +634,8 @@ class LLMAgent:
                         print(f"[RESULT] {str(final_result_text)[:2000]}")
                         results.append(f"Tool '{name}' Result:\n{final_result_text}")
 
-                        target_func = self.tools_registry.get(name)
-                        canonical_name = name
-                        for alias, func in self.alias_map.items():
-                            if func == target_func:
-                                canonical_name = alias
-                                break
-
-                        normalized_args = " ".join(str(a) for a in args_list)
-                        call_signature = f"{canonical_name}({normalized_args})"
-
-                        if should_add_to_history:
-                            self.call_history.add(call_signature)
-                        else:
-                            print(f"[INFO] Call '{call_signature}' NOT added to history (content discarded), allowing retry.")
+                        if should_add_to_global_history:
+                            self.confirmed_reads.add(call_signature)
 
                         tc["__is_executed__"] = True
 
@@ -681,7 +681,7 @@ class LLMAgent:
 
 
 if __name__ == "__main__":
-    agent = LLMAgent()
+    agent = LLMAgent(tools_config={"exclude": ["/search_files"]})
     print("Ready. Type 'exit' to quit.")
     print("Special commands: /regen, /think_on, /think_off, /confirm_on, /confirm_off")
     while True:
