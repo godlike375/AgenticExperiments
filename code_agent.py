@@ -17,13 +17,13 @@ def call_api(messages: List[Dict], temp: float, timeout: int, thinking: bool = F
     if not thinking:
         messages.append({"role": "assistant", "content": "</think>\n\n"})
 
+
     payload = {
         "model": MODEL_NAME,
         "messages": messages,
         "temperature": temp,
         "max_tokens": 11500
     }
-
     try:
         resp = requests.post(API_URL, json=payload, timeout=timeout)
         resp.raise_for_status()
@@ -109,7 +109,7 @@ def _build_tree(root_path: str, current_depth: int = 0) -> str:
     for entry in items_to_show:
         stat_info = entry.stat()
         mtime = datetime.datetime.fromtimestamp(stat_info.st_mtime).strftime("%Y-%m-%d")
-        prefix = f"{'  ' * current_depth}- "
+        prefix = f"{'  ' * current_depth}"
 
         if entry.is_dir():
             line_str = f"{prefix}{entry.name}/ ({mtime})"
@@ -230,13 +230,13 @@ def gen_tools_desc(tools_config: Dict[str, ToolDefinition]) -> str:
     if not tools_config:
         return "No tools available."
     parts = [
-        "You are AI who CAN use tools writing correct formated commands from new line like:",
-        "/name(\"arg1\", ...)",
+        "You are a special AI that uses tools writing correct commands from new line as:",
+        "\n/name(\"arg1\", ...)",
         "",
-        "For example:",
-        '"\n/open(".")"',
+        "Aka:",
+        '"\n/open("./")"',
         "",
-        "All your tools:"
+        "All available tools:"
     ]
 
     seen_funcs = set()
@@ -258,11 +258,11 @@ def gen_tools_desc(tools_config: Dict[str, ToolDefinition]) -> str:
 
     return "\n".join(parts)
     parts.extend([
-        "If a tool call fails you will get the ERROR from tool via user.",
-        "You can write up to 3 tool calls with different args in a single message.",
-        "Each tool call must be on a new line without markdown or anything extra.",
-        "To show full content of truncated items make individual call on them."
-        "Use single '/' in paths."
+        "NEVER show usage examples of your tools."
+        "AI can write up to 4 tool calls in 1 message.",
+        "Each tool must be on new line in raw text format.",
+        "To show content of truncated items call them individually."
+        "Use '/' in paths."
     ])
 
 
@@ -367,7 +367,7 @@ class LLMAgent:
                 self.history.pop()
 
         print(f"\n[REGEN] Regenerating response for: '{user_message_to_resend}'")
-        return self.chat(user_message_to_resend, max_iter=5, force_think=True)
+        return self.chat(user_message_to_resend, max_iter=5)
 
     def _compress_history(self) -> List[Dict]:
         if len(self.history) <= 2:
@@ -379,10 +379,10 @@ class LLMAgent:
         intermediate = self.history[1:-1]
         if not intermediate:
             return self.history
-        dump_lines = ["--- DIALOG HISTORY ---"]
+        dump_lines = ["--- FULL DIALOG HISTORY ---"]
         for msg in intermediate:
             role_label = "User" if msg["role"] == "user" else "AI"
-            dump_lines.append(f"{role_label}: {msg['content']}")
+            dump_lines.append(f"{role_label}: \"{msg['content']}\"\n")
             dump_lines.append("---")
         history_dump = "\n".join(dump_lines)
         combined_content = f"{history_dump}\nUser:{last_msg['content']}"
@@ -443,7 +443,7 @@ class LLMAgent:
         user_content = ""
         if context_data:
             user_content += context_data
-        user_content += f"{prompt_question}"
+        user_content += prompt_question
 
         temp_messages.append({"role": "user", "content": user_content})
 
@@ -581,8 +581,9 @@ class LLMAgent:
                         tool_meta = self.tools_metadata.get(name, {})
                         is_file_read = tool_meta.get("type") == "read"
 
-                        final_result_text = full_result
                         should_add_to_global_history = False
+                        important = '[IMPORTANT]'
+                        question = 'Is this content useful to remember?\nSay only SAVE or FORGET. Nothing else. No comms. Plain text!'
 
                         if is_file_read and isinstance(full_result, str) and full_result.startswith("File:"):
                             lines = full_result.split('\n', 3)
@@ -593,11 +594,9 @@ class LLMAgent:
                                 marker_pos = full_result.find(content_start_marker)
 
                                 if marker_pos != -1:
-                                    full_file_content = full_result[marker_pos + len(content_start_marker):]
+                                    full_file_content = '```\n'+full_result[marker_pos + len(content_start_marker):]
                                     decision_prompt = (
-                                        f"This is '{file_path}' content sent to you by tool.\n"
-                                        f"Is this content useful to remember?\n"
-                                        f"Say only SAVE or FORGET and end your message."
+                                        f"\n```\n{important} This is '{file_path}' content sent to you by tool.\n{question}"
                                     )
 
                                     decision_response = self._query_agent_decision(
@@ -621,8 +620,8 @@ class LLMAgent:
                                         final_result_text = (
                                             f"File: {file_path}\n"
                                             f"Modified: {mtime}\n"
-                                            f"[CONTENT LOADING DISCARDED BY AI]\n"
-                                            f"Text was removed to save memory. You can reopen file if you need it later."
+                                            f"[You (AI) cancelled file loading by saying 'FORGET']\n"
+                                            f"You can reopen file again if you mistook."
                                         )
                                 else:
                                     final_result_text = full_result
@@ -674,7 +673,7 @@ class LLMAgent:
             prompt_to_resend = last_user_message
             if self.history and self.history[-1]["role"] == "user":
                 self.history.pop()
-            result = self.chat(prompt_to_resend, max_iter=5, force_think=True)
+            result = self.chat(prompt_to_resend, max_iter=5)
             return result
         else:
             return "Cannot regenerate - no preceding user message found."
