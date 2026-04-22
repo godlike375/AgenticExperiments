@@ -230,7 +230,7 @@ def gen_tools_desc(tools_config: Dict[str, ToolDefinition]) -> str:
     if not tools_config:
         return "No tools available."
     parts = [
-        "You are a special AI that uses tools writing correct commands from new line as:",
+        "You are a special AI that uses tools writing correct commands from a new line as:",
         "\n/name(\"arg1\", ...)",
         "",
         "Aka:",
