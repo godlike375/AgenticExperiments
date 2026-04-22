@@ -159,7 +159,7 @@ TOOLS_CONFIG = {
             "description": "Gets file or directory content.",
             "parameters": {
                 "type": "object",
-                "properties": {"path": {"type": "string", "description": "Optional path to file or directory. If not provided then default is '.'"}},
+                "properties": {"path": {"type": "string", "description": "Optional path to file or directory. If not provided then default is '.'. To quickly get to parent directory use '..' argument."}},
                 "required": ["path"],
             },
         },
@@ -199,7 +199,7 @@ TOOLS_CONFIG = {
                 "type": "object",
                 "properties": {
                     "id": {"type": "integer", "description": "The index of the message to edit"},
-                    "old_text": {"type": "string", "description": "The exact substring to be replaced without the [id X] prefix"},
+                    "old_text": {"type": "string", "description": "The exact substring to be replaced. Make sure you type it without [id X]."},
                     "new_text": {"type": "string", "description": "The new text to insert in place of old_text"}
                 },
                 "required": ["id", "old_text", "new_text"],
@@ -214,36 +214,28 @@ TOOLS_CONFIG = {
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "start_id": {"type": "integer", "description": f"The starting message index to delete (min {Config.AFTER_SYSTEM_PROMPT})"},
-                    "end_id": {"type": "integer", "description": "The ending message index to delete (inclusive). The max id you can see in start_edit_mode."}
+                    "start_id": {"type": "integer", "description": "The starting message id to delete"},
+                    "end_id": {"type": "integer", "description": "The ending inclusive message id to delete. You can type -1 like in Python to delete up to the last."}
                 },
                 "required": ["start_id", "end_id"],
             },
         },
     },
-    "start_edit_mode": {
+    "show_msg_ids": {
         "type": "function",
         "function": {
-            "name": "start_edit_mode",
-            "description": "Enables the visibility of message IDs. Call this to see [id X] markers before using edit_message or delete_messages. ids start with 1",
+            "name": "show_msg_ids",
+            "description": f"Enables the visibility ids for messages. Ids start with {Config.AFTER_SYSTEM_PROMPT}.",
             "parameters": {"type": "object", "properties": {}},
         },
-    },
-    "end_edit_mode": {
-        "type": "function",
-        "function": {
-            "name": "end_edit_mode",
-            "description": "Hides the visibility of message IDs. Call this when you are finished editing or deleting messages.",
-            "parameters": {"type": "object", "properties": {}},
-        },
-    },
+    }
 }
 
 FUNCTIONS_REGISTRY = {
     "open": FS.open,
     "search_files": FS.search_files,
     "cwd": FS.cwd,
-    # edit_message, delete_messages, start_edit_mode и end_edit_mode привязываются динамически в __init__
+    # edit_message, delete_messages, show_msg_ids привязываются динамически в __init__
 }
 
 class LLMAgent:
@@ -270,10 +262,8 @@ class LLMAgent:
                 self.functions[name] = self.edit_message
             elif name == "delete_messages":
                 self.functions[name] = self.delete_messages
-            elif name == "start_edit_mode":
-                self.functions[name] = self.start_edit_mode
-            elif name == "end_edit_mode":
-                self.functions[name] = self.end_edit_mode
+            elif name == "show_msg_ids":
+                self.functions[name] = self.show_msg_ids
             else:
                 self.functions[name] = FUNCTIONS_REGISTRY[name]
 
@@ -282,20 +272,23 @@ class LLMAgent:
         self.timeout = timeout
         self.thinking_enabled = True
 
-    def start_edit_mode(self) -> str:
+    def show_msg_ids(self) -> str:
         """Метод для включения видимости ID сообщений"""
         self.edit_mode = True
-        return "Edit mode is now ENABLED. You can now see [id X] markers in the message history."
+        return "Edit mode ENABLED. You can now see ids in messages."
 
-    def end_edit_mode(self) -> str:
+    def hide_messages_id(self) -> str:
         """Метод для выключения видимости ID сообщений"""
         self.edit_mode = False
-        return "Edit mode is now DISABLED. Message IDs are now hidden."
 
-    def delete_messages(self, start_id: int, end_id: int) -> str:
+    def delete_messages(self, start_id: int = 1, end_id: int = -1) -> str:
         """Удаляет диапазон сообщений, расширяя его до полных блоков (user -> assistant -> tools)"""
-        if not (0 <= start_id < len(self.history) - 1) or not (0 < end_id < len(self.history) - 1):
-            return f"Error: Invalid range {start_id}-{end_id}."
+        if not (0 <= start_id < len(self.history)):
+            return f"Error: Invalid start_id {start_id}."
+
+        if end_id == -1 or end_id >= len(self.history):
+            end_id = len(self.history) - 1
+            # TODO: добавить подтверждение от LLM если он перепутал аргументы и собирается удалить всю историю
 
         start_id = max(start_id, Config.AFTER_SYSTEM_PROMPT)
 
@@ -309,14 +302,12 @@ class LLMAgent:
         while actual_start > 1 and self.history[actual_start]["role"] != "user":
             actual_start -= 1
 
-        # 2. Ищем конец: всё до следующего 'user' после end_id
         actual_end = end_id
         while actual_end < len(self.history) and self.history[actual_end]["role"] != "user":
             actual_end += 1
 
-        deleted_count = actual_end - actual_start
         del self.history[actual_start:actual_end]
-
+        self.hide_messages_id()
         return None
 
     def edit_message(self, id: int, old_text: str, new_text: str) -> str:
@@ -324,24 +315,26 @@ class LLMAgent:
         if not (0 <= id < len(self.history) - 1):
             return f"Error: Invalid message index {id}."
 
-        actual_index = id + 1
+        actual_index = id
         msg = self.history[actual_index]
 
         if "content" not in msg or not isinstance(msg["content"], str):
             return f"Error: Message {id} does not have editable text content."
 
         if old_text not in msg["content"]:
-            return f"Error: Substring '{old_text}' not found in message {id}. Make sure you provide the exact substring without the [id X] prefix."
+            return f"Error: Substring '{old_text}' not found in message {id}. Make sure you typed exact substring without [id X] prefix."
 
         # Заменяем только первое вхождение
         msg["content"] = msg["content"].replace(old_text, new_text, 1)
 
         # Если после редактирования сообщение стало пустым - удаляем весь блок
         if not msg["content"].strip():
-            self.delete_messages(id)
-            return f"Success: Message {id} became empty after edit and was automatically deleted along with its conversation block."
+            self.delete_messages(id, id)
+            self.hide_messages_id()
+            return None
 
-        return f"Success: Replaced text in message {id}."
+        self.hide_messages_id()
+        return None
 
     def _handle_regen(self, num_messages: int = 1, pending_prefill: str = '') -> str:
         user_message_to_resend = None
@@ -437,7 +430,7 @@ class LLMAgent:
 
 if __name__ == "__main__":
     sys_prompt = (
-        "You are a special tool-calling assistant. Use tools to fulfill user requests. Speak Russian."
+        "You are a special tool-calling assistant. Use tools to fulfill user requests. Ask user's confirmation before calling any tool. Speak Russian."
     )
 
     agent = LLMAgent(
@@ -485,4 +478,4 @@ if __name__ == "__main__":
         if inp.lower() in ("exit", "quit"):
             break
 
-        agent.chat(inp, max_iter=10, prefill=pending_prefill)
+        agent.chat(inp, max_iter=5, prefill=pending_prefill)
