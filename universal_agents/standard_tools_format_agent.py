@@ -114,8 +114,8 @@ class FS:
                 except UnicodeDecodeError:
                     return f"Error: Cannot read binary files (failed UTF-8 decode)"
             elif os.path.isdir(path):
-                return f"Directory Tree: {path}\nModified: {mtime}\n\n{FS._build_tree(path, 0)}"
-            return None
+                return f"Directory Tree: {os.path.abspath(path)}\nModified: {mtime}\n\n{FS._build_tree(path, 0)}"
+            raise UnexpectedException("Something went wrong")
         except Exception as e:
             raise PermissionError(f"Error accessing {path}: {e}") from e
 
@@ -146,7 +146,7 @@ class FS:
         if path:
             try:
                 os.chdir(path)
-                return f"Changed working directory to: {os.getcwd()}"
+                return 'Success'
             except Exception as e:
                 return f"Error changing directory: {e}"
         return f"{os.getcwd()}"
@@ -159,7 +159,7 @@ TOOLS_CONFIG = {
             "description": "Gets file or directory content.",
             "parameters": {
                 "type": "object",
-                "properties": {"path": {"type": "string", "description": "Optional path to file or directory. If not provided then default is '.'. To quickly get to parent directory use '..' argument."}},
+                "properties": {"path": {"type": "string", "description": "Optional path to file or directory. If not provided then default is '.'. To quick open top (parent) directory use '..' argument."}},
                 "required": ["path"],
             },
         },
@@ -186,7 +186,7 @@ TOOLS_CONFIG = {
             "description": "Gets current working directory or changes it if 'path' argument is provided",
             "parameters": {
                 "type": "object",
-                "properties": {"path": {"type": "string", "description": "Optional path to change cwd to"}},
+                "properties": {"path": {"type": "string", "description": "Optional path to change cwd to. To quick change cwd to top (parent) directory use '..'"}},
             },
         },
     },
@@ -194,15 +194,15 @@ TOOLS_CONFIG = {
         "type": "function",
         "function": {
             "name": "edit_message",
-            "description": "Edits a specific message in the conversation history by replacing a part of it with a substring.",
+            "description": "Edits specific message in the history by replacing a part of it or the whole text with a substring.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "id": {"type": "integer", "description": "The index of the message to edit"},
-                    "old_text": {"type": "string", "description": "The exact substring to be replaced. Make sure you type it without [id X]."},
-                    "new_text": {"type": "string", "description": "The new text to insert in place of old_text"}
+                    "id": {"type": "integer", "description": "id of the message to edit"},
+                    "old": {"type": "string", "description": "Exact substring to be replaced. Make sure you type it without '[id X]'. If you wanna replace whole text you can pass '' (empty string) to old argument."},
+                    "new": {"type": "string", "description": "Text to insert in place of old"}
                 },
-                "required": ["id", "old_text", "new_text"],
+                "required": ["id", "old", "new"],
             },
         },
     },
@@ -214,8 +214,8 @@ TOOLS_CONFIG = {
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "start_id": {"type": "integer", "description": "The starting message id to delete"},
-                    "end_id": {"type": "integer", "description": "The ending inclusive message id to delete. You can type -1 like in Python to delete up to the last."}
+                    "start_id": {"type": "integer", "description": "Starting message id to delete"},
+                    "end_id": {"type": "integer", "description": "Ending inclusive message id to delete. You can type -1 like in Python to delete up to the last."}
                 },
                 "required": ["start_id", "end_id"],
             },
@@ -239,7 +239,7 @@ FUNCTIONS_REGISTRY = {
 }
 
 class LLMAgent:
-    def __init__(self, system_prompt: str = "You are a helpful assistant.", temp: float = 0.4, timeout: int = 1800,
+    def __init__(self, system_prompt: str = "You are a helpful assistant.", temp: float = 0.25, timeout: int = 1800,
                  tools_config: Union[List[str], Dict, None] = None):
 
         all_groups = set(TOOLS_CONFIG.keys())
@@ -275,7 +275,7 @@ class LLMAgent:
     def show_msg_ids(self) -> str:
         """Метод для включения видимости ID сообщений"""
         self.edit_mode = True
-        return "Edit mode ENABLED. You can now see ids in messages."
+        return 'Success'
 
     def hide_messages_id(self) -> str:
         """Метод для выключения видимости ID сообщений"""
@@ -310,31 +310,29 @@ class LLMAgent:
         self.hide_messages_id()
         return None
 
-    def edit_message(self, id: int, old_text: str, new_text: str) -> str:
+    def edit_message(self, id: int, new: str, old: str = '') -> str:
         """Метод для редактирования истории самим LLM"""
         if not (0 <= id < len(self.history) - 1):
             return f"Error: Invalid message index {id}."
 
-        actual_index = id
-        msg = self.history[actual_index]
+        msg = self.history[id]
 
-        if "content" not in msg or not isinstance(msg["content"], str):
-            return f"Error: Message {id} does not have editable text content."
-
-        if old_text not in msg["content"]:
-            return f"Error: Substring '{old_text}' not found in message {id}. Make sure you typed exact substring without [id X] prefix."
-
-        # Заменяем только первое вхождение
-        msg["content"] = msg["content"].replace(old_text, new_text, 1)
+        if not old.strip():
+            msg["content"] = new
+        elif old not in msg["content"]:
+            return f"Error: Substring '{old}' not found in message {id}. Make sure you typed exact substring without [id X] prefix."
+        else:
+            # Заменяем только первое вхождение
+            msg["content"] = msg["content"].replace(old, new, 1)
 
         # Если после редактирования сообщение стало пустым - удаляем весь блок
         if not msg["content"].strip():
             self.delete_messages(id, id)
             self.hide_messages_id()
-            return None
+            return 'Replacing to empty text leaded to deleting messages block'
 
         self.hide_messages_id()
-        return None
+        return 'Success'
 
     def _handle_regen(self, num_messages: int = 1, pending_prefill: str = '') -> str:
         user_message_to_resend = None
@@ -430,7 +428,7 @@ class LLMAgent:
 
 if __name__ == "__main__":
     sys_prompt = (
-        "You are a special tool-calling assistant. Use tools to fulfill user requests. Ask user's confirmation before calling any tool. Speak Russian."
+        "You are a special tool-calling assistant. Use tools to fulfill user requests. Ask user's confirmation before calling tools. Speak Russian."
     )
 
     agent = LLMAgent(
