@@ -13,29 +13,25 @@ class Config:
     MODEL_NAME = "local-model"
     AFTER_SYSTEM_PROMPT = 1
 
+
 class LLMClient:
     _client = None
 
     @classmethod
     def get_client(cls) -> OpenAI:
         if cls._client is None:
-            cls._client = OpenAI(
-                api_key="lm-studio",
-                base_url=Config.API_URL
-            )
+            cls._client = OpenAI(api_key="lm-studio", base_url=Config.API_URL)
         return cls._client
 
     @staticmethod
-    def call(messages: List[Dict], temp: float, timeout: int, tools: List[Dict] = None, prefill: str = None):
-        # Создаем копию истории для отправки
+    def call(messages: List[Dict], temp: float, timeout: int,
+             tools: List[Dict] = None, prefill: str = None):
         messages_to_send = list(messages)
-
         if prefill:
             messages_to_send.append({"role": "assistant", "content": prefill})
 
         try:
-            client = LLMClient.get_client()
-            response = client.chat.completions.create(
+            response = LLMClient.get_client().chat.completions.create(
                 model=Config.MODEL_NAME,
                 messages=messages_to_send,
                 temperature=temp,
@@ -48,260 +44,310 @@ class LLMClient:
         except Exception as e:
             return None, str(e)
 
+
+# Универсальный декоратор для описания инструментов
+def tool(description="", **params):
+    def decorator(func):
+        func._is_tool = True
+        func._tool_name = func.__name__
+        func._tool_desc = description or (func.__doc__ or "").split("\n")[0].strip()
+        func._tool_params = params
+        return func
+    return decorator
+
+
 class FS:
     @staticmethod
     def _format_size(size_bytes: int) -> str:
-        if size_bytes < 1024: return f"{size_bytes}B"
-        units = ['B', 'KB', 'MB', 'GB', 'TB']
-        unit_index = 0
-        current_size = float(size_bytes)
-        while current_size >= 1024 and unit_index < len(units) - 1:
-            current_size /= 1024
-            unit_index += 1
-        return f"{current_size:.2f}".rstrip('0').rstrip('.') + units[unit_index]
+        if size_bytes < 1024:
+            return f"{size_bytes}B"
+        for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
+            if size_bytes < 1024:
+                return f"{size_bytes:.1f}{unit}" if unit != 'B' else f"{size_bytes}{unit}"
+            size_bytes /= 1024
+        return f"{size_bytes:.1f}TB"
 
     @staticmethod
     def _count_hidden_size(root_path: str) -> int:
-        total_size = 0
+        total = 0
         try:
             for entry in os.scandir(root_path):
                 try:
-                    if entry.is_file(): total_size += entry.stat().st_size
-                    elif entry.is_dir(): total_size += FS._count_hidden_size(entry.path)
-                except PermissionError: continue
-        except (PermissionError, FileNotFoundError): pass
-        return total_size
+                    if entry.is_file():
+                        total += entry.stat().st_size
+                    elif entry.is_dir():
+                        total += FS._count_hidden_size(entry.path)
+                except PermissionError:
+                    continue
+        except (PermissionError, FileNotFoundError):
+            pass
+        return total
 
     @staticmethod
-    def _build_tree(root_path: str, current_depth: int = 0) -> str:
-        DENSITY_LIMIT = 4
-        result_lines = []
+    def _build_tree(root_path: str, depth: int = 0, density: int = 4) -> str:
         try:
             entries = list(os.scandir(root_path))
-        except PermissionError: return f"{'  ' * current_depth}[Permission Denied]"
-        except FileNotFoundError: return f"{'  ' * current_depth}[Path Not Found]"
+        except PermissionError:
+            return f"{'  ' * depth}[Permission Denied]"
+        except FileNotFoundError:
+            return f"{'  ' * depth}[Path Not Found]"
 
-        if current_depth > 0 and len(entries) > DENSITY_LIMIT:
-            size_str = FS._format_size(FS._count_hidden_size(root_path))
-            return f"{'  ' * current_depth}[{len(entries)} nested items TRUNCATED, size={size_str}]"
+        if depth > 0 and len(entries) > density:
+            size = FS._format_size(FS._count_hidden_size(root_path))
+            return f"{'  ' * depth}[{len(entries)} items TRUNCATED, {size}]"
 
         dirs = sorted([e for e in entries if e.is_dir()], key=lambda x: x.name.lower())
         files = sorted([e for e in entries if e.is_file()], key=lambda x: x.name.lower())
 
+        lines = []
         for entry in dirs + files:
-            stat_info = entry.stat()
-            mtime = datetime.datetime.fromtimestamp(stat_info.st_mtime).strftime("%Y-%m-%d")
-            prefix = f"{'  ' * current_depth}"
+            mtime = datetime.datetime.fromtimestamp(entry.stat().st_mtime).strftime("%Y-%m-%d")
+            prefix = f"{'  ' * depth}"
             if entry.is_dir():
-                result_lines.append(f"{prefix}{entry.name}/ ({mtime})")
-                sub_result = FS._build_tree(entry.path, current_depth + 1)
-                if sub_result: result_lines.append(sub_result)
+                lines.append(f"{prefix}{entry.name}/ ({mtime})")
+                if sub := FS._build_tree(entry.path, depth + 1, density):
+                    lines.append(sub)
             else:
-                size_str = FS._format_size(stat_info.st_size)
-                result_lines.append(f"{prefix}{entry.name} ({size_str})")
-        return "\n".join(result_lines)
+                lines.append(f"{prefix}{entry.name} ({FS._format_size(entry.stat().st_size)})")
+        return "\n".join(lines)
 
     @staticmethod
-    def open(path: str = None) -> str:
-        path = path or '.'
-        if not os.path.exists(path): raise FileNotFoundError(f"Path not found: {path}")
+    @tool(description="Gets file content or directory tree.",
+          path=("str", "Optional path to file/directory (default '.'). Use '..' for parent."))
+    def open(path: str = '.'):
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"Path not found: {path}")
         try:
             mtime = datetime.datetime.fromtimestamp(os.stat(path).st_mtime).strftime("%Y-%m-%d %H:%M:%S")
             if os.path.isfile(path):
                 try:
-                    with open(path, 'r', encoding='utf-8', errors='strict') as f: content = f.read()
+                    with open(path, 'r', encoding='utf-8', errors='strict') as f:
+                        content = f.read()
                     return f"File: {path}\nModified: {mtime}\nContent:\n---\n{content}"
                 except UnicodeDecodeError:
-                    return f"Error: Cannot read binary files (failed UTF-8 decode)"
+                    return "Error: Cannot read binary files (failed UTF-8 decode)."
             elif os.path.isdir(path):
-                return f"Directory Tree: {os.path.abspath(path)}\nModified: {mtime}\n\n{FS._build_tree(path, 0)}"
-            raise UnexpectedException("Something went wrong")
+                return f"Directory Tree: {os.path.abspath(path)}\nModified: {mtime}\n\n{FS._build_tree(path)}"
+            raise RuntimeError("Unexpected file type")
         except Exception as e:
-            raise PermissionError(f"Error accessing {path}: {e}") from e
+            raise PermissionError(f"Error accessing {path}: {e}")
 
     @staticmethod
-    def search_files(pattern: str, path: str = ".") -> str:
-        if not os.path.isdir(path): raise FileNotFoundError(f"Base path not found: {path}")
-        matches = []
+    @tool(description="Searches files by regex pattern.",
+          pattern=("str", "Regex pattern to search for."),
+          path=("str", "Optional base directory (default current)."))
+    def search_files(pattern: str, path: str = "."):
+        if not os.path.isdir(path):
+            raise FileNotFoundError(f"Base path not found: {path}")
+        folders_map = defaultdict(list)
         for root, _, files in os.walk(path):
             for f in files:
-                if re.search(pattern, f): matches.append(os.path.join(root, f))
-        if not matches: return "No matches found."
-
-        folders_map = defaultdict(list)
-        for full_path in matches:
-            parent_dir, filename = os.path.split(full_path)
-            rel_parent = os.path.relpath(parent_dir, path)
-            folders_map["." if rel_parent == "." else rel_parent].append(filename)
-
+                if re.search(pattern, f):
+                    rel = os.path.relpath(root, path)
+                    folders_map["." if rel == "." else rel].append(f)
+        if not folders_map:
+            return "No matches found."
         lines = []
         for folder in sorted(folders_map.keys()):
             lines.append(f"{folder}/:")
-            for file_name in sorted(folders_map[folder]): lines.append(f"  - {file_name}")
+            for fname in sorted(folders_map[folder]):
+                lines.append(f"  - {fname}")
         return "\n".join(lines)
 
     @staticmethod
-    @staticmethod
-    def cwd(path: str = None) -> str:
+    @tool(description="Gets or changes current working directory.",
+          path=("str", "Optional new working directory. Use '..' for parent."))
+    def cwd(path: str = None):
         if path:
             try:
                 os.chdir(path)
                 return 'Success'
             except Exception as e:
                 return f"Error changing directory: {e}"
-        return f"{os.getcwd()}"
+        return os.getcwd()
 
-TOOLS_CONFIG = {
-    "open": {
-        "type": "function",
-        "function": {
-            "name": "open",
-            "description": "Gets file or directory content.",
-            "parameters": {
-                "type": "object",
-                "properties": {"path": {"type": "string", "description": "Optional path to file or directory. If not provided then default is '.'. To quick open top (parent) directory use '..' argument."}},
-                "required": ["path"],
-            },
-        },
-    },
-    "search_files": {
-        "type": "function",
-        "function": {
-            "name": "search_files",
-            "description": "Searches for files by pattern in path",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "pattern": {"type": "string", "description": "Regex pattern to search for"},
-                    "path": {"type": "string", "description": "Base directory to search in"}
-                },
-                "required": ["pattern", "path"],
-            },
-        },
-    },
-    "cwd": {
-        "type": "function",
-        "function": {
-            "name": "cwd",
-            "description": "Gets current working directory or changes it if 'path' argument is provided",
-            "parameters": {
-                "type": "object",
-                "properties": {"path": {"type": "string", "description": "Optional path to change cwd to. To quick change cwd to top (parent) directory use '..'"}},
-            },
-        },
-    },
-    "edit_message": {
-        "type": "function",
-        "function": {
-            "name": "edit_message",
-            "description": "Edits specific message in the history by replacing a part of it or the whole text with a substring.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "id": {"type": "integer", "description": "id of the message to edit"},
-                    "old": {"type": "string", "description": "Exact substring to be replaced. Make sure you type it without '[id X]'. If you wanna replace whole text you can pass '' (empty string) to old argument."},
-                    "new": {"type": "string", "description": "Text to insert in place of old"}
-                },
-                "required": ["id", "old", "new"],
-            },
-        },
-    },
-    "delete_messages": {
-        "type": "function",
-        "function": {
-            "name": "delete_messages",
-            "description": "Deletes a range of messages from dialog history.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "start_id": {"type": "integer", "description": "Starting message id to delete"},
-                    "end_id": {"type": "integer", "description": "Ending inclusive message id to delete. You can type -1 like in Python to delete up to the last."}
-                },
-                "required": ["start_id", "end_id"],
-            },
-        },
-    },
-    "show_msg_ids": {
-        "type": "function",
-        "function": {
-            "name": "show_msg_ids",
-            "description": f"Enables the visibility ids for messages. Ids start with {Config.AFTER_SYSTEM_PROMPT}.",
-            "parameters": {"type": "object", "properties": {}},
-        },
-    }
-}
-
-FUNCTIONS_REGISTRY = {
-    "open": FS.open,
-    "search_files": FS.search_files,
-    "cwd": FS.cwd,
-    # edit_message, delete_messages, show_msg_ids привязываются динамически в __init__
-}
 
 class LLMAgent:
-    def __init__(self, system_prompt: str = "You are a helpful assistant.", temp: float = 0.25, timeout: int = 1800,
+    def __init__(self, system_prompt: str = "You are a helpful assistant.",
+                 temp: float = 0.25, timeout: int = 1800,
                  tools_config: Union[List[str], Dict, None] = None):
+        # 1. Сбор ВСЕХ доступных инструментов из FS и собственных методов
+        self._all_tools = self._collect_tools([FS, self.__class__])
 
-        all_groups = set(TOOLS_CONFIG.keys())
+        # 2. Фильтрация инструментов
+        all_names = set(self._all_tools.keys())
         if tools_config is None or tools_config == "all":
-            active_groups = all_groups
+            active = all_names
         elif isinstance(tools_config, list):
-            active_groups = set(tools_config) & all_groups
+            active = set(tools_config) & all_names
         elif isinstance(tools_config, dict) and "exclude" in tools_config:
-            active_groups = all_groups - set(tools_config["exclude"])
+            active = all_names - set(tools_config["exclude"])
         else:
             raise ValueError("Invalid tools_config")
 
-        self.tools = [TOOLS_CONFIG[name] for name in active_groups]
-        self.edit_mode = False  # Флаг режима редактирования
+        self._all_tools = {k: v for k, v in self._all_tools.items() if k in active}
+        self.tools = [v['schema'] for v in self._all_tools.values()]
 
-        # Привязываем функции.
-        self.functions = {}
-        for name in active_groups:
-            if name == "edit_message":
-                self.functions[name] = self.edit_message
-            elif name == "delete_messages":
-                self.functions[name] = self.delete_messages
-            elif name == "show_msg_ids":
-                self.functions[name] = self.show_msg_ids
-            else:
-                self.functions[name] = FUNCTIONS_REGISTRY[name]
-
+        # 3. Инициализация состояния
         self.history = [{"role": "system", "content": system_prompt}]
         self.temp = temp
         self.timeout = timeout
+        self.edit_mode = False
         self.thinking_enabled = True
 
-    def show_msg_ids(self) -> str:
-        """Метод для включения видимости ID сообщений"""
+    @staticmethod
+    def _collect_tools(classes):
+        """Сканирует переданные классы и собирает все @tool-декорированные функции."""
+        tools = {}
+        for klass in classes:
+            for name in dir(klass):
+                # Используем __dict__ для точного определения типа дескриптора
+                raw = klass.__dict__.get(name)
+                if raw is None:
+                    continue
+
+                if isinstance(raw, staticmethod):
+                    func = raw.__func__
+                    is_instance_method = False
+                elif isinstance(raw, classmethod):
+                    continue
+                elif callable(raw) and not isinstance(raw, type):
+                    func = raw
+                    is_instance_method = True
+                else:
+                    continue
+
+                if not hasattr(func, '_is_tool'):
+                    continue
+
+                # Строим схему
+                params_desc = func._tool_params
+                properties = {}
+                required = []
+                for pname, (ptype, pdesc) in params_desc.items():
+                    properties[pname] = {"type": ptype, "description": pdesc}
+                    if not pdesc.lower().startswith("optional"):
+                        required.append(pname)
+
+                schema = {
+                    "type": "function",
+                    "function": {
+                        "name": func._tool_name,
+                        "description": func._tool_desc,
+                        "parameters": {
+                            "type": "object",
+                            "properties": properties,
+                            "required": required
+                        }
+                    }
+                }
+                tools[func._tool_name] = {
+                    "schema": schema,
+                    "handler": func,
+                    "is_instance_method": is_instance_method
+                }
+        return tools
+
+    # ---------- Вспомогательные методы ----------
+    def hide_messages_id(self):
+        self.edit_mode = False
+
+    def _handle_regen(self, num_messages=1, pending_prefill=''):
+        user_message_to_resend = None
+        for _ in range(num_messages):
+            while self.history and self.history[-1]["role"] != "user":
+                self.history.pop()
+            if self.history and self.history[-1]["role"] == "user":
+                user_message_to_resend = self.history.pop()["content"]
+        if not user_message_to_resend:
+            return "Cannot find a preceding user message to regenerate."
+        print(f"\n[REGEN] Regenerating response for: '{user_message_to_resend}'")
+        return self.chat(user_message_to_resend, max_iter=5, prefill=pending_prefill)
+
+    def _execute_tools(self, tool_calls):
+        results = []
+        for tc in tool_calls:
+            name = tc.function.name
+            try:
+                args = json.loads(tc.function.arguments) if tc.function.arguments else {}
+                tool_info = self._all_tools.get(name)
+                if not tool_info:
+                    msg = f"Error: Unknown tool '{name}'"
+                    results.append({
+                        "tool_call_id": tc.id, "role": "tool",
+                        "name": name, "content": msg
+                    })
+                    continue
+
+                handler = tool_info['handler']
+                if tool_info['is_instance_method']:
+                    full_result = handler(self, **args)
+                else:
+                    full_result = handler(**args)
+
+                print(f"[Tool] {name}({args}) -> {str(full_result)}")
+                if full_result is not None:
+                    results.append({
+                        "tool_call_id": tc.id, "role": "tool",
+                        "name": name, "content": str(full_result)
+                    })
+            except Exception as e:
+                error_msg = f"Tool '{name}' FAILED: {e}"
+                print(f"[ERROR] {error_msg}")
+                results.append({
+                    "tool_call_id": tc.id, "role": "tool",
+                    "name": name, "content": error_msg
+                })
+        return results
+
+    # ---------- Инструменты (имя = имя метода) ----------
+    @tool(description="Enables visibility of message IDs.")
+    def get_msg_ids(self):
         self.edit_mode = True
         return 'Success'
 
-    def hide_messages_id(self) -> str:
-        """Метод для выключения видимости ID сообщений"""
-        self.edit_mode = False
+    @tool(description="Edits a specific message in the history.",
+          id=("int", "ID of the message to edit."),
+          old=("str", "Optional exact substr to replace. Empty str replaces whole text."),
+          new=("str", "Text to insert in place of old."))
+    def edit_message(self, id: int, new: str, old: str = ''):
+        if not (0 <= id < len(self.history)):
+            return f"Error: Invalid message index {id}."
+        msg = self.history[id]
+        if not old.strip():
+            msg["content"] = new
+        elif old not in msg["content"]:
+            return f"Error: Substr '{old}' not found in message {id}."
+        else:
+            msg["content"] = msg["content"].replace(old, new, 1)
 
-    def delete_messages(self, start_id: int = 1, end_id: int = -1) -> str:
-        """Удаляет диапазон сообщений, расширяя его до полных блоков (user -> assistant -> tools)"""
+        if not msg["content"].strip():
+            self.delete_messages(id, id)
+            self.hide_messages_id()
+            return 'Replacing to empty text led to deleting the message block.'
+        self.hide_messages_id()
+        return 'Success'
+
+    @tool(description="Deletes a range of messages from dialog history.",
+          start_id=("int", "Starting message ID to delete."),
+          end_id=("int", "Optional ending message ID (-1 for last)."))
+    def delete_messages(self, start_id: int, end_id: int = -1):
         if not (0 <= start_id < len(self.history)):
             return f"Error: Invalid start_id {start_id}."
 
         if end_id == -1 or end_id >= len(self.history):
             end_id = len(self.history) - 1
-            # TODO: добавить подтверждение от LLM если он перепутал аргументы и собирается удалить всю историю
 
         start_id = max(start_id, Config.AFTER_SYSTEM_PROMPT)
 
         if start_id > end_id:
             start_id, end_id = end_id, start_id
-
         if start_id == end_id:
             end_id += 1
 
         actual_start = start_id
         while actual_start > 1 and self.history[actual_start]["role"] != "user":
             actual_start -= 1
-
         actual_end = end_id
         while actual_end < len(self.history) and self.history[actual_end]["role"] != "user":
             actual_end += 1
@@ -310,66 +356,7 @@ class LLMAgent:
         self.hide_messages_id()
         return None
 
-    def edit_message(self, id: int, new: str, old: str = '') -> str:
-        """Метод для редактирования истории самим LLM"""
-        if not (0 <= id < len(self.history) - 1):
-            return f"Error: Invalid message index {id}."
-
-        msg = self.history[id]
-
-        if not old.strip():
-            msg["content"] = new
-        elif old not in msg["content"]:
-            return f"Error: Substring '{old}' not found in message {id}. Make sure you typed exact substring without [id X] prefix."
-        else:
-            # Заменяем только первое вхождение
-            msg["content"] = msg["content"].replace(old, new, 1)
-
-        # Если после редактирования сообщение стало пустым - удаляем весь блок
-        if not msg["content"].strip():
-            self.delete_messages(id, id)
-            self.hide_messages_id()
-            return 'Replacing to empty text leaded to deleting messages block'
-
-        self.hide_messages_id()
-        return 'Success'
-
-    def _handle_regen(self, num_messages: int = 1, pending_prefill: str = '') -> str:
-        user_message_to_resend = None
-        for _ in range(num_messages):
-            while self.history and self.history[-1]["role"] != "user":
-                self.history.pop()
-            if self.history and self.history[-1]["role"] == "user":
-                user_message_to_resend = self.history.pop()["content"]
-
-        if not user_message_to_resend:
-            return "Cannot find a preceding user message to regenerate."
-
-        print(f"\n[REGEN] Regenerating response for: '{user_message_to_resend}'")
-        return self.chat(user_message_to_resend, max_iter=5, prefill=pending_prefill)
-
-    def _execute_tools(self, tool_calls: List[Any]) -> List[Dict]:
-        results = []
-        for tc in tool_calls:
-            name = tc.function.name
-            try:
-                args = json.loads(tc.function.arguments) if tc.function.arguments else {}
-                print(f"[Tool] Calling {name}({args})")
-
-                if name in self.functions:
-                    full_result = self.functions[name](**args)
-                    if full_result is not None:
-                        print(f"[RESULT] {str(full_result)[:200]}...")
-                        results.append({"tool_call_id": tc.id, "role": "tool", "name": name, "content": str(full_result)})
-                else:
-                    error_msg = f"Error: Unknown tool '{name}'"
-                    results.append({"tool_call_id": tc.id, "role": "tool", "name": name, "content": error_msg})
-            except Exception as e:
-                error_msg = f"Tool '{name}' FAILED: {e}"
-                print(f"[ERROR] {error_msg}")
-                results.append({"tool_call_id": tc.id, "role": "tool", "name": name, "content": error_msg})
-        return results
-
+    # ---------- Основной цикл общения ----------
     def chat(self, message: str, max_iter: int = 5, prefill: str = None) -> str:
         self.history.append({"role": "user", "content": message})
 
@@ -380,15 +367,12 @@ class LLMAgent:
         for i in range(max_iter):
             step_prefill = current_prefill if i == 0 else None
 
-            # --- ИНЖЕКЦИЯ НОМЕРОВ СООБЩЕНИЙ (ЗАВИСИТ ОТ self.edit_mode) ---
-            messages_to_send = []
-            msg_copy = self.history[0].copy()
-            messages_to_send.append(msg_copy)
+            messages_to_send = [self.history[0].copy()]
             for idx, msg in enumerate(self.history[Config.AFTER_SYSTEM_PROMPT:]):
-                msg_copy = msg.copy()
+                copy = msg.copy()
                 if self.edit_mode:
-                    msg_copy["content"] = f"[id {idx + Config.AFTER_SYSTEM_PROMPT}]\n{msg_copy['content']}"
-                messages_to_send.append(msg_copy)
+                    copy["content"] = f"[id {idx + Config.AFTER_SYSTEM_PROMPT}]\n{copy['content']}"
+                messages_to_send.append(copy)
 
             message_obj, err = LLMClient.call(
                 messages_to_send,
@@ -397,11 +381,12 @@ class LLMAgent:
                 prefill=step_prefill
             )
 
-            if err: return f"API Error: {err}"
-            if not message_obj: return "Empty response"
+            if err:
+                return f"API Error: {err}"
+            if not message_obj:
+                return "Empty response"
 
             content = message_obj.content or ""
-
             full_content = (step_prefill + content) if step_prefill else content
             clean_content = full_content.replace("</think>", "").strip()
 
@@ -413,7 +398,11 @@ class LLMAgent:
             assistant_msg = {"role": "assistant", "content": clean_content}
             if message_obj.tool_calls:
                 assistant_msg["tool_calls"] = [
-                    {"id": tc.id, "type": tc.type, "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
+                    {
+                        "id": tc.id,
+                        "type": tc.type,
+                        "function": {"name": tc.function.name, "arguments": tc.function.arguments}
+                    }
                     for tc in message_obj.tool_calls
                 ]
             self.history.append(assistant_msg)
@@ -426,9 +415,11 @@ class LLMAgent:
 
         return "Max iterations reached without final answer."
 
+
 if __name__ == "__main__":
     sys_prompt = (
-        "You are a special tool-calling assistant. Use tools to fulfill user requests. Ask user's confirmation before calling tools. Speak Russian."
+        "You are a special tool-calling assistant. Use tools to fulfill user requests. "
+        "Ask user's confirmation before calling tools. Speak Russian."
     )
 
     agent = LLMAgent(
@@ -442,7 +433,8 @@ if __name__ == "__main__":
 
     while True:
         inp = input("\nUser: ").strip()
-        if not inp: continue
+        if not inp:
+            continue
 
         if inp.startswith("/"):
             try:
