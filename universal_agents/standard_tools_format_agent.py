@@ -46,12 +46,13 @@ class LLMClient:
 
 
 # Универсальный декоратор для описания инструментов
-def tool(description="", **params):
+def tool(description="", requires_confirmation=False, **params):
     def decorator(func):
         func._is_tool = True
         func._tool_name = func.__name__
         func._tool_desc = description or (func.__doc__ or "").split("\n")[0].strip()
         func._tool_params = params
+        func._requires_confirmation = requires_confirmation
         return func
     return decorator
 
@@ -244,7 +245,8 @@ class LLMAgent:
                 tools[func._tool_name] = {
                     "schema": schema,
                     "handler": func,
-                    "is_instance_method": is_instance_method
+                    "is_instance_method": is_instance_method,
+                    "requires_confirmation": getattr(func, '_requires_confirmation', False)
                 }
         return tools
 
@@ -279,6 +281,18 @@ class LLMAgent:
                     })
                     continue
 
+                if tool_info.get('requires_confirmation', False):
+                    print(f"\n[WARNING] Tool '{name}' modifies state.")
+                    print(f"Arguments: {json.dumps(args, ensure_ascii=False)}")
+                    confirm = input("Execute? (y/N): ").strip().lower()
+                    if confirm != 'y':
+                        results.append({
+                            "tool_call_id": tc.id, "role": "tool",
+                            "name": name, "content": "Execution cancelled by user."
+                        })
+                        self.hide_messages_id()
+                        continue
+
                 handler = tool_info['handler']
                 if tool_info['is_instance_method']:
                     full_result = handler(self, **args)
@@ -307,6 +321,7 @@ class LLMAgent:
         return 'Success'
 
     @tool(description="Edits a specific message in the history.",
+          requires_confirmation=True,
           id=("int", "ID of the message to edit."),
           old=("str", "Optional exact substr to replace. Empty str replaces whole text."),
           new=("str", "Text to insert in place of old."))
@@ -329,6 +344,7 @@ class LLMAgent:
         return 'Success'
 
     @tool(description="Deletes a range of messages from dialog history.",
+          requires_confirmation=True,
           start_id=("int", "Starting message ID to delete."),
           end_id=("int", "Optional ending message ID (-1 for last)."))
     def delete_messages(self, start_id: int, end_id: int = -1):
@@ -468,4 +484,4 @@ if __name__ == "__main__":
         if inp.lower() in ("exit", "quit"):
             break
 
-        agent.chat(inp, max_iter=5, prefill=pending_prefill)
+        agent.chat(inp, max_iter=10, prefill=pending_prefill)
