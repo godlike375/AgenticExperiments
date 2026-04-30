@@ -4,7 +4,7 @@ import os
 import re
 import shlex
 from collections import defaultdict
-from typing import List, Dict, Union, Any
+from typing import List, Dict, Union
 
 from openai import OpenAI
 
@@ -299,7 +299,7 @@ class LLMAgent:
                 else:
                     full_result = handler(**args)
 
-                print(f"[Tool] {name}({args}) -> {str(full_result)}")
+                print(f"🛠️[Tool] {name}({args}) -> {str(full_result)[:300]}...")
                 if full_result is not None:
                     results.append({
                         "tool_call_id": tc.id, "role": "tool",
@@ -408,7 +408,7 @@ class LLMAgent:
 
             if clean_content:
                 print('\n' + '=' * 15)
-                print(f"Agent: {clean_content}")
+                print(f"🤖 Agent: {clean_content}")
                 print('=' * 15)
 
             assistant_msg = {"role": "assistant", "content": clean_content}
@@ -443,12 +443,12 @@ if __name__ == "__main__":
         tools_config="all"
     )
     print("Ready. Type 'exit' to quit.")
-    print("Commands: /regen, /think_on, /think_off, /prefill <text>")
+    print("Commands: /regen, /think_on, /think_off, /prefill <text>, /save [file], /load [file]")
 
     pending_prefill = None
 
     while True:
-        inp = input("\nUser: ").strip()
+        inp = input("\n👤 User: ").strip()
         if not inp:
             continue
 
@@ -477,6 +477,69 @@ if __name__ == "__main__":
                 else:
                     pending_prefill = None
                     print("[System] Prefill cleared.")
+
+            elif cmd == "/save":
+                filename = parts[1] if len(parts) > 1 else "default_history.json"
+                try:
+                    with open(filename, 'w', encoding='utf-8') as f:
+                        json.dump(agent.history, f, ensure_ascii=False, indent=2)
+                    print(f"[System] History successfully saved to '{filename}'.")
+                except Exception as e:
+                    print(f"[System] Error saving history: {e}")
+
+            elif cmd == "/load":
+                filename = parts[1] if len(parts) > 1 else "default_history.json"
+                if not os.path.exists(filename):
+                    print(f"[System] File '{filename}' not found.")
+                    continue
+                try:
+                    with open(filename, 'r', encoding='utf-8') as f:
+                        loaded_history = json.load(f)
+
+                    # Базовая проверка, что загружен правильный формат
+                    if isinstance(loaded_history, list) and len(loaded_history) > 0 and "role" in loaded_history[0]:
+                        agent.history = loaded_history
+                        print(f"[System] History successfully loaded from '{filename}'. Total messages: {len(agent.history)}")
+
+                        print("\n" + "="*40)
+                        print("🔄 ЗАГРУЖЕННАЯ ИСТОРИЯ ДИАЛОГА:")
+                        print("="*40)
+
+                        for msg in agent.history:
+                            role = msg.get("role")
+                            content = msg.get("content")
+
+                            if role == "system":
+                                continue
+
+                            elif role == "user":
+                                print(f"\n👤 User: {content}")
+
+                            elif role == "assistant":
+                                if content:
+                                    print(f"\n🤖 Agent: {content}")
+                                if "tool_calls" in msg and msg["tool_calls"]:
+                                    for tc in msg["tool_calls"]:
+                                        func = tc.get("function", {})
+                                        name = func.get("name", "unknown")
+                                        args = func.get("arguments", "{}")
+                                        print(f"🛠️[Tool: {name}({args})]")
+
+                            elif role == "tool":
+                                name = msg.get("name", "unknown")
+                                display_content = str(content)
+                                if len(display_content) > 300:
+                                    display_content = display_content[:300] + "\n... [ТЕКСТ ОБРЕЗАН ДЛЯ ОТОБРАЖЕНИЯ]"
+                                print(f" ✅[Результат '{name}']: {display_content}")
+
+                        print("="*40 + "\n")
+                        # -------------------------------
+
+                    else:
+                        print("[System] Error: Invalid history file format.")
+                except Exception as e:
+                    print(f"[System] Error loading history: {e}")
+
             else:
                 print(f"Unknown command: {cmd}")
             continue
