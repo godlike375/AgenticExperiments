@@ -358,7 +358,6 @@ class LLMAgent:
           new=("str", "Text to insert in place of old."))
     def edit_message(self, id: int, new: str, old: str = ''):
         res = self.history.edit_message(id, new, old)
-        self.edit_mode = False
         return res
 
     @tool(description="Deletes a range of messages from dialog history.",
@@ -367,10 +366,8 @@ class LLMAgent:
           end_id=("int", "Optional ending message ID (-1 for last)."))
     def delete_messages(self, start_id: int, end_id: int = -1):
         err = self.history.delete_range(start_id, end_id)
-        self.edit_mode = False
         return err
 
-    # ---------- Основной цикл ----------
     def chat(self, message: str, max_iter: int = 5, prefill: str = None) -> str:
         user_msg = {"role": "user", "content": message}
         self.history.add(user_msg)
@@ -390,6 +387,8 @@ class LLMAgent:
 
             if err: return f"API Error: {err}"
             if not message_obj: return "Empty response"
+
+            self.edit_mode = False
 
             content = message_obj.content or ""
             clean_content = ((step_prefill + content) if step_prefill else content).replace("</think>", "").strip()
