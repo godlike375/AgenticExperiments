@@ -123,7 +123,7 @@ class ChatHistory:
         if not msg["content"].strip():
             self.delete_range(idx, idx)
             return 'Replacing to empty text led to deleting the message block.'
-        return 'Success'
+        return 'Successfully edited message'
 
     def delete_range(self, start_id: int, end_id: int = -1):
         if not (0 <= start_id < len(self._messages)):
@@ -211,7 +211,7 @@ class FS:
 
     @staticmethod
     @tool(description="Gets file content or dir tree.",
-          path=("str", "Optional path to file/dir (default '.'). Use '..' for parent."))
+          path=("str", "Optional path to file/dir (default '.'). Use '..' to open parent dir."))
     def open(path: str = '.'):
         if not os.path.exists(path): raise FileNotFoundError(f"Path not found: {path}")
         try:
@@ -251,12 +251,12 @@ class FS:
 
     @staticmethod
     @tool(description="Gets or changes current working dir.",
-          path=("str", "Optional new working dir. Use '..' for parent."))
+          path=("str", "Optional new working dir. Use '..' to go to the parent dir."))
     def cwd(path: str = None):
         if path:
             try:
                 os.chdir(path)
-                return 'Success'
+                return 'Successfully changed cwd'
             except Exception as e:
                 return f"Error changing cwd: {e}"
         return os.getcwd()
@@ -483,7 +483,7 @@ class LLMAgent:
     @tool(description="Enables visibility of message IDs.")
     def get_msg_ids(self):
         self.edit_mode = True
-        return 'Success'
+        return 'Successfully showed ids'
 
     @tool(description="Edits a specific message in the history.",
           requires_confirmation=True,
@@ -570,7 +570,7 @@ class ConsoleUI:
         elif role == "tool":
             display = str(content)
             if len(display) > 300: display = display[:300] + "\n... [TRUNCATED]"
-            print(f" ✅ [Result '{msg.get('name')}'({msg.get('args')}]: {display}")
+            print(f"✅ [Result '{msg.get('name')}]: {display}")
 
     @staticmethod
     def confirm_action(name: str, args: Dict) -> bool:
