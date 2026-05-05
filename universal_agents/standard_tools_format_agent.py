@@ -5,6 +5,8 @@ import os
 import re
 import shlex
 import concurrent.futures
+import subprocess
+import tempfile
 from collections import defaultdict
 from typing import List, Dict, Union, Callable, Optional
 
@@ -14,6 +16,58 @@ class Config:
     API_URL = "http://localhost:1234/v1"
     MODEL_NAME = "local-model"
     AFTER_SYSTEM_PROMPT = 1
+
+
+class DockerSandbox:
+    _ALLOWED_MOUNTS = set()  # Пути на хосте, разрешённые для монтирования
+
+    @classmethod
+    def set_allowed_mounts(cls, paths: List[str]):
+        cls._ALLOWED_MOUNTS = set(os.path.abspath(p) for p in paths)
+
+    @staticmethod
+    def run_python(code: str, timeout: int = 30) -> str:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Записываем код во временную папку
+            code_path = os.path.join(tmpdir, "script.py")
+            with open(code_path, 'w', encoding='utf-8') as f:
+                f.write(code)
+
+            # Формируем docker команду
+            cmd = [
+                "docker", "run", "--rm",
+                "--network", "none",  # без сети
+                "--memory", "512m",   # ограничение памяти
+                "--cpus", "1",        # ограничение CPU
+                "-v", f"{tmpdir}:/code:ro",  # код только для чтения
+            ]
+
+            # Монтируем только разрешённые папки
+            for mount_path in DockerSandbox._ALLOWED_MOUNTS:
+                if os.path.exists(mount_path):
+                    cmd.extend(["-v", f"{mount_path}:{mount_path}:ro"])
+
+            cmd.extend([
+                "python:3.11-slim",
+                "python", "/code/script.py"
+            ])
+
+            try:
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    encoding='utf-8',
+                    timeout=timeout
+                )
+                output = result.stdout
+                if result.stderr:
+                    output += f"\n[stderr]:\n{result.stderr}"
+                return output
+            except subprocess.TimeoutExpired:
+                return f"Error: execution timed out after {timeout}s"
+            except Exception as e:
+                return f"Error running code in container: {e}"
 
 
 class LLMClient:
@@ -110,13 +164,13 @@ class ChatHistory:
 
     def edit_message(self, idx: int, new_text: str, old_text: str = '') -> str:
         if not (0 <= idx < len(self._messages)):
-            return f"Error: Invalid message index {idx}."
+            return f"Error: Invalid message index {idx}"
 
         msg = self._messages[idx]
         if not old_text.strip():
             msg["content"] = new_text
         elif old_text not in msg["content"]:
-            return f"Error: Substr '{old_text}' not found in message {idx}."
+            return f"Error: Substr '{old_text}' not found in message {idx}"
         else:
             msg["content"] = msg["content"].replace(old_text, new_text, 1)
 
@@ -127,7 +181,7 @@ class ChatHistory:
 
     def delete_range(self, start_id: int, end_id: int = -1):
         if not (0 <= start_id < len(self._messages)):
-            return f"Error: Invalid start_id {start_id}."
+            return f"Error: Invalid start_id {start_id}"
 
         if end_id == -1 or end_id >= len(self._messages):
             end_id = len(self._messages) - 1
@@ -210,8 +264,8 @@ class FS:
         return "\n".join(lines)
 
     @staticmethod
-    @tool(description="Gets file content or dir tree.",
-          path=("str", "Optional path to file/dir (default '.'). Use '..' to open parent dir."))
+    @tool(description="Gets file content or dir tree",
+          path=("str", "Optional path to file/dir (default '.'). Use '..' to open parent dir"))
     def open(path: str = '.'):
         if not os.path.exists(path): raise FileNotFoundError(f"Path not found: {path}")
         try:
@@ -221,7 +275,7 @@ class FS:
                     with open(path, 'r', encoding='utf-8', errors='strict') as f:
                         return f"File: {path}\nModified: {mtime}\nContent:\n---\n{f.read()}"
                 except UnicodeDecodeError:
-                    return "Error: Cannot read binary files (failed UTF-8 decode)."
+                    return "Error: Cannot read binary files (failed UTF-8 decode)"
             elif os.path.isdir(path):
                 return f"Directory Tree: {os.path.abspath(path)}\nModified: {mtime}\n\n{FS._build_tree(path)}"
             raise RuntimeError("Unexpected file type")
@@ -229,18 +283,18 @@ class FS:
             raise PermissionError(f"Error accessing {path}: {e}")
 
     @staticmethod
-    @tool(description="Searches files by regex.",
-          pattern=("str", "Regex to search for."),
-          path=("str", "Optional base dir (default '.')."))
-    def search_files(pattern: str, path: str = "."):
+    @tool(description="Searches files by regex",
+          pattern=("str", "Regex to search for"),
+          path=("str", "Optional base dir (default '.')"))
+    def search_files(pattern: str, path: str = ""):
         if not os.path.isdir(path): raise FileNotFoundError(f"Base path not found: {path}")
         folders_map = defaultdict(list)
         for root, _, files in os.walk(path):
             for f in files:
                 if re.search(pattern, f):
                     rel = os.path.relpath(root, path)
-                    folders_map["." if rel == "." else rel].append(f)
-        if not folders_map: return "No matches."
+                    folders_map["" if rel == "" else rel].append(f)
+        if not folders_map: return "No matches"
 
         lines = []
         for folder in sorted(folders_map.keys()):
@@ -250,8 +304,8 @@ class FS:
         return "\n".join(lines)
 
     @staticmethod
-    @tool(description="Gets or changes current working dir.",
-          path=("str", "Optional new working dir. Use '..' to go to the parent dir."))
+    @tool(description="Gets or changes current working dir",
+          path=("str", "Optional new working dir. Use '..' to go to the parent dir"))
     def cwd(path: str = None):
         if path:
             try:
@@ -264,7 +318,7 @@ class FS:
 
 class LLMAgent:
     def __init__(self,
-                 system_prompt: str = "You are a helpful assistant.",
+                 system_prompt: str = "You are a helpful assistant",
                  temp: float = 0.25,
                  timeout: int = 1800,
                  tools_config: Union[List[str], Dict, None] = None,
@@ -312,7 +366,7 @@ class LLMAgent:
         self.history.add(user_message)
         messages_base = self._prepare_messages_for_api()
 
-        self.on_system_msg(f"Generating {self.sc_samples} drafts with tool suggestions...")
+        self.on_system_msg(f"Generating {self.sc_samples} drafts with tool suggestions..")
         drafts = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=self.sc_samples) as executor:
             futures = [
@@ -326,7 +380,7 @@ class LLMAgent:
                     drafts.append(draft)
 
         if not drafts:
-            return "Failed to generate any valid draft."
+            return "Failed to generate any valid draft"
 
         draft_texts = []
         for i, draft in enumerate(drafts, 1):
@@ -337,7 +391,7 @@ class LLMAgent:
             draft_texts.append(f"--- Draft {i} ---\n{content}")
 
         synthesis_prompt = (
-                f"Here are drafts from multiple reasoning paths."
+                f"Here are drafts from multiple reasoning paths"
                 + "\n".join(draft_texts) +
                 "\n\nBased on the drafts and the user's request, provide the final answer. "
         )
@@ -403,7 +457,7 @@ class LLMAgent:
 
         if final_err or not final_obj:
             # Если финальный ответ не получился, возвращаем что есть
-            return clean_content or "Tool executed successfully."
+            return clean_content or "Tool executed successfully"
 
         final_content = final_obj.content.strip()
         final_assistant_msg = {"role": "assistant", "content": final_content}
@@ -465,7 +519,7 @@ class LLMAgent:
                     continue
 
                 if tool_info['requires_confirmation'] and not self.on_confirm(name, args):
-                    results.append({"tool_call_id": tc.id, "role": "tool", "name": name, "content": "Execution cancelled by user."})
+                    results.append({"tool_call_id": tc.id, "role": "tool", "name": name, "content": "Execution cancelled by user"})
                     self.edit_mode = False
                     continue
 
@@ -480,27 +534,32 @@ class LLMAgent:
         return results
 
     # ---------- Инструменты ----------
-    @tool(description="Enables visibility of message IDs.")
+    @tool(description="Enables visibility of message IDs")
     def get_msg_ids(self):
         self.edit_mode = True
         return 'Successfully showed ids'
 
-    @tool(description="Edits a specific message in the history.",
+    @tool(description="Edits a specific message in the history",
           requires_confirmation=True,
-          id=("int", "ID of the message to edit."),
-          old=("str", "Optional exact substr to replace. Empty str replaces whole text."),
-          new=("str", "Text to insert in place of old."))
+          id=("int", "ID of the message to edit"),
+          old=("str", "Optional exact substr to replace. Empty str replaces whole text"),
+          new=("str", "Text to insert in place of old"))
     def edit_message(self, id: int, new: str, old: str = ''):
         res = self.history.edit_message(id, new, old)
         return res
 
-    @tool(description="Deletes a range of messages from dialog history.",
+    @tool(description="Deletes a range of messages from dialog history",
           requires_confirmation=True,
-          start_id=("int", "Starting message ID to delete."),
-          end_id=("int", "Optional ending message ID (-1 for last)."))
+          start_id=("int", "Starting message ID to delete"),
+          end_id=("int", "Optional ending message ID (-1 for last)"))
     def delete_messages(self, start_id: int, end_id: int = -1):
         err = self.history.delete_range(start_id, end_id)
         return err
+
+    @tool(description="Runs Python code in an isolated container with no host file access",
+          code=("str", "Python code to run"))
+    def run_python(self, code: str):
+        return DockerSandbox.run_python(code)
 
     def chat(self, message: str, max_iter: int = 5, prefill: str = None) -> str:
         if self.self_consistency_mode:
@@ -547,7 +606,7 @@ class LLMAgent:
             for tr in tool_results:
                 self.on_render(tr)
 
-        return "Max iterations reached without final answer."
+        return "Max iterations reached without final answer"
 
 
 class ConsoleUI:
@@ -574,7 +633,7 @@ class ConsoleUI:
 
     @staticmethod
     def confirm_action(name: str, args: Dict) -> bool:
-        print(f"\n[WARNING] Tool '{name}' modifies state.")
+        print(f"\n[WARNING] Tool '{name}' modifies state")
         print(f"Arguments: {json.dumps(args, ensure_ascii=False)}")
         return input("Execute? (y/N): ").strip().lower() == 'y'
 
@@ -604,7 +663,7 @@ class CLI:
         user_msg = self.agent.history.pop_until_user()
 
         if not user_msg:
-            ConsoleUI.system_msg("Cannot find a preceding user message to regenerate.")
+            ConsoleUI.system_msg("Cannot find a preceding user message to regenerate")
             return
 
         ConsoleUI.system_msg(f"Regenerating response for: '{user_msg}'")
@@ -612,11 +671,11 @@ class CLI:
 
     def cmd_think_on(self, parts: List[str]):
         self.agent.thinking_enabled = True
-        ConsoleUI.system_msg("Force think ENABLED.")
+        ConsoleUI.system_msg("Force think ENABLED")
 
     def cmd_think_off(self, parts: List[str]):
         self.agent.thinking_enabled = False
-        ConsoleUI.system_msg("Force think DISABLED (using dirty hack).")
+        ConsoleUI.system_msg("Force think DISABLED (using dirty hack)")
 
     def cmd_prefill(self, parts: List[str]):
         if len(parts) > 1:
@@ -624,20 +683,20 @@ class CLI:
             ConsoleUI.system_msg(f"Next message will start with prefill: '{self.pending_prefill}'")
         else:
             self.pending_prefill = None
-            ConsoleUI.system_msg("Prefill cleared.")
+            ConsoleUI.system_msg("Prefill cleared")
 
     def cmd_save(self, parts: List[str]):
         filename = parts[1] if len(parts) > 1 else "default_history.json"
         try:
             self.agent.history.save(filename)
-            ConsoleUI.system_msg(f"History saved to '{filename}'.")
+            ConsoleUI.system_msg(f"History saved to '{filename}'")
         except Exception as e:
             ConsoleUI.system_msg(f"Error saving history: {e}")
 
     def cmd_load(self, parts: List[str]):
         filename = parts[1] if len(parts) > 1 else "default_history.json"
         if not os.path.exists(filename):
-            ConsoleUI.system_msg(f"File '{filename}' not found.")
+            ConsoleUI.system_msg(f"File '{filename}' not found")
             return
         try:
             self.agent.history.load(filename)
@@ -649,13 +708,13 @@ class CLI:
             ConsoleUI.system_msg(f"Error loading history: {e}")
 
     def cmd_consistent(self, parts: List[str]):
-        """Toggle self-consistency mode on/off."""
+        """Toggle self-consistency mode on/off"""
         self.agent.self_consistency_mode = not self.agent.self_consistency_mode
         status = "ON" if self.agent.self_consistency_mode else "OFF"
-        ConsoleUI.system_msg(f"Self-consistency mode turned {status}.")
+        ConsoleUI.system_msg(f"Self-consistency mode turned {status}")
 
     def run(self):
-        ConsoleUI.system_msg("Ready. Type 'exit' to quit.")
+        ConsoleUI.system_msg("Ready. Type 'exit' to quit")
         ConsoleUI.system_msg(f"Commands: {', '.join(self.commands.keys())}")
 
         while True:
@@ -679,7 +738,7 @@ class CLI:
 
 if __name__ == "__main__":
     sys_prompt = (
-        "You are a special tool-calling assistant. Use tools to fulfill user requests. Speak Russian."
+        "You are a special tool-calling assistant. Use tools to fulfill user requests. Speak Russian"
     )
 
     agent = LLMAgent(
@@ -689,6 +748,5 @@ if __name__ == "__main__":
         on_confirm=ConsoleUI.confirm_action,
         on_system_msg=ConsoleUI.system_msg
     )
-
     cli = CLI(agent)
     cli.run()
