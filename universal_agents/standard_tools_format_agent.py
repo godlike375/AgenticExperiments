@@ -1,8 +1,10 @@
+import threading
 import datetime
 import json
 import os
 import re
 import shlex
+import concurrent.futures
 from collections import defaultdict
 from typing import List, Dict, Union, Callable, Optional
 
@@ -35,12 +37,17 @@ class LLMClient:
                 model=Config.MODEL_NAME,
                 messages=messages_to_send,
                 temperature=temp,
-                max_tokens=11500,
+                max_tokens=7500,
                 tools=tools,
                 timeout=timeout,
                 reasoning_effort="none"
             )
-            return response.choices[0].message, None
+            msg = response.choices[0].message
+
+            if prefill and msg.content:
+                msg.content = prefill + msg.content
+
+            return msg, None
         except Exception as e:
             return None, str(e)
 
@@ -275,8 +282,134 @@ class LLMAgent:
         self.on_confirm = on_confirm
         self.on_system_msg = on_system_msg
 
+        self.self_consistency_mode = False
+        self.sc_samples = 3
+        self._sc_semaphore = threading.Semaphore(4)
+
         self._all_tools = self._collect_tools([FS, self.__class__])
         self._filter_tools(tools_config)
+
+    def _generate_draft_with_tool_suggestions(self, draft_messages, prefill, draft_temp, draft_timeout):
+        """
+        Генерирует черновик с полным доступом к схемам инструментов,
+        но не исполняет tool_calls. Возвращает полный message_obj.
+        """
+        prefill = prefill or ("</think>\n\n" if not self.thinking_enabled else None)
+
+        for attempt in range(3):
+            with self._sc_semaphore:  # ограничение параллелизма
+                msg_obj, err = LLMClient.call(
+                    draft_messages, draft_temp, draft_timeout,
+                    tools=self.tools if self.tools else None,
+                    prefill=prefill
+                )
+            if msg_obj and not err:
+                return msg_obj
+        return None
+
+    def _chat_self_consistent(self, message: str, prefill: str = None) -> str:
+        user_message = {"role": "user", "content": message}
+        self.history.add(user_message)
+        messages_base = self._prepare_messages_for_api()
+
+        self.on_system_msg(f"Generating {self.sc_samples} drafts with tool suggestions...")
+        drafts = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=self.sc_samples) as executor:
+            futures = [
+                executor.submit(self._generate_draft_with_tool_suggestions,
+                                messages_base, prefill, 0.8, self.timeout)
+                for _ in range(self.sc_samples)
+            ]
+            for f in futures:
+                draft = f.result()
+                if draft:
+                    drafts.append(draft)
+
+        if not drafts:
+            return "Failed to generate any valid draft."
+
+        draft_texts = []
+        for i, draft in enumerate(drafts, 1):
+            content = draft.content or "(no text)"
+            if draft.tool_calls:
+                tc_names = [f"{tc.function.name}({tc.function.arguments})" for tc in draft.tool_calls]
+                content += f"\n[Suggested tool calls: {', '.join(tc_names)}]"
+            draft_texts.append(f"--- Draft {i} ---\n{content}")
+
+        synthesis_prompt = (
+                f"Here are drafts from multiple reasoning paths."
+                + "\n".join(draft_texts) +
+                "\n\nBased on the drafts and the user's request, provide the final answer. "
+        )
+
+        synthesis_messages = messages_base + [{"role": "system", "content": synthesis_prompt}]
+        current_prefill = prefill or None
+        current_prefill = current_prefill or ("</think>\n\n" if not self.thinking_enabled else None)
+
+        msg_obj, err = LLMClient.call(
+            synthesis_messages,
+            temp=0.2,
+            timeout=self.timeout,
+            tools=self.tools if self.tools else None,
+            prefill=current_prefill
+        )
+
+        if err:
+            return f"API Error during synthesis: {err}"
+        if not msg_obj:
+            return "Empty response during synthesis"
+
+        # Если модель сразу ответила без инструментов
+        if not msg_obj.tool_calls:
+            final_content = msg_obj.content.replace("</think>", "").strip()
+            assistant_msg = {"role": "assistant", "content": final_content}
+            self.history.add(assistant_msg)
+            self.on_render(assistant_msg)
+            return final_content
+
+        tool_results = self._execute_tools(msg_obj.tool_calls)
+
+        clean_content = msg_obj.content.replace("</think>", "").strip()
+
+        assistant_msg = {
+            "role": "assistant",
+            "content": clean_content,
+            "tool_calls": [
+                {
+                    "id": tc.id,
+                    "type": tc.type,
+                    "function": {
+                        "name": tc.function.name,
+                        "arguments": tc.function.arguments
+                    }
+                } for tc in msg_obj.tool_calls
+            ]
+        }
+        self.history.add(assistant_msg)
+        self.on_render(assistant_msg)
+
+        self.history.extend(tool_results)
+        for tr in tool_results:
+            self.on_render(tr)
+
+        followup_messages = synthesis_messages + [assistant_msg] + tool_results
+
+        final_obj, final_err = LLMClient.call(
+            followup_messages,
+            temp=0.2,
+            timeout=self.timeout,
+            tools=None  # без инструментов — только текст
+        )
+
+        if final_err or not final_obj:
+            # Если финальный ответ не получился, возвращаем что есть
+            return clean_content or "Tool executed successfully."
+
+        final_content = final_obj.content.strip()
+        final_assistant_msg = {"role": "assistant", "content": final_content}
+        self.history.add(final_assistant_msg)
+        self.on_render(final_assistant_msg)
+        return final_content
 
     def _collect_tools(self, classes):
         tools = {}
@@ -309,13 +442,14 @@ class LLMAgent:
         self._all_tools = {k: v for k, v in self._all_tools.items() if k in active}
         self.tools = [v['schema'] for v in self._all_tools.values()]
 
-    def _prepare_messages_for_api(self, step_prefill: str) -> List[Dict]:
+    def _prepare_messages_for_api(self) -> List[Dict]:
         messages_to_send = [self.history[0].copy()]
         for idx, msg in enumerate(self.history.get_all()[Config.AFTER_SYSTEM_PROMPT:]):
             copy = msg.copy()
             if self.edit_mode:
                 copy["content"] = f"[id {idx + Config.AFTER_SYSTEM_PROMPT}]\n{copy['content']}"
             messages_to_send.append(copy)
+
         return messages_to_send
 
     def _execute_tools(self, tool_calls) -> List[Dict]:
@@ -369,6 +503,8 @@ class LLMAgent:
         return err
 
     def chat(self, message: str, max_iter: int = 5, prefill: str = None) -> str:
+        if self.self_consistency_mode:
+            return self._chat_self_consistent(message, prefill)
         user_msg = {"role": "user", "content": message}
         self.history.add(user_msg)
 
@@ -378,7 +514,7 @@ class LLMAgent:
 
         for i in range(max_iter):
             step_prefill = current_prefill if i == 0 else None
-            messages_to_send = self._prepare_messages_for_api(step_prefill)
+            messages_to_send = self._prepare_messages_for_api()
 
             message_obj, err = LLMClient.call(
                 messages_to_send, self.temp, self.timeout,
@@ -391,7 +527,7 @@ class LLMAgent:
             self.edit_mode = False
 
             content = message_obj.content or ""
-            clean_content = ((step_prefill + content) if step_prefill else content).replace("</think>", "").strip()
+            clean_content = content.replace("</think>", "").strip()
 
             assistant_msg = {"role": "assistant", "content": clean_content}
             if message_obj.tool_calls:
@@ -434,7 +570,7 @@ class ConsoleUI:
         elif role == "tool":
             display = str(content)
             if len(display) > 300: display = display[:300] + "\n... [TRUNCATED]"
-            print(f" ✅ [Result '{msg.get('name')}']: {display}")
+            print(f" ✅ [Result '{msg.get('name')}'({msg.get('args')}]: {display}")
 
     @staticmethod
     def confirm_action(name: str, args: Dict) -> bool:
@@ -457,7 +593,8 @@ class CLI:
             "/think_off": self.cmd_think_off,
             "/prefill": self.cmd_prefill,
             "/save": self.cmd_save,
-            "/load": self.cmd_load
+            "/load": self.cmd_load,
+            "/consistent": self.cmd_consistent,
         }
 
     def cmd_regen(self, parts: List[str]):
@@ -511,6 +648,12 @@ class CLI:
         except Exception as e:
             ConsoleUI.system_msg(f"Error loading history: {e}")
 
+    def cmd_consistent(self, parts: List[str]):
+        """Toggle self-consistency mode on/off."""
+        self.agent.self_consistency_mode = not self.agent.self_consistency_mode
+        status = "ON" if self.agent.self_consistency_mode else "OFF"
+        ConsoleUI.system_msg(f"Self-consistency mode turned {status}.")
+
     def run(self):
         ConsoleUI.system_msg("Ready. Type 'exit' to quit.")
         ConsoleUI.system_msg(f"Commands: {', '.join(self.commands.keys())}")
@@ -536,8 +679,7 @@ class CLI:
 
 if __name__ == "__main__":
     sys_prompt = (
-        "You are a special tool-calling assistant. Use tools to fulfill user requests. "
-        "Ask user's confirmation before calling tools. Speak Russian."
+        "You are a special tool-calling assistant. Use tools to fulfill user requests. Speak Russian."
     )
 
     agent = LLMAgent(
