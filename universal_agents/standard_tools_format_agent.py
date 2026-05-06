@@ -1,73 +1,57 @@
-import threading
-import datetime
 import json
-import os
-import re
 import shlex
-import concurrent.futures
-import subprocess
-import tempfile
-from collections import defaultdict
+import importlib
+import inspect
+import os
+import sys
 from typing import List, Dict, Union, Callable, Optional
 
 from openai import OpenAI
+
+from universal_agents.tool import tool
+
+
+def load_external_plugins(plugins_dir="tools"):
+    """
+    Загружает все .py файлы из директории и возвращает словарь
+    {имя_функции: функция}, где функции помечены декоратором @tool.
+    """
+    external_tools = {}
+
+    if not os.path.exists(plugins_dir):
+        return external_tools
+
+    # Добавляем корень проекта в путь, чтобы импорты внутри плагинов работали
+    root_path = os.path.abspath(os.path.join(plugins_dir, ".."))
+    if root_path not in sys.path:
+        sys.path.insert(0, root_path)
+
+    for filename in os.listdir(plugins_dir):
+        if filename.endswith(".py") and not filename.startswith("__"):
+            module_name = filename[:-3]
+            try:
+                spec = importlib.util.spec_from_file_location(module_name, os.path.join(plugins_dir, filename))
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+
+                # Ищем функции с атрибутом _is_tool
+                for name, obj in inspect.getmembers(module):
+                    if hasattr(obj, '_is_tool') and callable(obj):
+                        if name in external_tools:
+                            print(f"Warning: Duplicate tool name '{name}' in {filename}")
+                            continue
+                        external_tools[name] = obj
+
+            except Exception as e:
+                print(f"Error loading plugin {filename}: {e}")
+
+    return external_tools
+
 
 class Config:
     API_URL = "http://localhost:1234/v1"
     MODEL_NAME = "local-model"
     AFTER_SYSTEM_PROMPT = 1
-
-
-class DockerSandbox:
-    _ALLOWED_MOUNTS = set()  # Пути на хосте, разрешённые для монтирования
-
-    @classmethod
-    def set_allowed_mounts(cls, paths: List[str]):
-        cls._ALLOWED_MOUNTS = set(os.path.abspath(p) for p in paths)
-
-    @staticmethod
-    def run_python(code: str, timeout: int = 30) -> str:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            # Записываем код во временную папку
-            code_path = os.path.join(tmpdir, "script.py")
-            with open(code_path, 'w', encoding='utf-8') as f:
-                f.write(code)
-
-            # Формируем docker команду
-            cmd = [
-                "docker", "run", "--rm",
-                "--network", "none",  # без сети
-                "--memory", "512m",   # ограничение памяти
-                "--cpus", "1",        # ограничение CPU
-                "-v", f"{tmpdir}:/code:ro",  # код только для чтения
-            ]
-
-            # Монтируем только разрешённые папки
-            for mount_path in DockerSandbox._ALLOWED_MOUNTS:
-                if os.path.exists(mount_path):
-                    cmd.extend(["-v", f"{mount_path}:{mount_path}:ro"])
-
-            cmd.extend([
-                "python:3.11-slim",
-                "python", "/code/script.py"
-            ])
-
-            try:
-                result = subprocess.run(
-                    cmd,
-                    capture_output=True,
-                    text=True,
-                    encoding='utf-8',
-                    timeout=timeout
-                )
-                output = result.stdout
-                if result.stderr:
-                    output += f"\n[stderr]:\n{result.stderr}"
-                return output
-            except subprocess.TimeoutExpired:
-                return f"Error: execution timed out after {timeout}s"
-            except Exception as e:
-                return f"Error running code in container: {e}"
 
 
 class LLMClient:
@@ -104,35 +88,6 @@ class LLMClient:
             return msg, None
         except Exception as e:
             return None, str(e)
-
-
-def tool(description="", requires_confirmation=False, **params):
-    def decorator(func):
-        func._is_tool = True
-        func._tool_name = func.__name__
-        func._requires_confirmation = requires_confirmation
-
-        properties = {}
-        required = []
-        for pname, (ptype, pdesc) in params.items():
-            properties[pname] = {"type": ptype, "description": pdesc}
-            if not pdesc.lower().startswith("optional"):
-                required.append(pname)
-
-        func._tool_schema = {
-            "type": "function",
-            "function": {
-                "name": func.__name__,
-                "description": description or (func.__doc__ or "").split("\n")[0].strip(),
-                "parameters": {
-                    "type": "object",
-                    "properties": properties,
-                    "required": required
-                }
-            }
-        }
-        return func
-    return decorator
 
 
 class ChatHistory:
@@ -216,106 +171,6 @@ class ChatHistory:
             raise ValueError("Invalid history format")
 
 
-class FS:
-    @staticmethod
-    def _format_size(size_bytes: int) -> str:
-        if size_bytes < 1024: return f"{size_bytes}B"
-        for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
-            if size_bytes < 1024:
-                return f"{size_bytes:.1f}{unit}" if unit != 'B' else f"{size_bytes}{unit}"
-            size_bytes /= 1024
-        return f"{size_bytes:.1f}TB"
-
-    @staticmethod
-    def _count_hidden_size(root_path: str) -> int:
-        total = 0
-        try:
-            for entry in os.scandir(root_path):
-                try:
-                    if entry.is_file(): total += entry.stat().st_size
-                    elif entry.is_dir(): total += FS._count_hidden_size(entry.path)
-                except PermissionError: continue
-        except (PermissionError, FileNotFoundError): pass
-        return total
-
-    @staticmethod
-    def _build_tree(root_path: str, depth: int = 0, density: int = 4) -> str:
-        try: entries = list(os.scandir(root_path))
-        except PermissionError: return f"{'  ' * depth}[Permission Denied]"
-        except FileNotFoundError: return f"{'  ' * depth}[Path Not Found]"
-
-        if depth > 0 and len(entries) > density:
-            size = FS._format_size(FS._count_hidden_size(root_path))
-            return f"{'  ' * depth}[{len(entries)} items TRUNCATED, {size}]"
-
-        dirs = sorted([e for e in entries if e.is_dir()], key=lambda x: x.name.lower())
-        files = sorted([e for e in entries if e.is_file()], key=lambda x: x.name.lower())
-
-        lines = []
-        for entry in dirs + files:
-            mtime = datetime.datetime.fromtimestamp(entry.stat().st_mtime).strftime("%Y-%m-%d")
-            prefix = f"{'  ' * depth}"
-            if entry.is_dir():
-                lines.append(f"{prefix}{entry.name}/ ({mtime})")
-                if sub := FS._build_tree(entry.path, depth + 1, density):
-                    lines.append(sub)
-            else:
-                lines.append(f"{prefix}{entry.name} ({FS._format_size(entry.stat().st_size)})")
-        return "\n".join(lines)
-
-    @staticmethod
-    @tool(description="Gets file content or dir tree",
-          path=("str", "Optional path to file/dir (default '.'). Use '..' to open parent dir"))
-    def open(path: str = '.'):
-        if not os.path.exists(path): raise FileNotFoundError(f"Path not found: {path}")
-        try:
-            mtime = datetime.datetime.fromtimestamp(os.stat(path).st_mtime).strftime("%Y-%m-%d %H:%M:%S")
-            if os.path.isfile(path):
-                try:
-                    with open(path, 'r', encoding='utf-8', errors='strict') as f:
-                        return f"File: {path}\nModified: {mtime}\nContent:\n---\n{f.read()}"
-                except UnicodeDecodeError:
-                    return "Error: Cannot read binary files (failed UTF-8 decode)"
-            elif os.path.isdir(path):
-                return f"Directory Tree: {os.path.abspath(path)}\nModified: {mtime}\n\n{FS._build_tree(path)}"
-            raise RuntimeError("Unexpected file type")
-        except Exception as e:
-            raise PermissionError(f"Error accessing {path}: {e}")
-
-    @staticmethod
-    @tool(description="Searches files by regex",
-          pattern=("str", "Regex to search for"),
-          path=("str", "Optional base dir (default '.')"))
-    def search_files(pattern: str, path: str = ""):
-        if not os.path.isdir(path): raise FileNotFoundError(f"Base path not found: {path}")
-        folders_map = defaultdict(list)
-        for root, _, files in os.walk(path):
-            for f in files:
-                if re.search(pattern, f):
-                    rel = os.path.relpath(root, path)
-                    folders_map["" if rel == "" else rel].append(f)
-        if not folders_map: return "No matches"
-
-        lines = []
-        for folder in sorted(folders_map.keys()):
-            lines.append(f"{folder}/:")
-            for fname in sorted(folders_map[folder]):
-                lines.append(f"  - {fname}")
-        return "\n".join(lines)
-
-    @staticmethod
-    @tool(description="Gets or changes current working dir",
-          path=("str", "Optional new working dir. Use '..' to go to the parent dir"))
-    def cwd(path: str = None):
-        if path:
-            try:
-                os.chdir(path)
-                return 'Successfully changed cwd'
-            except Exception as e:
-                return f"Error changing cwd: {e}"
-        return os.getcwd()
-
-
 class LLMAgent:
     def __init__(self,
                  system_prompt: str = "You are a helpful assistant",
@@ -324,7 +179,8 @@ class LLMAgent:
                  tools_config: Union[List[str], Dict, None] = None,
                  on_render: Callable[[Dict], None] = lambda x: None,
                  on_confirm: Callable[[str, Dict], bool] = lambda n, a: True,
-                 on_system_msg: Callable[[str], None] = lambda x: None):
+                 on_system_msg: Callable[[str], None] = lambda x: None,
+                 external_plugins: Dict[str, Callable] = None):
 
         self.history = ChatHistory(system_prompt)
         self.temp = temp
@@ -338,10 +194,48 @@ class LLMAgent:
 
         self.self_consistency_mode = False
         self.sc_samples = 3
-        self._sc_semaphore = threading.Semaphore(4)
 
-        self._all_tools = self._collect_tools([FS, self.__class__])
+        # 1. Собираем внутренние инструменты (из классов FS и самого агента)
+        internal_tools = self._collect_internal_tools([self.__class__])
+
+        # 2. Обрабатываем внешние плагины
+        if external_plugins:
+            for name, func in external_plugins.items():
+                # Проверяем, не конфликтует ли имя
+                if name in internal_tools:
+                    print(f"Warning: External tool '{name}' conflicts with internal tool. Skipping.")
+                    continue
+
+                internal_tools[name] = {
+                    "schema": func._tool_schema,
+                    "handler": func,
+                    "is_instance_method": False, # Внешние функции обычно статические
+                    "requires_confirmation": getattr(func, '_requires_confirmation', False)
+                }
+
+        self._all_tools = internal_tools
         self._filter_tools(tools_config)
+
+    def _collect_internal_tools(self, classes):
+        """Собирает инструменты только из переданных классов (внутренние)"""
+        tools = {}
+        for klass in classes:
+            for name in dir(klass):
+                raw = klass.__dict__.get(name)
+                if raw is None: continue
+
+                is_instance_method = callable(raw) and not isinstance(raw, (staticmethod, classmethod, type))
+                func = raw.__func__ if isinstance(raw, staticmethod) else raw
+
+                if not hasattr(func, '_is_tool'): continue
+
+                tools[func._tool_name] = {
+                    "schema": func._tool_schema,
+                    "handler": func,
+                    "is_instance_method": is_instance_method,
+                    "requires_confirmation": getattr(func, '_requires_confirmation', False)
+                }
+        return tools
 
     def _generate_draft_with_tool_suggestions(self, draft_messages, prefill, draft_temp, draft_timeout):
         """
@@ -351,12 +245,11 @@ class LLMAgent:
         prefill = prefill or ("</think>\n\n" if not self.thinking_enabled else None)
 
         for attempt in range(3):
-            with self._sc_semaphore:  # ограничение параллелизма
-                msg_obj, err = LLMClient.call(
-                    draft_messages, draft_temp, draft_timeout,
-                    tools=self.tools if self.tools else None,
-                    prefill=prefill
-                )
+            msg_obj, err = LLMClient.call(
+                draft_messages, draft_temp, draft_timeout,
+                tools=self.tools if self.tools else None,
+                prefill=prefill
+            )
             if msg_obj and not err:
                 return msg_obj
         return None
@@ -368,16 +261,12 @@ class LLMAgent:
 
         self.on_system_msg(f"Generating {self.sc_samples} drafts with tool suggestions..")
         drafts = []
-        with concurrent.futures.ThreadPoolExecutor(max_workers=self.sc_samples) as executor:
-            futures = [
-                executor.submit(self._generate_draft_with_tool_suggestions,
-                                messages_base, prefill, 0.8, self.timeout)
-                for _ in range(self.sc_samples)
-            ]
-            for f in futures:
-                draft = f.result()
-                if draft:
-                    drafts.append(draft)
+
+        for i in range(self.sc_samples):
+            draft = self._generate_draft_with_tool_suggestions(
+                messages_base, prefill, 0.85, self.timeout)
+            if draft:
+                drafts.append(draft)
 
         if not drafts:
             return "Failed to generate any valid draft"
@@ -402,7 +291,7 @@ class LLMAgent:
 
         msg_obj, err = LLMClient.call(
             synthesis_messages,
-            temp=0.2,
+            temp=0.1,
             timeout=self.timeout,
             tools=self.tools if self.tools else None,
             prefill=current_prefill
@@ -450,13 +339,12 @@ class LLMAgent:
 
         final_obj, final_err = LLMClient.call(
             followup_messages,
-            temp=0.2,
+            temp=0.1,
             timeout=self.timeout,
-            tools=None  # без инструментов — только текст
+            tools=None
         )
 
         if final_err or not final_obj:
-            # Если финальный ответ не получился, возвращаем что есть
             return clean_content or "Tool executed successfully"
 
         final_content = final_obj.content.strip()
@@ -464,27 +352,6 @@ class LLMAgent:
         self.history.add(final_assistant_msg)
         self.on_render(final_assistant_msg)
         return final_content
-
-    def _collect_tools(self, classes):
-        tools = {}
-        for klass in classes:
-            for name in dir(klass):
-                raw = klass.__dict__.get(name)
-                if raw is None: continue
-
-                # Хак для определения, нужно ли передавать self (агента) в инструмент
-                is_instance_method = callable(raw) and not isinstance(raw, (staticmethod, classmethod, type))
-                func = raw.__func__ if isinstance(raw, staticmethod) else raw
-
-                if not hasattr(func, '_is_tool'): continue
-
-                tools[func._tool_name] = {
-                    "schema": func._tool_schema,
-                    "handler": func,
-                    "is_instance_method": is_instance_method,
-                    "requires_confirmation": getattr(func, '_requires_confirmation', False)
-                }
-        return tools
 
     def _filter_tools(self, config):
         all_names = set(self._all_tools.keys())
@@ -555,11 +422,6 @@ class LLMAgent:
     def delete_messages(self, start_id: int, end_id: int = -1):
         err = self.history.delete_range(start_id, end_id)
         return err
-
-    @tool(description="Runs Python code in an isolated container with no host file access",
-          code=("str", "Python code to run"))
-    def run_python(self, code: str):
-        return DockerSandbox.run_python(code)
 
     def chat(self, message: str, max_iter: int = 5, prefill: str = None) -> str:
         if self.self_consistency_mode:
@@ -737,16 +599,23 @@ class CLI:
 
 
 if __name__ == "__main__":
+    # 1. Загружаем внешние плагины
+    external_tools = load_external_plugins("tools")
+    print(f"Loaded external tools: {list(external_tools.keys())}")
+
     sys_prompt = (
         "You are a special tool-calling assistant. Use tools to fulfill user requests. Speak Russian"
     )
 
+    # 2. Передаем их в агент
     agent = LLMAgent(
         system_prompt=sys_prompt,
         tools_config="all",
+        external_plugins=external_tools,
         on_render=ConsoleUI.render_message,
         on_confirm=ConsoleUI.confirm_action,
         on_system_msg=ConsoleUI.system_msg
     )
+
     cli = CLI(agent)
     cli.run()
