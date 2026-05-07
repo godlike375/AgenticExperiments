@@ -496,7 +496,6 @@ class ConsoleUI:
     @staticmethod
     def confirm_action(name: str, args: Dict) -> bool:
         print(f"\n[WARNING] Tool '{name}' modifies state")
-        print(f"Arguments: {json.dumps(args, ensure_ascii=False)}")
         return input("Execute? (y/N): ").strip().lower() == 'y'
 
     @staticmethod
@@ -604,7 +603,7 @@ if __name__ == "__main__":
     print(f"Loaded external tools: {list(external_tools.keys())}")
 
     sys_prompt = (
-        "You are a special tool-calling assistant. Use tools to fulfill user requests. Speak Russian"
+        "You are a special tool-calling assistant. Use tools to fulfill user requests. Speak Russian, be concise."
     )
 
     # 2. Передаем их в агент
