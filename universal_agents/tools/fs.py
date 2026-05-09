@@ -3,7 +3,7 @@ import os
 import re
 from collections import defaultdict
 
-from universal_agents.tool import tool
+from universal_agents.tool import tool, ENVIRONMENT_PREFIX
 
 
 class FS:
@@ -53,37 +53,18 @@ class FS:
                 lines.append(f"{prefix}{entry.name} ({FS._format_size(entry.stat().st_size)})")
         return "\n".join(lines)
 
-
-@tool(description="Gets file content or dir tree",
-      path=("str", "Optional path to file/dir (default '.'). Use '..' to open parent dir"))
-def read(path: str = '.'):
-    if not os.path.exists(path): raise FileNotFoundError(f"Path not found: {path}")
-    try:
-        mtime = datetime.datetime.fromtimestamp(os.stat(path).st_mtime).strftime("%Y-%m-%d %H:%M:%S")
-        if os.path.isfile(path):
-            try:
-                with open(path, 'r', encoding='utf-8', errors='strict') as f:
-                    return f"File: {path}\nModified: {mtime}\nContent:\n---\n{f.read()}"
-            except UnicodeDecodeError:
-                return "Error: Cannot read binary files (failed UTF-8 decode)"
-        elif os.path.isdir(path):
-            return f"Directory Tree: {os.path.abspath(path)}\nModified: {mtime}\n\n{FS._build_tree(path)}"
-        raise RuntimeError("Unexpected file type")
-    except Exception as e:
-        raise PermissionError(f"Error accessing {path}: {e}")
-
 @tool(description="Searches files by regex",
       pattern=("str", "Regex to search for"),
       path=("str", "Optional base dir (default '.')"))
 def search_files(pattern: str, path: str = ""):
-    if not os.path.isdir(path): raise FileNotFoundError(f"Base path not found: {path}")
+    if not os.path.isdir(path): raise FileNotFoundError(f"{ENVIRONMENT_PREFIX} Base path not found: {path}")
     folders_map = defaultdict(list)
     for root, _, files in os.walk(path):
         for f in files:
             if re.search(pattern, f):
                 rel = os.path.relpath(root, path)
                 folders_map["" if rel == "" else rel].append(f)
-    if not folders_map: return "No matches"
+    if not folders_map: return f"{ENVIRONMENT_PREFIX} No matches"
 
     lines = []
     for folder in sorted(folders_map.keys()):
@@ -98,9 +79,9 @@ def cwd(path: str = None):
     if path:
         try:
             os.chdir(path)
-            return 'Successfully changed cwd'
+            return f'{ENVIRONMENT_PREFIX} Successfully set cwd'
         except Exception as e:
-            return f"Error changing cwd: {e}"
+            return f"{ENVIRONMENT_PREFIX} Error changing cwd: {e}"
     return os.getcwd()
 
 # @tool(
@@ -169,155 +150,81 @@ def cwd(path: str = None):
 import os
 import re
 
+@tool(description="Gets file content or dir tree (lines are numbered for precise editing)",
+      path=("str", "Optional path to file/dir (default '.'). Use '..' to open parent dir"))
+def read(path: str = '.'):
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Path not found: {path}")
+    try:
+        mtime = datetime.datetime.fromtimestamp(os.stat(path).st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+        if os.path.isfile(path):
+            try:
+                with open(path, 'r', encoding='utf-8', errors='strict') as f:
+                    raw = f.read()
+                    lines = raw.splitlines()
+                    numbered = [f"{i+1} {line}" for i, line in enumerate(lines)]
+                    return f"{ENVIRONMENT_PREFIX} File: {path}\nModified: {mtime}\nContent:\n---\n" + ("\n".join(numbered) if numbered else "")
+            except UnicodeDecodeError:
+                return f"{ENVIRONMENT_PREFIX} Error: Cannot read binary files (failed UTF-8 decode)"
+        elif os.path.isdir(path):
+            return f"{ENVIRONMENT_PREFIX} Directory Tree: {os.path.abspath(path)}\nModified: {mtime}\n\n{FS._build_tree(path)}"
+        raise RuntimeError("Unexpected file type")
+    except Exception as e:
+        raise PermissionError(f"Error accessing {path}: {e}")
+
+
 @tool(
-    description="""Replace text in file in a range between [old_first_line; old_last_line] inclusively.
-    If old_last_line is not provided, replaces only the old_first_line line.
-    Both old_first_line & old_last_line must be only single lines (no '\\n' inside).
-    """,
+    description="""Replace a contiguous block of lines in a file by their line numbers.
+    start_line & end_line refer to the LINE NUMBERS (1-based) shown by open().
+    Range is INCLUSIVE. If end_line is omitted, only that single line is replaced.
+    new_text: replacement text. Use '\\n' for new lines within the replacement.""",
     requires_confirmation=True,
     path=("str", "File path"),
-    old_first_line=(
-            "str",
-            "START line to replace. MUST be a single line (no '\\n' inside). "
-    ),
-    old_last_line=(
-            "str",
-            "Optional END line to replace. If provided, MUST be a single line without '\\n'. "
-    ),
-    new=("str", "New string to replace everything from old_first_line to old_last_line inclusively"),
-    mode=("str", "'one' (default) or 'all'")
+    start_line=("str", "START line number (integer) from open() output."),
+    end_line=("str", "Optional END line number (integer). Defaults to START."),
+    new_text=("str", "New content to replace the specified range with.")
 )
-def edit_file(path: str, old_first_line: str, new: str, old_last_line: str = None, mode: str = "one"):
+def edit_file(path: str, start_line: str, new_text: str, end_line: str = None):
     if not os.path.isfile(path):
         return f"File not found: {path}"
-    if not old_first_line:
-        return "Error: old_first_line cannot be empty."
-    if mode not in ("one", "all"):
-        return f"Error: mode must be 'one' or 'all', got '{mode}'"
+
+    # Парсинг номеров строк
+    try:
+        start_num = int(start_line)
+        end_num = int(end_line) if end_line is not None else start_num
+    except ValueError:
+        return "Error: Line numbers must be valid integers."
+
+    if start_num < 1 or end_num < 1:
+        return "Error: Line numbers must be >= 1."
+    if start_num > end_num:
+        return "Error: Start line cannot be greater than end line."
 
     try:
         with open(path, "r", encoding="utf-8") as f:
-            content = f.read()
+            raw = f.read()
+        file_lines = raw.split('\n') if raw != "" else []
     except Exception as e:
         return f"Read failed: {e}"
 
-    # Распаковка строковых литералов (\n, \t и т.п.)
-    def unescape(s: str) -> str:
-        s = s.replace('\\r\\n', '\r\n')
-        s = s.replace('\\n', '\n')
-        s = s.replace('\\r', '\r')
-        s = s.replace('\\t', '\t')
-        return s
+    # Проверка выхода за границы файла
+    if start_num > len(file_lines) or end_num > len(file_lines):
+        return f"Error: File has {len(file_lines)} lines. Requested range ({start_num}-{end_num}) exceeds file size."
 
-    old_start_raw = unescape(old_first_line)
-    new_raw = unescape(new)
+    # Перевод в 0-based индексы
+    idx_start = start_num - 1
+    idx_end = end_num - 1
 
-    # Если old_last_line не указан, ищем только одну строку
-    is_single_line = not old_last_line
-    if not is_single_line:
-        old_end_raw = unescape(old_last_line)
-    else:
-        old_end_raw = old_start_raw  # Для однострочного режима границы совпадают
+    # Разбиваем новый контент на строки для подстановки
+    replacement_lines = new_text.split('\n')
 
-    # Гарантируем однострочность границ
-    if '\n' in old_start_raw or '\r' in old_start_raw:
-        return "Error: old_first_line must be a single line (no newlines)."
-    if not is_single_line and ('\n' in old_end_raw or '\r' in old_end_raw):
-        return "Error: old_last_line must be a single line (no newlines)."
-
-    # Упрощённая компиляция: шаблон заведомо однострочный
-    start_re = re.compile(re.escape(old_start_raw), re.IGNORECASE)
-    end_re = re.compile(re.escape(old_end_raw), re.IGNORECASE) if not is_single_line else start_re
-
-    matches = []
-    search_start = 0
-
-    while True:
-        start_match = start_re.search(content, search_start)
-        if not start_match:
-            break
-        start_pos = start_match.start()
-
-        if is_single_line:
-            # Для одной строки заменяем только её
-            end_pos = start_match.end()
-        else:
-            # Для диапазона ищем конечную границу
-            end_match = end_re.search(content, start_pos + len(old_start_raw))
-            if not end_match:
-                break
-            end_pos = end_match.end()
-
-        matches.append((start_pos, end_pos))
-        search_start = end_pos
-
-    if not matches:
-        if is_single_line:
-            return f"No matches found for: {old_start_raw[:80]!r}"
-        else:
-            return (f"No matches found.\n"
-                    f"  START: {old_start_raw[:80]!r}\n"
-                    f"  END:   {old_end_raw[:80]!r}")
-
-    if mode == "one" and len(matches) > 1:
-        report = [f"Found {len(matches)} matches. Use mode='all' or make boundaries more specific:\n"]
-
-        for i, (s, e) in enumerate(matches[:3], 1):
-            start_line = content[:s].count('\n')
-            block_preview = content[s:e].splitlines()
-            if is_single_line:
-                report.append(f"{i}. At line {start_line+1}: {old_start_raw[:40]!r}")
-            else:
-                report.append(f"{i}. At line {start_line+1} (starts with {old_start_raw[:40]!r}):")
-                for line in block_preview[:2]:
-                    report.append(f"     {line[:80]}")
-                if len(block_preview) > 2:
-                    report.append(f"     ... ({len(block_preview)-2} more lines)")
-                report.append("---")
-
-        if len(matches) > 3:
-            report.append(f"... and {len(matches)-3} more matches.")
-        return "\n".join(report)
-
-    new_content = content
-    for start_pos, end_pos in reversed(matches):
-        new_content = new_content[:start_pos] + new_raw + new_content[end_pos:]
+    # Слайс-присваивание заменяет ровно указанный диапазон
+    file_lines[idx_start : idx_end + 1] = replacement_lines
 
     try:
         with open(path, "w", encoding="utf-8") as f:
-            f.write(new_content)
+            f.write('\n'.join(file_lines))
     except Exception as e:
         return f"Write failed: {e}"
 
-    if mode == "one":
-        if is_single_line:
-            return f"Successfully replaced {old_start_raw[:40]!r} with {new_raw[:40]!r}"
-        else:
-            return f"Successfully replaced block from {old_start_raw[:40]!r} to {old_end_raw[:40]!r}"
-    else:
-        report = [f"Successfully replaced {len(matches)} match(es):\n"]
-
-        for i, (s, e) in enumerate(matches[:3], 1):
-            start_line = content[:s].count('\n')
-            end_line = content[:e].count('\n')
-
-            if is_single_line:
-                report.append(f"{i}. Line {start_line+1}: {content[s:e].rstrip()!r} -> {new_raw[:40]!r}")
-            else:
-                report.append(f"{i}. Block from line {start_line+1} to {end_line+1}:")
-
-                lines = content.splitlines(keepends=True)
-                ctx_start = max(0, start_line - 2)
-                ctx_end = min(len(lines), end_line + 2)
-                for ln in range(ctx_start, ctx_end):
-                    if ln == start_line:
-                        report.append(f"  >>> {lines[ln].rstrip()}")
-                    elif ln == end_line and end_line != start_line:
-                        report.append(f"  <<< {lines[ln].rstrip()}")
-                    else:
-                        report.append(f"      {lines[ln].rstrip()}")
-                report.append("---")
-
-        if len(matches) > 3:
-            report.append(f"... and {len(matches)-3} more blocks.")
-        return "\n".join(report)
+    return f"{ENVIRONMENT_PREFIX} Successfully replaced lines {start_num}–{end_num} with {len(replacement_lines)} new line(s)."

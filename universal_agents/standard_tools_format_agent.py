@@ -8,7 +8,7 @@ from typing import List, Dict, Union, Callable, Optional
 
 from openai import OpenAI
 
-from universal_agents.tool import tool
+from universal_agents.tool import tool, ENVIRONMENT_PREFIX
 
 
 def load_external_plugins(plugins_dir="tools"):
@@ -119,7 +119,7 @@ class ChatHistory:
 
     def edit_message(self, idx: int, new_text: str, old_text: str = '') -> str:
         if not (0 <= idx < len(self._messages)):
-            return f"Error: Invalid message index {idx}"
+            return f"{ENVIRONMENT_PREFIX} Error: Invalid message index {idx}"
 
         msg = self._messages[idx]
         if not old_text.strip():
@@ -132,7 +132,7 @@ class ChatHistory:
         if not msg["content"].strip():
             self.delete_range(idx, idx)
             return 'Replacing to empty text led to deleting the message block.'
-        return 'Successfully edited message'
+        return f'{ENVIRONMENT_PREFIX} Success'
 
     def delete_range(self, start_id: int, end_id: int = -1):
         if not (0 <= start_id < len(self._messages)):
@@ -156,7 +156,7 @@ class ChatHistory:
             actual_end += 1
 
         del self._messages[actual_start:actual_end]
-        return None
+        return f'{ENVIRONMENT_PREFIX} Success'
 
     def save(self, path: str):
         with open(path, 'w', encoding='utf-8') as f:
@@ -168,7 +168,18 @@ class ChatHistory:
         if isinstance(data, list) and len(data) > 0 and "role" in data[0]:
             self._messages = data
         else:
-            raise ValueError("Invalid history format")
+            raise ValueError(f"{ENVIRONMENT_PREFIX} Invalid history format")
+
+    def normalize(self):
+        "После system всегда должен быть user, не tool и не assistant"
+        if len(self._messages) <= Config.AFTER_SYSTEM_PROMPT:
+            return
+
+        i = Config.AFTER_SYSTEM_PROMPT
+        while i < len(self._messages) and self._messages[i]["role"] != "user":
+            i += 1
+        if i > Config.AFTER_SYSTEM_PROMPT:
+            del self._messages[Config.AFTER_SYSTEM_PROMPT:i]
 
 
 class LLMAgent:
@@ -185,7 +196,6 @@ class LLMAgent:
         self.history = ChatHistory(system_prompt)
         self.temp = temp
         self.timeout = timeout
-        self.edit_mode = False
         self.thinking_enabled = True
 
         self.on_render = on_render
@@ -280,12 +290,12 @@ class LLMAgent:
             draft_texts.append(f"--- Draft {i} ---\n{content}")
 
         synthesis_prompt = (
-                f"Here are drafts from multiple reasoning paths"
+                f"[SYSTEM] Here are drafts from multiple reasoning paths"
                 + "\n".join(draft_texts) +
                 "\n\nBased on the drafts and the user's request, provide the final answer. "
         )
 
-        synthesis_messages = messages_base + [{"role": "system", "content": synthesis_prompt}]
+        synthesis_messages = messages_base + [{"role": "user", "content": synthesis_prompt}]
         current_prefill = prefill or None
         current_prefill = current_prefill or ("</think>\n\n" if not self.thinking_enabled else None)
 
@@ -364,11 +374,10 @@ class LLMAgent:
         self.tools = [v['schema'] for v in self._all_tools.values()]
 
     def _prepare_messages_for_api(self) -> List[Dict]:
+        self.history.normalize()
         messages_to_send = [self.history[0].copy()]
         for idx, msg in enumerate(self.history.get_all()[Config.AFTER_SYSTEM_PROMPT:]):
             copy = msg.copy()
-            if self.edit_mode:
-                copy["content"] = f"[id {idx + Config.AFTER_SYSTEM_PROMPT}]\n{copy['content']}"
             messages_to_send.append(copy)
 
         return messages_to_send
@@ -386,8 +395,7 @@ class LLMAgent:
                     continue
 
                 if tool_info['requires_confirmation'] and not self.on_confirm(name, args):
-                    results.append({"tool_call_id": tc.id, "role": "tool", "name": name, "content": "Execution cancelled by user"})
-                    self.edit_mode = False
+                    results.append({"tool_call_id": tc.id, "role": "tool", "name": name, "content": f"{ENVIRONMENT_PREFIX} Execution cancelled by user"})
                     continue
 
                 handler = tool_info['handler']
@@ -401,10 +409,40 @@ class LLMAgent:
         return results
 
     # ---------- Инструменты ----------
-    @tool(description="Enables visibility of message IDs")
-    def get_msg_ids(self):
-        self.edit_mode = True
-        return 'Successfully showed ids'
+    @tool(description="Get short indexed current history with ids. Use it before edit/delete messages.")
+    def get_msg_ids(self, chars_per_message: int = 35):
+        history = self.history.get_all()
+
+        if len(history) <= Config.AFTER_SYSTEM_PROMPT:
+            return f"{ENVIRONMENT_PREFIX} История пока пустая (только system prompt)."
+
+        lines = ["=== SHORT DIALOG ==="]
+
+        for i in range(Config.AFTER_SYSTEM_PROMPT, len(history)):
+            msg = history[i]
+            role = msg["role"]
+            content = msg.get("content", "") or ""
+
+            # Сокращаем длинные сообщения
+            if len(content) > chars_per_message:
+                content = content[:chars_per_message] + " ..."
+
+            # Для tool calls добавляем информацию
+            if role == "assistant" and msg.get("tool_calls"):
+                tc_info = ", ".join(tc["function"]["name"] for tc in msg["tool_calls"])
+                content += f"  [Tool calls: {tc_info}]"
+
+            # Для tool results показываем имя инструмента
+            tool_name = msg.get("name", "")
+            if tool_name:
+                prefix = f"[{tool_name}] "
+            else:
+                prefix = ""
+
+            lines.append(f"[id {i}] {role.upper()}: {prefix}{content.strip()}")
+
+        result = "\n".join(lines)
+        return f"{ENVIRONMENT_PREFIX} Your current history:\n{result}\n\nUse these IDs to edit & delete messages."
 
     @tool(description="Edits a specific message in the history",
           requires_confirmation=True,
@@ -444,8 +482,6 @@ class LLMAgent:
 
             if err: return f"API Error: {err}"
             if not message_obj: return "Empty response"
-
-            self.edit_mode = False
 
             content = message_obj.content or ""
             clean_content = content.replace("</think>", "").strip()
@@ -603,7 +639,9 @@ if __name__ == "__main__":
     print(f"Loaded external tools: {list(external_tools.keys())}")
 
     sys_prompt = (
-        "You are a special tool-calling assistant. Use tools to fulfill user requests. Speak Russian, be concise."
+        "You are a tool-calling assistant. Speak Russian. You're launched in a special environment."
+        f" {ENVIRONMENT_PREFIX} prefix means the system tells you something, it's not the user said."
+        f" When you open files that are more than 10 lines size, you MUST right away summarize them and delete only the original file from dialog history"
     )
 
     # 2. Передаем их в агент
