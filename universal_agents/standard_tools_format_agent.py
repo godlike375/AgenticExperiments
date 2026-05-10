@@ -4,6 +4,7 @@ import importlib
 import inspect
 import os
 import sys
+from collections import deque
 from typing import List, Dict, Union, Callable, Optional
 
 from openai import OpenAI
@@ -54,6 +55,51 @@ class Config:
     AFTER_SYSTEM_PROMPT = 1
 
 
+class LoopDetector:
+    def __init__(self, max_history: int = 12, threshold: int = 3):
+        self.max_history = max_history
+        self.threshold = threshold
+        self.recent_calls = deque(maxlen=max_history)  # (tool_name, normalized_args)
+
+    def normalize_args(self, args_str: str) -> str:
+        """Приводим аргументы к каноническому виду (порядок ключей неважен)"""
+        if not args_str or args_str.strip() in ("{}", "", "null"):
+            return ""
+        try:
+            parsed = json.loads(args_str)
+            # sort_keys=True + separators — гарантирует идентичную строку при одинаковых значениях
+            return json.dumps(parsed, sort_keys=True, separators=(',', ':'), ensure_ascii=False)
+        except Exception:
+            return args_str.strip()
+
+    def add_call(self, tool_name: str, arguments: str):
+        norm_args = self.normalize_args(arguments)
+        self.recent_calls.append((tool_name, norm_args))
+
+    def detect_loop(self) -> Optional[tuple[str, str, int]]:
+        """
+        Возвращает (tool_name, normalized_args, count) если один и тот же вызов
+        с полностью одинаковыми параметрами повторился threshold раз подряд.
+        """
+        if len(self.recent_calls) < self.threshold:
+            return None
+
+        last_calls = list(self.recent_calls)
+
+        # Проверяем последние threshold вызовов — все ли они полностью одинаковые
+        window = last_calls[-self.threshold:]
+        first_call = window[0]
+
+        if all(call == first_call for call in window):
+            tool_name, norm_args = first_call
+            return tool_name, norm_args, self.threshold
+
+        return None
+
+    def reset(self):
+        self.recent_calls.clear()
+
+
 class LLMClient:
     _client = None
 
@@ -77,6 +123,7 @@ class LLMClient:
                 temperature=temp,
                 max_tokens=7500,
                 tools=tools,
+                parallel_tool_calls=False,
                 timeout=timeout,
                 reasoning_effort="none"
             )
@@ -225,6 +272,92 @@ class LLMAgent:
 
         self._all_tools = internal_tools
         self._filter_tools(tools_config)
+
+        self.loop_detector = LoopDetector(max_history=12, threshold=3)
+        self._temp_boost_active = False
+        self._next_prefill = None
+        self._original_temp = temp
+
+    def _break_tool_loop(self, tool_name: str, norm_args: str, count: int):
+        """
+        Оставляем только ПЕРВЫЙ tool_call с такими args.
+        Удаляем все последующие assistant/tool сообщения,
+        связанные через tool_call_id.
+        """
+
+        messages = self.history._messages
+
+        matched_calls = []
+
+        # Ищем assistant tool_calls
+        for i in range(Config.AFTER_SYSTEM_PROMPT, len(messages)):
+            msg = messages[i]
+
+            if msg["role"] != "assistant":
+                continue
+
+            for tc in msg.get("tool_calls", []):
+                if (
+                        tc["function"]["name"] == tool_name
+                        and self.loop_detector.normalize_args(
+                    tc["function"].get("arguments", "{}")
+                ) == norm_args
+                ):
+                    matched_calls.append({
+                        "msg_index": i,
+                        "tool_call_id": tc["id"]
+                    })
+
+        if len(matched_calls) <= 1:
+            return
+
+        # Оставляем первый вызов
+        keep = matched_calls[0]
+        duplicates = matched_calls[1:]
+
+        to_remove = set()
+
+        # assistant messages
+        for dup in duplicates:
+            to_remove.add(dup["msg_index"])
+
+        # tool results по tool_call_id
+        duplicate_ids = {d["tool_call_id"] for d in duplicates}
+
+        for i, msg in enumerate(messages):
+            if (
+                    msg["role"] == "tool"
+                    and msg.get("tool_call_id") in duplicate_ids
+            ):
+                to_remove.add(i)
+
+        # Удаляем с конца
+        for idx in sorted(to_remove, reverse=True):
+            del messages[idx]
+
+        self.on_system_msg(
+            f"[LOOP] Kept first call "
+            f"(tool_call_id={keep['tool_call_id']}), "
+            f"removed {len(to_remove)} messages"
+        )
+
+        warning = f"""{ENVIRONMENT_PREFIX} LOOP DETECTED!
+    
+    Tool '{tool_name}' with identical parameters was called {count} times.
+    
+    I kept only the FIRST execution and removed all subsequent duplicates.
+    
+    Do not repeat this tool call with the same parameters again.
+    """
+
+        messages.append({
+            "role": "user",
+            "content": warning
+        })
+
+        self.on_system_msg(
+            f"[LOOP DETECTED] '{tool_name}' ×{count}"
+        )
 
     def _collect_internal_tools(self, classes):
         """Собирает инструменты только из переданных классов (внутренние)"""
@@ -384,32 +517,71 @@ class LLMAgent:
 
     def _execute_tools(self, tool_calls) -> List[Dict]:
         results = []
+
         for tc in tool_calls:
             name = tc.function.name
+            args_str = tc.function.arguments or "{}"
+
+            # === Регистрируем вызов для обнаружения петли ===
+            self.loop_detector.add_call(name, args_str)
+
+            # === Выполнение инструмента ===
+            tool_info = self._all_tools.get(name)
+            if not tool_info:
+                results.append({
+                    "tool_call_id": tc.id,
+                    "role": "tool",
+                    "name": name,
+                    "content": f"Error: Unknown tool '{name}'"
+                })
+                continue
+
+            # Проверка подтверждения (если требуется)
+            if tool_info.get('requires_confirmation', False):
+                args_dict = json.loads(args_str) if args_str != "{}" else {}
+                if not self.on_confirm(name, args_dict):
+                    results.append({
+                        "tool_call_id": tc.id,
+                        "role": "tool",
+                        "name": name,
+                        "content": f"{ENVIRONMENT_PREFIX} Execution cancelled by user"
+                    })
+                    continue
+
+            # Вызов обработчика
             try:
-                args = json.loads(tc.function.arguments) if tc.function.arguments else {}
-                tool_info = self._all_tools.get(name)
-
-                if not tool_info:
-                    results.append({"tool_call_id": tc.id, "role": "tool", "name": name, "content": f"Error: Unknown tool '{name}'"})
-                    continue
-
-                if tool_info['requires_confirmation'] and not self.on_confirm(name, args):
-                    results.append({"tool_call_id": tc.id, "role": "tool", "name": name, "content": f"{ENVIRONMENT_PREFIX} Execution cancelled by user"})
-                    continue
-
+                args_dict = json.loads(args_str) if args_str != "{}" else {}
                 handler = tool_info['handler']
-                full_result = handler(self, **args) if tool_info['is_instance_method'] else handler(**args)
 
-                if full_result is not None:
-                    results.append({"tool_call_id": tc.id, "role": "tool", "name": name, "content": str(full_result)})
+                if tool_info['is_instance_method']:
+                    full_result = handler(self, **args_dict)
+                else:
+                    full_result = handler(**args_dict)
+
+                content = str(full_result) if full_result is not None else "Tool executed successfully"
+
             except Exception as e:
                 self.on_system_msg(f"[ERROR] Tool '{name}' FAILED: {e}")
-                results.append({"tool_call_id": tc.id, "role": "tool", "name": name, "content": f"Error: {e}"})
+                content = f"Error: {e}"
+
+            results.append({
+                "tool_call_id": tc.id,
+                "role": "tool",
+                "name": name,
+                "content": content
+            })
+
+
+        loop_info = self.loop_detector.detect_loop()
+        if loop_info:
+            tool_name, norm_args, count = loop_info
+            self._break_tool_loop(tool_name, norm_args, count)
+            self._temp_boost_active = True
+
         return results
 
     # ---------- Инструменты ----------
-    @tool(description="Get short indexed current history with ids. Use it before edit/delete messages.")
+    @tool(description="Get short indexed current history with ids")
     def get_msg_ids(self, chars_per_message: int = 35):
         history = self.history.get_all()
 
@@ -475,10 +647,21 @@ class LLMAgent:
             step_prefill = current_prefill if i == 0 else None
             messages_to_send = self._prepare_messages_for_api()
 
+            current_prefill = self._next_prefill or (step_prefill if i == 0 else None)
+            current_temp = self.temp
+            if self._temp_boost_active:
+                current_temp = min(0.9, self.temp + 0.4)
+                self._temp_boost_active = False
+
             message_obj, err = LLMClient.call(
-                messages_to_send, self.temp, self.timeout,
-                tools=self.tools if self.tools else None, prefill=step_prefill
+                messages_to_send,
+                current_temp,
+                self.timeout,
+                tools=self.tools if self.tools else None,
+                prefill=current_prefill
             )
+
+            self._next_prefill = None   # сбрасываем после использования
 
             if err: return f"API Error: {err}"
             if not message_obj: return "Empty response"
@@ -639,9 +822,8 @@ if __name__ == "__main__":
     print(f"Loaded external tools: {list(external_tools.keys())}")
 
     sys_prompt = (
-        "You are a tool-calling assistant. Speak Russian. You're launched in a special environment."
-        f" {ENVIRONMENT_PREFIX} prefix means the system tells you something, it's not the user said."
-        f" When you open files that are more than 10 lines size, you MUST right away summarize them and delete only the original file from dialog history"
+        "You are assistant that can call tools. Speak Russian. You're launched in a special environment."
+        f" {ENVIRONMENT_PREFIX} prefix means the system tells you something, it's not what user said."
     )
 
     # 2. Передаем их в агент
