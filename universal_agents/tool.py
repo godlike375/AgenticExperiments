@@ -1,3 +1,6 @@
+ENVIRONMENT_PREFIX = '[[ENVIRONMENT]]'
+
+
 def tool(description="", requires_confirmation=False, **params):
     def decorator(func):
         func._is_tool = True
