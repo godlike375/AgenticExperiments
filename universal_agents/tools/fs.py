@@ -91,7 +91,7 @@ def edit_file(path: str, old: str, new: str, mode: str = "one"):
             idx = pos + search_len
 
         if not matches:
-            return f"No matches found for old substring."
+            return f"{ENVIRONMENT_PREFIX} Error: No matches found for old substring. Try again with different argument"
 
         m_mode = mode.strip().lower()
 
