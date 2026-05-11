@@ -289,12 +289,7 @@ class LLMAgent:
                 if name in internal_tools:
                     print(f"Warning: External tool '{name}' conflicts with internal tool. Skipping.")
                     continue
-                internal_tools[name] = {
-                    "schema": func._tool_schema,
-                    "handler": func,
-                    "is_instance_method": False,
-                    "requires_confirmation": getattr(func, '_requires_confirmation', False)
-                }
+                internal_tools[name] = self._build_tool_dict(func, is_instance_method=False)
 
         self._all_tools = internal_tools
         self._filter_tools(tools_config)
@@ -302,6 +297,41 @@ class LLMAgent:
         self.loop_detector = LoopDetector(max_history=12, threshold=3)
         self._temp_boost_active = False
         self._original_temp = temp
+
+    @staticmethod
+    def _build_tool_dict(func: Callable, is_instance_method: bool) -> Dict:
+        """Хелпер для устранения дублирования при сборке словаря инструмента."""
+        return {
+            "schema": func._tool_schema,
+            "handler": func,
+            "is_instance_method": is_instance_method,
+            "requires_confirmation": getattr(func, '_requires_confirmation', False)
+        }
+
+    def _get_effective_prefill(self, custom_prefill: Optional[str]) -> Optional[str]:
+        """Хелпер для устранения дублирования логики подстановки prefill."""
+        if custom_prefill:
+            return custom_prefill
+        if not self.thinking_enabled:
+            return "</think>\n\n"
+        return None
+
+    @staticmethod
+    def _build_assistant_msg(msg_obj, clean_content: str) -> Dict:
+        """Хелпер для устранения дублирования при сборке сообщения ассистента с инструментами."""
+        assistant_msg = {"role": "assistant", "content": clean_content}
+        if msg_obj.tool_calls:
+            assistant_msg["tool_calls"] = [
+                {
+                    "id": tc.id,
+                    "type": tc.type,
+                    "function": {
+                        "name": tc.function.name,
+                        "arguments": tc.function.arguments
+                    }
+                } for tc in msg_obj.tool_calls
+            ]
+        return assistant_msg
 
     def _break_tool_loop(self, tool_name: str, norm_args: str, count: int):
         """Удаляет дублирующиеся вызовы инструментов, оставляя только первый."""
@@ -359,16 +389,11 @@ class LLMAgent:
                 func = raw.__func__ if isinstance(raw, staticmethod) else raw
 
                 if hasattr(func, '_is_tool'):
-                    tools[func._tool_name] = {
-                        "schema": func._tool_schema,
-                        "handler": func,
-                        "is_instance_method": is_instance_method,
-                        "requires_confirmation": getattr(func, '_requires_confirmation', False)
-                    }
+                    tools[func._tool_name] = self._build_tool_dict(func, is_instance_method)
         return tools
 
     def _generate_draft_with_tool_suggestions(self, draft_messages, prefill, draft_temp, draft_timeout):
-        prefill_val = prefill or ("</think>\n\n" if not self.thinking_enabled else None)
+        prefill_val = self._get_effective_prefill(prefill)
         for _ in range(3):
             msg_obj, err = LLMClient.call(
                 draft_messages, draft_temp, draft_timeout,
@@ -387,7 +412,7 @@ class LLMAgent:
         self.on_system_msg(f"Generating {self.sc_samples} drafts...")
         drafts = []
         for _ in range(self.sc_samples):
-            draft = self._generate_draft_with_tool_suggestions(messages_base, prefill, 0.85, self.timeout)
+            draft = self._generate_draft_with_tool_suggestions(messages_base, prefill, 0.7, self.timeout)
             if draft:
                 drafts.append(draft)
 
@@ -404,17 +429,16 @@ class LLMAgent:
             draft_texts.append(f"--- Draft {i} ---\n{content}")
 
         synthesis_prompt = (
-                "[SYSTEM] Here are drafts from multiple reasoning paths:\n" +
+                f"{ENVIRONMENT_PREFIX} Here are drafts from multiple reasoning paths:\n" +
                 "\n".join(draft_texts) +
-                "\n\nBased on these, provide the final answer."
+                "\n\n Analyse them and synthesize the finishing correct answer, paying attention to suggested tools."
         )
 
-        # ВАЖНО: synthesis_messages - это временная история, она не сохраняется в self.history
         synthesis_messages = messages_base + [{"role": "user", "content": synthesis_prompt}]
-        current_prefill = prefill or ("</think>\n\n" if not self.thinking_enabled else None)
+        current_prefill = self._get_effective_prefill(prefill)
 
         msg_obj, err = LLMClient.call(
-            synthesis_messages, temp=0.1, timeout=self.timeout,
+            synthesis_messages, temp=0.2, timeout=self.timeout,
             tools=self.tools if self.tools else None,
             prefill=current_prefill
         )
@@ -422,32 +446,17 @@ class LLMAgent:
         if err or not msg_obj:
             return f"API Error during synthesis: {err}"
 
+        clean_content = msg_obj.content.replace("</think>", "").strip()
+        assistant_msg = self._build_assistant_msg(msg_obj, clean_content)
+
         # 1. Если модель сразу ответила текстом без инструментов
         if not msg_obj.tool_calls:
-            clean_content = msg_obj.content.replace("</think>", "").strip()
-            assistant_msg = {"role": "assistant", "content": clean_content}
             self.history.add(assistant_msg)
             self.on_render(assistant_msg)
             return clean_content
 
-        # 2. Если модель решила вызвать инструменты (ВОССТАНОВЛЕННАЯ ЛОГИКА)
+        # 2. Если модель решила вызвать инструменты
         tool_results = self._execute_tools(msg_obj.tool_calls)
-        clean_content = msg_obj.content.replace("</think>", "").strip()
-
-        assistant_msg = {
-            "role": "assistant",
-            "content": clean_content,
-            "tool_calls": [
-                {
-                    "id": tc.id,
-                    "type": tc.type,
-                    "function": {
-                        "name": tc.function.name,
-                        "arguments": tc.function.arguments
-                    }
-                } for tc in msg_obj.tool_calls
-            ]
-        }
 
         # Сохраняем вызов инструментов и их результаты в основную историю
         self.history.add(assistant_msg)
@@ -512,9 +521,18 @@ class LLMAgent:
                 })
                 continue
 
+            # Парсим аргументы один раз, сохраняя оригинальное поведение при ошибках парсинга
+            args_dict = None
+            parse_err = None
+            try:
+                args_dict = json.loads(args_str) if args_str != "{}" else {}
+            except Exception as e:
+                parse_err = e
+
             # Подтверждение
             if tool_info.get('requires_confirmation', False):
-                args_dict = json.loads(args_str) if args_str != "{}" else {}
+                if parse_err:
+                    raise parse_err  # Сохраняем оригинальное поведение падения
                 if not self.on_confirm(name, args_dict):
                     results.append({
                         "tool_call_id": tc.id, "role": "tool", "name": name,
@@ -524,7 +542,8 @@ class LLMAgent:
 
             # Выполнение
             try:
-                args_dict = json.loads(args_str) if args_str != "{}" else {}
+                if parse_err:
+                    raise parse_err
                 handler = tool_info['handler']
                 if tool_info['is_instance_method']:
                     full_result = handler(self, **args_dict)
@@ -560,19 +579,12 @@ class LLMAgent:
         content = message_obj.content or ""
         clean_content = content.replace("</think>", "").strip()
 
-        assistant_msg = {"role": "assistant", "content": clean_content}
-
-        has_tools = bool(message_obj.tool_calls)
-        if has_tools:
-            assistant_msg["tool_calls"] = [
-                {"id": tc.id, "type": tc.type, "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
-                for tc in message_obj.tool_calls
-            ]
+        assistant_msg = self._build_assistant_msg(message_obj, clean_content)
 
         self.history.add(assistant_msg)
         self.on_render(assistant_msg)
 
-        if not has_tools:
+        if not message_obj.tool_calls:
             return clean_content
 
         # Выполняем инструменты
@@ -589,9 +601,7 @@ class LLMAgent:
         user_msg = {"role": "user", "content": message}
         self.history.add(user_msg)
 
-        current_prefill = prefill
-        if not self.thinking_enabled and not current_prefill:
-            current_prefill = "</think>\n\n"
+        current_prefill = self._get_effective_prefill(prefill)
 
         for i in range(max_iter):
             step_prefill = current_prefill if i == 0 else None
@@ -618,9 +628,6 @@ class LLMAgent:
             # Если инструментов не было, это финальный ответ
             if not message_obj.tool_calls:
                 return result_text
-
-            # Если были инструменты, цикл продолжается (history уже обновлена внутри _process_llm_response)
-            # current_prefill сбрасывается, так как следующий шаг - реакция на инструменты
 
         return "Max iterations reached without final answer"
 
