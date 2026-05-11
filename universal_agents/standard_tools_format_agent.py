@@ -263,7 +263,7 @@ class LLMAgent:
     def __init__(
             self,
             system_prompt: str = "You are a helpful assistant",
-            temp: float = 0.25,
+            temp: float = 0.05,
             timeout: int = 1800,
             tools_config: Union[List[str], Dict, None] = None,
             on_render: Callable[[Dict], None] = lambda x: None,
@@ -536,7 +536,7 @@ class LLMAgent:
                 if not self.on_confirm(name, args_dict):
                     results.append({
                         "tool_call_id": tc.id, "role": "tool", "name": name,
-                        "content": f"{ENVIRONMENT_PREFIX} Execution cancelled by user"
+                        "content": f"User denied tool call remotely. ASK them why they denied and what to do next."
                     })
                     continue
 
