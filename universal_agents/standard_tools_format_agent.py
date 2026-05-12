@@ -46,6 +46,7 @@ def load_external_plugins(plugins_dir="tools"):
 
 class Config:
     API_URL = "http://localhost:1234/v1"
+    API_URL = "http://192.168.50.196:1234/v1" # "http://localhost:1234/v1"
     MODEL_NAME = "local-model"
     AFTER_SYSTEM_PROMPT = 1  # Индекс, после которого начинается диалог (обычно 1, т.к. 0 - system)
 
@@ -714,6 +715,7 @@ class CLI:
     def __init__(self, agent: LLMAgent):
         self.agent = agent
         self.pending_prefill = None
+        self.multiline = False
         self.commands = {
             "/regen": self.cmd_regen,
             "/think_on": self.cmd_think_on,
@@ -722,6 +724,7 @@ class CLI:
             "/save": self.cmd_save,
             "/load": self.cmd_load,
             "/consistent": self.cmd_consistent,
+            "/multiline": self.cmd_multiline
         }
 
     def cmd_regen(self, parts: List[str]):
@@ -781,12 +784,35 @@ class CLI:
         status = "ON" if self.agent.self_consistency_mode else "OFF"
         ConsoleUI.system_msg(f"Self-consistency mode turned {status}")
 
+    def cmd_multiline(self, parts: list[str]):
+        self.multiline = not self.multiline
+        status = "ON" if self.multiline else "OFF"
+        ConsoleUI.system_msg(f"Multiline input mode turned {status}. Type Ctrl+D to finish the input.")
+
+    def read_until_marker(self, marker="/mm"):
+        lines = []
+        while True:
+            try:
+                line = input()
+            except EOFError:
+                break
+
+            if line.strip() == marker:
+                break
+            lines.append(line)
+
+        return "\n".join(lines)
+
     def run(self):
         ConsoleUI.system_msg("Ready. Type 'exit' to quit")
         ConsoleUI.system_msg(f"Commands: {', '.join(self.commands.keys())}")
 
         while True:
-            inp = input("\n👤 User: ").strip()
+            if self.multiline:
+                print("\n👤 User: ")
+            inp = self.read_until_marker() if self.multiline else input("\n👤 User: ").strip()
+            if self.multiline:
+                self.multiline = False
             if not inp: continue
             if inp.lower() in ("exit", "quit"): break
 
