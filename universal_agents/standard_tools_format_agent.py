@@ -5,6 +5,7 @@ import sys
 import importlib.util
 import inspect
 from collections import deque
+from datetime import datetime
 from typing import List, Dict, Union, Callable, Optional
 
 from openai import OpenAI
@@ -46,9 +47,35 @@ def load_external_plugins(plugins_dir="tools"):
 
 class Config:
     API_URL = "http://localhost:1234/v1"
-    API_URL = "http://192.168.50.196:1234/v1" # "http://localhost:1234/v1"
     MODEL_NAME = "local-model"
     AFTER_SYSTEM_PROMPT = 1  # Индекс, после которого начинается диалог (обычно 1, т.к. 0 - system)
+    BOOST_TEMP = 0.8
+
+
+class TokenUsageTracker:
+    """Отслеживает использование токенов на основе данных от LM Studio"""
+    def __init__(self, max_context_tokens: int = 8192):
+        self.max_context_tokens = max_context_tokens
+        self.last_usage = None  # { "prompt_tokens": int, "completion_tokens": int, "total_tokens": int }
+
+    def update_from_usage(self, usage: dict):
+        self.last_usage = usage
+
+    def get_current_context_tokens(self):
+        if self.last_usage:
+            return self.last_usage.get("prompt_tokens")
+        return None
+
+    def format_info_header(self):
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        current = self.get_current_context_tokens()
+        if current is not None:
+            remaining = self.max_context_tokens - current
+            token_str = f"Tokens spent: {current} (Remaining: {remaining})"
+        else:
+            token_str = "Tokens: unknown"
+        return f"<<{ENVIRONMENT_PREFIX} === [{timestamp}] | {token_str} ===>>\n\n"
+
 
 class LoopDetector:
     def __init__(self, max_history: int = 12, threshold: int = 3):
@@ -100,7 +127,6 @@ class LLMClient:
         messages_to_send = list(messages)
         if prefill:
             messages_to_send.append({"role": "assistant", "content": prefill})
-
         try:
             response = LLMClient.get_client().chat.completions.create(
                 model=Config.MODEL_NAME,
@@ -113,16 +139,19 @@ class LLMClient:
                 reasoning_effort="none"
             )
             msg = response.choices[0].message
+            if prefill and msg.content and not msg.content.startswith(prefill):
+                msg.content = prefill + msg.content
 
-            # Обычно API возвращает полный контент. Если нужно склеить вручную:
-            if prefill and msg.content:
-                # Проверка, не содержит ли ответ уже префилл (зависит от модели)
-                if not msg.content.startswith(prefill):
-                    msg.content = prefill + msg.content
-
-            return msg, None
+            usage = None
+            if hasattr(response, 'usage') and response.usage:
+                usage = {
+                    "prompt_tokens": response.usage.prompt_tokens,
+                    "completion_tokens": response.usage.completion_tokens,
+                    "total_tokens": response.usage.total_tokens
+                }
+            return msg, None, usage
         except Exception as e:
-            return None, str(e)
+            return None, str(e), None
 
 class ChatHistory:
     def __init__(self, system_prompt: str):
@@ -270,7 +299,8 @@ class LLMAgent:
             on_render: Callable[[Dict], None] = lambda x: None,
             on_confirm: Callable[[str, Dict], bool] = lambda n, a: True,
             on_system_msg: Callable[[str], None] = lambda x: None,
-            external_plugins: Dict[str, Callable] = None
+            external_plugins: Dict[str, Callable] = None,
+            max_context_tokens: int = 16384
     ):
         self.history = ChatHistory(system_prompt)
         self.temp = temp
@@ -281,6 +311,7 @@ class LLMAgent:
         self.on_system_msg = on_system_msg
         self.self_consistency_mode = False
         self.sc_samples = 3
+        self.token_tracker = TokenUsageTracker(max_context_tokens)
 
         # Сбор инструментов
         internal_tools = self._collect_internal_tools([self.__class__])
@@ -396,7 +427,7 @@ class LLMAgent:
     def _generate_draft_with_tool_suggestions(self, draft_messages, prefill, draft_temp, draft_timeout):
         prefill_val = self._get_effective_prefill(prefill)
         for _ in range(3):
-            msg_obj, err = LLMClient.call(
+            msg_obj, err, _ = LLMClient.call(
                 draft_messages, draft_temp, draft_timeout,
                 tools=self.tools if self.tools else None,
                 prefill=prefill_val
@@ -438,11 +469,13 @@ class LLMAgent:
         synthesis_messages = messages_base + [{"role": "user", "content": synthesis_prompt}]
         current_prefill = self._get_effective_prefill(prefill)
 
-        msg_obj, err = LLMClient.call(
+        msg_obj, err, usage = LLMClient.call(
             synthesis_messages, temp=0.2, timeout=self.timeout,
             tools=self.tools if self.tools else None,
             prefill=current_prefill
         )
+        if usage:
+            self.token_tracker.update_from_usage(usage)
 
         if err or not msg_obj:
             return f"API Error during synthesis: {err}"
@@ -469,12 +502,14 @@ class LLMAgent:
 
         followup_messages = synthesis_messages + [assistant_msg] + tool_results
 
-        final_obj, final_err = LLMClient.call(
+        final_obj, final_err, final_usage = LLMClient.call(
             followup_messages,
             temp=0.1,
             timeout=self.timeout,
-            tools=None  # На финальном этапе инструменты уже не нужны
+            tools=None
         )
+        if final_usage:
+            self.token_tracker.update_from_usage(final_usage)
 
         if final_err or not final_obj:
             return clean_content or "Tool executed successfully"
@@ -503,8 +538,18 @@ class LLMAgent:
 
     def _prepare_messages_for_api(self) -> List[Dict]:
         self.history.normalize()
-        # Копируем сообщения, чтобы не мутировать историю при отправке (если вдруг API что-то меняет)
-        return [msg.copy() for msg in self.history.get_all()]
+        messages = [msg.copy() for msg in self.history.get_all()]
+
+        # Добавляем заголовки ко всем user- и tool-сообщениям
+        for msg in messages:
+            if msg["role"] == "user":
+                # Вставляем заголовок в начало содержимого
+                msg["content"] = self.token_tracker.format_info_header() + msg["content"]
+            elif msg["role"] == "tool":
+                # Для инструментов – заголовок + пометка [Tool Result]
+                prefix = self.token_tracker.format_info_header() + f"{ENVIRONMENT_PREFIX} [Tool Result]\n"
+                msg["content"] = prefix + msg["content"]
+        return messages
 
     def _execute_tools(self, tool_calls) -> List[Dict]:
         results = []
@@ -522,7 +567,6 @@ class LLMAgent:
                 })
                 continue
 
-            # Парсим аргументы один раз, сохраняя оригинальное поведение при ошибках парсинга
             args_dict = None
             parse_err = None
             try:
@@ -530,10 +574,9 @@ class LLMAgent:
             except Exception as e:
                 parse_err = e
 
-            # Подтверждение
             if tool_info.get('requires_confirmation', False):
                 if parse_err:
-                    raise parse_err  # Сохраняем оригинальное поведение падения
+                    raise parse_err
                 if not self.on_confirm(name, args_dict):
                     results.append({
                         "tool_call_id": tc.id, "role": "tool", "name": name,
@@ -541,7 +584,6 @@ class LLMAgent:
                     })
                     continue
 
-            # Выполнение
             try:
                 if parse_err:
                     raise parse_err
@@ -550,6 +592,7 @@ class LLMAgent:
                     full_result = handler(self, **args_dict)
                 else:
                     full_result = handler(**args_dict)
+                # ИЗМЕНЕНИЕ: теперь без обогащения
                 content = str(full_result) if full_result is not None else "Tool executed successfully"
             except Exception as e:
                 self.on_system_msg(f"[ERROR] Tool '{name}' FAILED: {e}")
@@ -559,7 +602,6 @@ class LLMAgent:
                 "tool_call_id": tc.id, "role": "tool", "name": name, "content": content
             })
 
-        # Проверка на цикл после выполнения всех инструментов в пакете
         loop_info = self.loop_detector.detect_loop()
         if loop_info:
             tool_name, norm_args, count = loop_info
@@ -599,6 +641,7 @@ class LLMAgent:
         if self.self_consistency_mode:
             return self._chat_self_consistent(message, prefill)
 
+        # Сохраняем исходное сообщение без заголовка (заголовок добавится позже в _prepare_messages_for_api)
         user_msg = {"role": "user", "content": message}
         self.history.add(user_msg)
 
@@ -608,17 +651,19 @@ class LLMAgent:
             step_prefill = current_prefill if i == 0 else None
             messages_to_send = self._prepare_messages_for_api()
 
-            # Управление температурой при детекте цикла
             current_temp = self.temp
             if self._temp_boost_active:
-                current_temp = min(0.9, self.temp + 0.4)
+                current_temp = Config.BOOST_TEMP
                 self._temp_boost_active = False
 
-            message_obj, err = LLMClient.call(
+            message_obj, err, usage = LLMClient.call(
                 messages_to_send, current_temp, self.timeout,
                 tools=self.tools if self.tools else None,
                 prefill=step_prefill
             )
+
+            if usage:
+                self.token_tracker.update_from_usage(usage)
 
             if err:
                 return f"API Error: {err}"
@@ -836,8 +881,11 @@ if __name__ == "__main__":
     print(f"Loaded external tools: {list(external_tools.keys())}")
 
     sys_prompt = (
-        "You are assistant that can call tools. Speak Russian. You're launched in a special environment."
-        f" {ENVIRONMENT_PREFIX} prefix means the system tells you something, it's not what user said."
+        "* You are assistant that can call tools. Speak Russian.\n"
+        "* You're launched in a special environment.\n"
+        f"{ENVIRONMENT_PREFIX} prefix means the system outputs something, it's not what user said.\n"
+        f"When remaining tokens amount is about equal to spent tokens, it's time to start cleaning up your context. "
+        f"You can compress or delete some messages to free some more tokens to continue working."
     )
 
     # 2. Передаем их в агент
@@ -847,7 +895,8 @@ if __name__ == "__main__":
         external_plugins=external_tools,
         on_render=ConsoleUI.render_message,
         on_confirm=ConsoleUI.confirm_action,
-        on_system_msg=ConsoleUI.system_msg
+        on_system_msg=ConsoleUI.system_msg,
+        max_context_tokens=65535
     )
 
     cli = CLI(agent)
