@@ -1,4 +1,4 @@
-ENVIRONMENT_PREFIX = '[[SYS ENVIRONMENT]]'
+ENVIRONMENT_PREFIX = '[[SYS ENV]]'
 
 
 def tool(description="", requires_confirmation=False, **params):

@@ -1,12 +1,15 @@
-import json
 from datetime import datetime
 from typing import Optional, Any
 from dataclasses import dataclass, field
 from abc import ABC, abstractmethod
-from universal_agents.tool import ENVIRONMENT_PREFIX
 
 @dataclass
 class Message(ABC):
+    timestamp: datetime = field(init=False)
+
+    def __post_init__(self):
+        self.timestamp = datetime.now()
+
     @abstractmethod
     def to_api_dict(self) -> dict[str, Any]:
         pass

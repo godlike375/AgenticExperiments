@@ -14,20 +14,32 @@ class TokenUsageTracker:
     def update_from_usage(self, usage: dict):
         self.last_usage = usage
 
-    def get_current_context_tokens(self):
-        if self.last_usage:
-            return self.last_usage.get("prompt_tokens")
-        return None
+    def estimate_tokens(self, text: str) -> int:
+        """Грубая оценка токенов: символы / 2.5"""
+        return int(len(text) / 2.5)
 
-    def format_info_header(self):
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        current = self.get_current_context_tokens()
-        if current is not None:
-            remaining = self.max_context_tokens - current
-            token_str = f"Tokens spent: {current} (Remaining: {remaining})"
-        else:
-            token_str = "Tokens: unknown"
-        return f"<<{ENVIRONMENT_PREFIX} === [{timestamp}] | {token_str} ===>>\n\n"
+    def get_total_context_tokens(self, first_system_message: str = "", last_user_content: str = "") -> int:
+        known = self.estimate_tokens(first_system_message)
+        if self.last_usage:
+            known = self.last_usage.get("prompt_tokens", 0)
+        if last_user_content:
+            known += self.estimate_tokens(last_user_content)
+        return known
+
+    def format_timestamp_header(self, msg) -> str:
+        """Метка времени из timestamp сообщения."""
+        ts = msg.timestamp.strftime("%Y-%m-%d %H:%M:%S")
+        return f"<<{ENVIRONMENT_PREFIX} === [{ts}]"
+
+    def format_token_header(self, first_system_message: str = "", last_user_content: str = "") -> str:
+        """Только информация о токенах (с учётом последнего сообщения)."""
+        total = self.get_total_context_tokens(first_system_message, last_user_content)
+        remaining = self.max_context_tokens - total
+        return f" | Tokens spent: {total} (Remaining: {remaining})"
+
+    def format_closing_header(self) -> str:
+        """Закрывающая часть заголовка."""
+        return f" ===>>\n\n"
 
 class LoopDetector:
     def __init__(self, threshold: int = 3):
@@ -79,7 +91,7 @@ class LLMClient:
                 model=Config.MODEL_NAME,
                 messages=messages_to_send,
                 temperature=temp,
-                max_tokens=7500,
+                max_tokens=12000,
                 tools=tools,
                 parallel_tool_calls=False,
                 timeout=timeout,

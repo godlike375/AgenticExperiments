@@ -6,7 +6,7 @@ import inspect
 from typing import Union, Callable, Optional
 from universal_agents.tool import tool, ENVIRONMENT_PREFIX
 from config import Config
-from models import UserMessage, AssistantMessage, ToolCall, ToolResult, Message
+from models import UserMessage, AssistantMessage, ToolCall, ToolResult, Message, SystemMessage
 from llm_client import LLMClient, TokenUsageTracker, LoopDetector
 from history import ChatHistory
 
@@ -233,13 +233,14 @@ class LLMAgent:
         if usage:
             self.token_tracker.update_from_usage(usage)
         if err or not msg_obj:
-            return f"API Error during synthesis: {err}"
-        clean_content = msg_obj.content.replace("</think>", "").strip()
-        assistant_msg = self._build_assistant_msg(msg_obj, clean_content)
+            error = f"API Error during synthesis: {err}"
+            self.on_system_msg(error)
+            return error
+        assistant_msg = self._build_assistant_msg(msg_obj, msg_obj.content)
         if not msg_obj.tool_calls:
             self.history.add(assistant_msg)
             self.on_render(assistant_msg)
-            return clean_content
+            return msg_obj.content
         tool_results = self._execute_tools(assistant_msg.tool_calls)
         self.history.add(assistant_msg)
         self.on_render(assistant_msg)
@@ -282,14 +283,33 @@ class LLMAgent:
 
     def _prepare_messages_for_api(self) -> list[dict]:
         self.history.normalize()
-        messages = self.history.get_all_api()
-        for msg in messages:
-            if msg["role"] == "user":
-                msg["content"] = self.token_tracker.format_info_header() + msg["content"]
-            elif msg["role"] == "tool":
-                prefix = self.token_tracker.format_info_header() + f"{ENVIRONMENT_PREFIX} [Tool Result]\n"
-                msg["content"] = prefix + msg["content"]
-        return messages
+        api_messages = []
+
+        last_user_idx = None
+        last_user_msg = None
+        for i in range(len(self.history) - 1, -1, -1):
+            if isinstance(self.history[i], UserMessage):
+                last_user_idx = i
+                last_user_msg = self.history[i]
+                break
+
+        for i, msg in enumerate(self.history):
+            if isinstance(msg, SystemMessage):
+                api_messages.append(msg.to_api_dict())
+            elif isinstance(msg, UserMessage):
+                header = self.token_tracker.format_timestamp_header(msg)
+                if i == last_user_idx and last_user_msg:
+                    header += self.token_tracker.format_token_header(self.history[0].content, last_user_msg.content)
+                header += self.token_tracker.format_closing_header()
+                api_messages.append({
+                    "role": "user",
+                    "content": header + msg.content
+                })
+            elif isinstance(msg, AssistantMessage):
+                api_messages.append(msg.to_api_dict())
+            elif isinstance(msg, ToolResult):
+                api_messages.append(msg.to_api_dict())
+        return api_messages
 
     def _execute_tools(self, tool_calls: list[ToolCall]) -> list[ToolResult]:
         results = []
@@ -402,7 +422,9 @@ class LLMAgent:
             if usage:
                 self.token_tracker.update_from_usage(usage)
             if err:
-                return f"API Error: {err}"
+                error = f"[API Error] {err}"
+                self.on_system_msg(error)
+                return error
             result_text = self._process_llm_response(message_obj)
             if not message_obj.tool_calls:
                 return result_text

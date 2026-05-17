@@ -16,7 +16,7 @@ if __name__ == "__main__":
 
     agent = LLMAgent(
         system_prompt=sys_prompt,
-        tools_config=["test"],
+        tools_config=None,
         external_plugins=external_tools,
         on_render=ConsoleUI.render_message,
         on_confirm=ConsoleUI.confirm_action,
