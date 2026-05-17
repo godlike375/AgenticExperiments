@@ -63,16 +63,22 @@ def cwd(path: str = None):
     return os.getcwd()
 
 @tool(
-    description="Exact-string replacer in file",
+    description="Exact-string replacer in file. Creates file with parent dirs if it doesn't exist",
     requires_confirmation=True,
-    path=("str", "File path"),
-    old=("str", "Exact text to replace. Supports \\n for multiline blocks. If '' passed then replaces whole content"),
+    path=("str", "File path. Will be auto-created if missing"),
+    old=("str", "Exact text to replace. Supports \\n for multiline blocks. If '' or nothing passed then replaces whole content. For new files use '' to set initial content"),
     new=("str", "New text to replace the old with. Also supports \\n"),
     mode=("str", "'one' for 1 exclusive match, otherwise 'all' (default 'one')")
 )
-def edit_file(path: str, old: str, new: str, mode: str = "one"):
+def edit_file(path: str, new: str, old: str = '', mode: str = "one"):
     if not os.path.isfile(path):
-        raise FileNotFoundError(path)
+        # Создаём файл, если его нет
+        try:
+            os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("")
+        except Exception as e:
+            raise RuntimeError(f"Failed to create file: {e}")
 
     with open(path, "r", encoding="utf-8") as f:
         content = f.read()
@@ -91,14 +97,14 @@ def edit_file(path: str, old: str, new: str, mode: str = "one"):
             idx = pos + search_len
 
         if not matches:
-            raise ValueError("No matches found for old substring. Try again with different argument")  # Было return
+            raise ValueError("No matches found for old substring. Try again with different argument")
 
         m_mode = mode.strip().lower()
 
         if m_mode == "one" and len(matches) > 1:
             raise ValueError(
                 f"Found {len(matches)} matches. Make old substring more specific or use mode='all'."
-            )  # Было return
+            )
 
         new_content = content
         for pos in reversed(matches):
@@ -108,7 +114,7 @@ def edit_file(path: str, old: str, new: str, mode: str = "one"):
         with open(path, "w", encoding="utf-8") as f:
             f.write(new_content)
     except Exception as e:
-        raise RuntimeError(f"Write failed: {e}")  # Было return
+        raise RuntimeError(f"Write failed: {e}")
 
     # Дальше формирование красивого diff без изменений
     if old == '':
