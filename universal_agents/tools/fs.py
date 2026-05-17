@@ -73,10 +73,12 @@ def cwd(path: str = None):
 def edit_file(path: str, new: str, old: str = '', mode: str = "one"):
     if not os.path.isfile(path):
         # Создаём файл, если его нет
+        created_file = False
         try:
             os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
             with open(path, "w", encoding="utf-8") as f:
                 f.write("")
+            created_file = True
         except Exception as e:
             raise RuntimeError(f"Failed to create file: {e}")
 
@@ -117,8 +119,10 @@ def edit_file(path: str, new: str, old: str = '', mode: str = "one"):
         raise RuntimeError(f"Write failed: {e}")
 
     # Дальше формирование красивого diff без изменений
-    if old == '':
-        return f"File fully replaced with new content '{new[:20]}...'"
+    if old == '' and not created_file:
+        return f"File fully replaced with '{new[:20]}...'"
+    elif old == '' and created_file:
+        return f"File created with content '{new[:20]}...'"
 
     if m_mode == "one":
         old_lines = content.splitlines(keepends=True)
