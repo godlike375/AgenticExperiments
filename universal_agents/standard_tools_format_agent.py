@@ -6,7 +6,10 @@ import importlib.util
 import inspect
 from collections import deque
 from datetime import datetime
-from typing import List, Dict, Union, Callable, Optional
+from typing import Union, Callable
+from dataclasses import dataclass, field
+from typing import Optional, Any
+from abc import ABC, abstractmethod
 
 from openai import OpenAI
 from universal_agents.tool import tool, ENVIRONMENT_PREFIX
@@ -78,10 +81,9 @@ class TokenUsageTracker:
 
 
 class LoopDetector:
-    def __init__(self, max_history: int = 12, threshold: int = 3):
-        self.max_history = max_history
+    def __init__(self, threshold: int = 3):
         self.threshold = threshold
-        self.recent_calls = deque(maxlen=max_history)
+        self.recent_calls = deque(maxlen=threshold)
 
     @staticmethod
     def normalize_args(args_str: str) -> str:
@@ -123,7 +125,7 @@ class LLMClient:
         return cls._client
 
     @staticmethod
-    def call(messages: List[Dict], temp: float, timeout: int, tools: List[Dict] = None, prefill: str = None):
+    def call(messages: list[dict], temp: float, timeout: int, tools: list[dict] = None, prefill: str = None):
         messages_to_send = list(messages)
         if prefill:
             messages_to_send.append({"role": "assistant", "content": prefill})
@@ -153,141 +155,313 @@ class LLMClient:
         except Exception as e:
             return None, str(e), None
 
+@dataclass
+class Message(ABC):
+    """Базовый класс для всех сообщений."""
+
+    @abstractmethod
+    def to_api_dict(self) -> dict[str, Any]:
+        """Рендерит чистый словарь для API (без служебных полей)."""
+        pass
+
+    @abstractmethod
+    def render(self) -> str:
+        """Человекочитаемое представление для UI."""
+        pass
+
+
+@dataclass
+class SystemMessage(Message):
+    content: str
+
+    def to_api_dict(self) -> dict[str, Any]:
+        return {"role": "system", "content": self.content}
+
+    def render(self) -> str:
+        return f"[SYSTEM]: {self.content[:100]}..."
+
+
+@dataclass
+class UserMessage(Message):
+    content: str
+
+    def to_api_dict(self) -> dict[str, Any]:
+        return {"role": "user", "content": self.content}
+
+    def render(self) -> str:
+        return f"👤 User: {self.content}"
+
+
+@dataclass
+class ToolCall:
+    """Отдельный вызов инструмента внутри AssistantMessage."""
+    id: str
+    name: str
+    arguments: str
+
+    def to_api_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "arguments": self.arguments
+            }
+        }
+
+
+@dataclass
+class AssistantMessage(Message):
+    content: str = ""
+    tool_calls: list[ToolCall] = field(default_factory=list)
+
+    def has_tool_calls(self) -> bool:
+        return len(self.tool_calls) > 0
+
+    def is_empty_text(self) -> bool:
+        """Используется для определения «пустых» ассистентов,
+        которые только вызывали инструменты."""
+        return not self.content.strip()
+
+    def to_api_dict(self) -> dict[str, Any]:
+        d = {"role": "assistant", "content": self.content}
+        if self.tool_calls:
+            d["tool_calls"] = [tc.to_api_dict() for tc in self.tool_calls]
+        return d
+
+    def render(self) -> str:
+        parts = []
+        if self.content.strip():
+            parts.append(f"🤖 Agent: {self.content}")
+        for tc in self.tool_calls:
+            parts.append(f"🛠️ [Tool Call: {tc.name}({tc.arguments})]")
+        return "\n".join(parts)
+
+
+@dataclass
+class ToolResult(Message):
+    tool_call_id: str
+    name: str
+    content: str
+    is_error: bool = False
+    is_user_denied: bool = False
+    execution_time_ms: Optional[float] = None  # Пример расширяемости
+
+    # Дополнительные служебные поля, которые НЕ уходят в API
+    retry_count: int = 0  # Сколько раз перезапускали этот вызов?
+
+    def to_api_dict(self) -> dict[str, Any]:
+        """Только поля, нужные API — никаких is_error, retry_count."""
+        return {
+            "role": "tool",
+            "tool_call_id": self.tool_call_id,
+            "name": self.name,
+            "content": self.content
+        }
+
+    def render(self) -> str:
+        prefix = "❌" if self.is_error else "✅"
+        display = str(self.content)
+        if len(display) > 300:
+            display = display[:300] + "\n... [TRUNCATED]"
+        return f"{prefix} [Result '{self.name}']: {display}"
+
+    @classmethod
+    def success(cls, tool_call_id: str, name: str, content: str = "Tool executed successfully"):
+        return cls(tool_call_id, name, content, is_error=False)
+
+    @classmethod
+    def error(cls, tool_call_id: str, name: str, error: str):
+        return cls(tool_call_id, name, f"Error: {error}", is_error=True)
+
+    @classmethod
+    def user_denied(cls, tool_call_id: str, name: str):
+        return cls(
+            tool_call_id, name,
+            "User denied tool call. ASK them why and what to do next.",
+            is_user_denied=True
+        )
+
+
+# ─── Обновлённый ChatHistory ───
+
 class ChatHistory:
     def __init__(self, system_prompt: str):
-        self._messages = [{"role": "system", "content": system_prompt}]
+        self._messages: list[Message] = [SystemMessage(system_prompt)]
 
-    def add(self, msg: Dict):
+    def add(self, msg: Message):
         self._messages.append(msg)
 
-    def extend(self, msgs: List[Dict]):
+    def extend(self, msgs: list[Message]):
         self._messages.extend(msgs)
 
-    def get_all(self) -> List[Dict]:
-        return self._messages
+    def get_all_api(self) -> list[dict[str, Any]]:
+        """Отдаёт чистые словари для LLM API."""
+        return [msg.to_api_dict() for msg in self._messages]
+
+    def get_all(self) -> list[Message]:
+        return self._messages.copy()
 
     def __len__(self):
         return len(self._messages)
 
-    def __getitem__(self, idx):
+    def __getitem__(self, idx) -> Message:
         return self._messages[idx]
 
+    def __iter__(self):
+        return iter(self._messages)
+
+    def get_last_message(self) -> Optional[Message]:
+        return self._messages[-1] if len(self._messages) > 1 else None
+
     def pop_until_user(self) -> Optional[str]:
-        """Удаляет сообщения с конца до первого user message (не включая system)."""
+        """Удаляет сообщения с конца до первого UserMessage."""
         user_content = None
-        # Идем с конца, пока не найдем user или не упремся в system prompt
         while len(self._messages) > Config.AFTER_SYSTEM_PROMPT:
-            last_msg = self._messages[-1]
-            if last_msg["role"] == "user":
-                user_content = self._messages.pop()["content"]
+            last = self._messages[-1]
+            if isinstance(last, UserMessage):
+                user_content = last.content
+                self._messages.pop()
                 break
             else:
                 self._messages.pop()
         return user_content
 
-    def edit_message(self, idx: int, new_text: str, old_text: str = '') -> str:
-        if not (0 <= idx < len(self._messages)):
-            return f"{ENVIRONMENT_PREFIX} Error: Invalid message index {idx}"
-
-        msg = self._messages[idx]
-
-        if not old_text.strip():
-            msg["content"] = new_text
-        else:
-            if old_text not in msg["content"]:
-                return f"Error: Substr '{old_text}' not found in message {idx}"
-            msg["content"] = msg["content"].replace(old_text, new_text, 1)
-
-        # Если сообщение стало пустым, удаляем его (кроме system)
-        if not msg["content"].strip() and idx >= Config.AFTER_SYSTEM_PROMPT:
-            self.delete_range(idx, idx)
-            return 'Replacing to empty text led to deleting the message block.'
-
-        return f'{ENVIRONMENT_PREFIX} Success'
-
     def delete_range(self, start_id: int, end_id: int = -1):
+        """Удаляет диапазон сообщений."""
         if not (0 <= start_id < len(self._messages)):
             return f"Error: Invalid start_id {start_id}"
 
         if end_id == -1 or end_id >= len(self._messages):
             end_id = len(self._messages) - 1
 
-        # Защита от удаления system prompt
         safe_start = max(start_id, Config.AFTER_SYSTEM_PROMPT)
         safe_end = end_id
 
         if safe_start > safe_end:
             return f"{ENVIRONMENT_PREFIX} Success (Nothing to delete)"
 
-        # Находим границы блока сообщений пользователя/ассистента, чтобы не ломать структуру пар
-        # Простая стратегия: удаляем точно указанный диапазон, но проверяем целостность позже в normalize
         del self._messages[safe_start:safe_end + 1]
         return f'{ENVIRONMENT_PREFIX} Success'
 
-    def save(self, path: str):
-        with open(path, 'w', encoding='utf-8') as f:
-            json.dump(self._messages, f, ensure_ascii=False, indent=2)
+    def edit_message(self, idx: int, new_text: str, old_text: str = '') -> str:
+        """Редактирует сообщение по индексу."""
+        if not (0 <= idx < len(self._messages)):
+            return f"{ENVIRONMENT_PREFIX} Error: Invalid message index {idx}"
 
-    def load(self, path: str):
-        with open(path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-        if isinstance(data, list) and data and "role" in data[0]:
-            self._messages = data
+        msg = self._messages[idx]
+
+        if isinstance(msg, SystemMessage):
+            return f"{ENVIRONMENT_PREFIX} Error: Cannot edit system prompt"
+
+        if not old_text.strip():
+            msg.content = new_text
         else:
-            raise ValueError(f"{ENVIRONMENT_PREFIX} Invalid history format")
+            if old_text not in msg.content:
+                return f"Error: Substr '{old_text}' not found in message {idx}"
+            msg.content = msg.content.replace(old_text, new_text, 1)
+
+        if not msg.content.strip() and idx >= Config.AFTER_SYSTEM_PROMPT:
+            self.delete_range(idx, idx)
+            return 'Replacing to empty text led to deleting the message block.'
+
+        return f'{ENVIRONMENT_PREFIX} Success'
 
     def normalize(self):
-        """
-        Полная очистка истории для обеспечения валидности структуры API.
-        """
+        """Полная очистка истории для обеспечения валидности структуры API."""
         if len(self._messages) <= Config.AFTER_SYSTEM_PROMPT:
             return
 
-        raw_msgs = self._messages
-        valid_msgs = [raw_msgs[0]]
+        raw = self._messages
+        valid = [raw[0]]  # system
 
-        # 1. Ищем первое сообщение от пользователя (после system)
+        # Поиск первого UserMessage
         first_user_idx = Config.AFTER_SYSTEM_PROMPT
-        while first_user_idx < len(raw_msgs) and raw_msgs[first_user_idx]["role"] != "user":
+        while first_user_idx < len(raw) and not isinstance(raw[first_user_idx], UserMessage):
             first_user_idx += 1
 
-        if first_user_idx >= len(raw_msgs):
-            # Если юзер так и не найден, оставляем только системник
-            self._messages = valid_msgs
+        if first_user_idx >= len(raw):
+            self._messages = valid
             return
 
-        # Добавляем первого найденного юзера
-        valid_msgs.append(raw_msgs[first_user_idx])
+        valid.append(raw[first_user_idx])
 
-        # 2. Проходим по остальным сообщениям
-        for i in range(first_user_idx + 1, len(raw_msgs)):
-            msg = raw_msgs[i]
-            last = valid_msgs[-1]
+        for i in range(first_user_idx + 1, len(raw)):
+            msg = raw[i]
+            last = valid[-1]
 
-            # --- ПРАВИЛО 1: Обработка TOOL-сообщений ---
-            if msg["role"] == "tool":
-                # Tool-сообщение валидно только если ПРЕДЫДУЩЕЕ было Assistant с tool_calls
-                # И id этого тула есть в списке вызовов ассистента
-                if last["role"] == "assistant" and "tool_calls" in last:
-                    call_ids = [tc["id"] for tc in last["tool_calls"]]
-                    if msg.get("tool_call_id") in call_ids:
-                        valid_msgs.append(msg)
-                continue # Если условие не выполнено, тул просто выбрасывается (сирота)
-
-            # --- ПРАВИЛО 2: Чередование USER и ASSISTANT ---
-            if msg["role"] == last["role"]:
-                if msg["role"] in ["user", "assistant"]:
-                    # Склеиваем контент одинаковых ролей, чтобы не нарушать структуру
-                    new_content = (last.get("content") or "") + "\n" + (msg.get("content") or "")
-                    last["content"] = new_content.strip()
-                    # Если у второго ассистента были тул-коллы, переносим их (редкий кейс)
-                    if "tool_calls" in msg:
-                        last["tool_calls"] = last.get("tool_calls", []) + msg["tool_calls"]
+            # ToolResult должен идти после AssistantMessage с tool_calls
+            if isinstance(msg, ToolResult):
+                if isinstance(last, AssistantMessage) and last.has_tool_calls():
+                    # Проверяем, что tool_call_id совпадает
+                    call_ids = [tc.id for tc in last.tool_calls]
+                    if msg.tool_call_id in call_ids:
+                        valid.append(msg)
                 continue
 
-            valid_msgs.append(msg)
+            # Склеиваем одинаковые роли
+            if type(msg) == type(last) and isinstance(msg, (UserMessage, AssistantMessage)):
+                last.content = (last.content or "") + "\n" + (msg.content or "")
+                if isinstance(msg, AssistantMessage) and msg.has_tool_calls():
+                    last.tool_calls = last.tool_calls + msg.tool_calls
+                continue
 
-        self._messages = valid_msgs
+            valid.append(msg)
+
+        self._messages = valid
+
+    def save(self, path: str):
+        """Сохраняет в JSON. Метаданные теряются — только API-поля."""
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(self.get_all_api(), f, ensure_ascii=False, indent=2)
+
+    def load(self, path: str):
+        """Загружает из JSON (восстанавливает простые типы)."""
+        with open(path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+
+        if not isinstance(data, list) or not data:
+            raise ValueError(f"{ENVIRONMENT_PREFIX} Invalid history format")
+
+        self._messages = []
+        for d in data:
+            role = d.get("role")
+            if role == "system":
+                self._messages.append(SystemMessage(d["content"]))
+            elif role == "user":
+                self._messages.append(UserMessage(d["content"]))
+            elif role == "assistant":
+                tcs = []
+                for tc in d.get("tool_calls", []):
+                    tcs.append(ToolCall(
+                        id=tc["id"],
+                        name=tc["function"]["name"],
+                        arguments=tc["function"]["arguments"]
+                    ))
+                self._messages.append(AssistantMessage(
+                    content=d.get("content", ""),
+                    tool_calls=tcs
+                ))
+            elif role == "tool":
+                # При загрузке не знаем, ошибка или нет — считаем успехом
+                self._messages.append(ToolResult.success(
+                    tool_call_id=d["tool_call_id"],
+                    name=d.get("name", "unknown"),
+                    content=d["content"]
+                ))
+            else:
+                raise ValueError(f"Unknown role: {role}")
+
+    def find_last_tool_result(self, tool_name: str) -> Optional[ToolResult]:
+        """Находит последний результат конкретного инструмента."""
+        for msg in reversed(self._messages):
+            if isinstance(msg, ToolResult) and msg.name == tool_name:
+                return msg
+        return None
+
+    def get_messages_by_type(self, msg_type) -> list[Message]:
+        """Фильтр сообщений по типу."""
+        return [msg for msg in self._messages if isinstance(msg, msg_type)]
 
 class LLMAgent:
     def __init__(
@@ -295,11 +469,11 @@ class LLMAgent:
             system_prompt: str = "You are a helpful assistant",
             temp: float = 0.05,
             timeout: int = 1800,
-            tools_config: Union[List[str], Dict, None] = None,
-            on_render: Callable[[Dict], None] = lambda x: None,
-            on_confirm: Callable[[str, Dict], bool] = lambda n, a: True,
+            tools_config: Union[list[str], dict, None] = None,
+            on_render: Callable = lambda x: None,
+            on_confirm: Callable[[str, dict], bool] = lambda n, a: True,
             on_system_msg: Callable[[str], None] = lambda x: None,
-            external_plugins: Dict[str, Callable] = None,
+            external_plugins: dict[str, Callable] = None,
             max_context_tokens: int = 16384
     ):
         self.history = ChatHistory(system_prompt)
@@ -326,12 +500,12 @@ class LLMAgent:
         self._all_tools = internal_tools
         self._filter_tools(tools_config)
 
-        self.loop_detector = LoopDetector(max_history=12, threshold=3)
+        self.loop_detector = LoopDetector(threshold=2)
         self._temp_boost_active = False
         self._original_temp = temp
 
     @staticmethod
-    def _build_tool_dict(func: Callable, is_instance_method: bool) -> Dict:
+    def _build_tool_dict(func: Callable, is_instance_method: bool) -> dict:
         """Хелпер для устранения дублирования при сборке словаря инструмента."""
         return {
             "schema": func._tool_schema,
@@ -349,62 +523,93 @@ class LLMAgent:
         return None
 
     @staticmethod
-    def _build_assistant_msg(msg_obj, clean_content: str) -> Dict:
-        """Хелпер для устранения дублирования при сборке сообщения ассистента с инструментами."""
-        assistant_msg = {"role": "assistant", "content": clean_content}
+    def _build_assistant_msg(msg_obj, clean_content: str) -> AssistantMessage:
+        tool_calls = []
         if msg_obj.tool_calls:
-            assistant_msg["tool_calls"] = [
-                {
-                    "id": tc.id,
-                    "type": tc.type,
-                    "function": {
-                        "name": tc.function.name,
-                        "arguments": tc.function.arguments
-                    }
-                } for tc in msg_obj.tool_calls
-            ]
-        return assistant_msg
+            for tc in msg_obj.tool_calls:
+                tool_calls.append(ToolCall(
+                    id=tc.id,
+                    name=tc.function.name,
+                    arguments=tc.function.arguments
+                ))
+        return AssistantMessage(content=clean_content, tool_calls=tool_calls)
 
     def _break_tool_loop(self, tool_name: str, norm_args: str, count: int):
-        """Удаляет дублирующиеся вызовы инструментов, оставляя только первый."""
+        """Исправленная версия для работы с доменными объектами."""
         messages = self.history._messages
-        matched_indices = [] # Индексы сообщений assistant с этим tool_call
+        matched_indices = []
         duplicate_tool_ids = set()
 
-        # 1. Находим все assistant сообщения с нужным tool call
         for i in range(Config.AFTER_SYSTEM_PROMPT, len(messages)):
             msg = messages[i]
-            if msg["role"] != "assistant":
+            if not isinstance(msg, AssistantMessage):
                 continue
-            for tc in msg.get("tool_calls", []):
-                if (tc["function"]["name"] == tool_name and
-                        self.loop_detector.normalize_args(tc["function"].get("arguments", "{}")) == norm_args):
+            for tc in msg.tool_calls:
+                if (tc.name == tool_name and
+                        self.loop_detector.normalize_args(tc.arguments) == norm_args):
                     matched_indices.append(i)
-                    # Собираем ID всех найденных вызовов, кроме первого
                     if len(matched_indices) > 1:
-                        duplicate_tool_ids.add(tc["id"])
+                        duplicate_tool_ids.add(tc.id)
 
         if len(matched_indices) <= 1:
             return
 
-        # 2. Собираем индексы на удаление (дубликаты assistant + их результаты tool)
-        to_remove = set(matched_indices[1:]) # Все assistant кроме первого
+        to_remove = set(matched_indices[1:])
 
-        # Добавляем результаты инструментов для удаленных вызовов
         for i, msg in enumerate(messages):
-            if msg["role"] == "tool" and msg.get("tool_call_id") in duplicate_tool_ids:
+            if isinstance(msg, ToolResult) and msg.tool_call_id in duplicate_tool_ids:
                 to_remove.add(i)
 
-        # 3. Удаляем с конца, чтобы не сбить индексы
         for idx in sorted(to_remove, reverse=True):
             del messages[idx]
 
         warning = (
-            f"{ENVIRONMENT_PREFIX} LOOP DETECTED! Tool '{tool_name}' with identical parameters "
-            f"was called {count} times. I kept only the FIRST execution and removed duplicates."
+            f"{ENVIRONMENT_PREFIX} Tool '{tool_name}' with identical args "
+            f"was called a few times. The system removed all duplicates."
         )
-        messages.append({"role": "user", "content": warning})
+        messages.append(UserMessage(warning))
         self.on_system_msg(f"[LOOP DETECTED] '{tool_name}' ×{count}")
+
+    # ─── Инструменты ───
+
+    @tool(description="Get short indexed current history with ids")
+    def get_msg_ids(self, chars_per_message: int = 35):
+        history = self.history
+        if len(history) <= Config.AFTER_SYSTEM_PROMPT:
+            return f"{ENVIRONMENT_PREFIX} История пока пустая."
+
+        lines = ["=== SHORT DIALOG ==="]
+        for i in range(Config.AFTER_SYSTEM_PROMPT, len(history)):
+            msg = history[i]
+
+            if isinstance(msg, SystemMessage):
+                continue
+            elif isinstance(msg, UserMessage):
+                role = "USER"
+                content = msg.content
+            elif isinstance(msg, AssistantMessage):
+                role = "ASSISTANT"
+                content = msg.content
+                if msg.has_tool_calls():
+                    tc_info = ", ".join(tc.name for tc in msg.tool_calls)
+                    content += f" [Tools: {tc_info}]"
+            elif isinstance(msg, ToolResult):
+                role = "TOOL"
+                content = msg.content
+                prefix = f"[{msg.name}] " if msg.name else ""
+                lines.append(
+                    f"[id {i}] {role}: {prefix}{content[:chars_per_message].strip()}"
+                )
+                continue
+            else:
+                continue
+
+            if len(content) > chars_per_message:
+                content = content[:chars_per_message] + " ..."
+
+            lines.append(f"[id {i}] {role}: {content.strip()}")
+
+        return f"{ENVIRONMENT_PREFIX} Your current history:\n" + "\n".join(lines)
 
     def _collect_internal_tools(self, classes):
         tools = {}
@@ -437,7 +642,7 @@ class LLMAgent:
         return None
 
     def _chat_self_consistent(self, message: str, prefill: str = None) -> str:
-        user_message = {"role": "user", "content": message}
+        user_message = UserMessage(content=message)
         self.history.add(user_message)
         messages_base = self._prepare_messages_for_api()
 
@@ -468,7 +673,6 @@ class LLMAgent:
 
         synthesis_messages = messages_base + [{"role": "user", "content": synthesis_prompt}]
         current_prefill = self._get_effective_prefill(prefill)
-
         msg_obj, err, usage = LLMClient.call(
             synthesis_messages, temp=0.2, timeout=self.timeout,
             tools=self.tools if self.tools else None,
@@ -483,16 +687,14 @@ class LLMAgent:
         clean_content = msg_obj.content.replace("</think>", "").strip()
         assistant_msg = self._build_assistant_msg(msg_obj, clean_content)
 
-        # 1. Если модель сразу ответила текстом без инструментов
         if not msg_obj.tool_calls:
             self.history.add(assistant_msg)
             self.on_render(assistant_msg)
             return clean_content
 
-        # 2. Если модель решила вызвать инструменты
-        tool_results = self._execute_tools(msg_obj.tool_calls)
+        # Выполняем инструменты – получаем список ToolResult
+        tool_results = self._execute_tools(assistant_msg.tool_calls)
 
-        # Сохраняем вызов инструментов и их результаты в основную историю
         self.history.add(assistant_msg)
         self.on_render(assistant_msg)
 
@@ -500,10 +702,15 @@ class LLMAgent:
         for tr in tool_results:
             self.on_render(tr)
 
-        followup_messages = synthesis_messages + [assistant_msg] + tool_results
+        # Собираем followup_messages как словари
+        followup_dicts = (
+                synthesis_messages +
+                [assistant_msg.to_api_dict()] +
+                [tr.to_api_dict() for tr in tool_results]
+        )
 
         final_obj, final_err, final_usage = LLMClient.call(
-            followup_messages,
+            followup_dicts,
             temp=0.1,
             timeout=self.timeout,
             tools=None
@@ -514,12 +721,10 @@ class LLMAgent:
         if final_err or not final_obj:
             return clean_content or "Tool executed successfully"
 
-        # Сохраняем финальный ответ в основную историю
         final_content = final_obj.content.strip()
-        final_assistant_msg = {"role": "assistant", "content": final_content}
+        final_assistant_msg = self._build_assistant_msg(final_obj, final_content)
         self.history.add(final_assistant_msg)
         self.on_render(final_assistant_msg)
-
         return final_content
 
     def _filter_tools(self, config):
@@ -536,71 +741,57 @@ class LLMAgent:
         self._all_tools = {k: v for k, v in self._all_tools.items() if k in active}
         self.tools = [v['schema'] for v in self._all_tools.values()]
 
-    def _prepare_messages_for_api(self) -> List[Dict]:
+    def _prepare_messages_for_api(self) -> list[dict]:
+        """Готовит сообщения для API (с заголовками токенов)."""
         self.history.normalize()
-        messages = [msg.copy() for msg in self.history.get_all()]
+        messages = self.history.get_all_api()  # Уже чистые словари!
 
-        # Добавляем заголовки ко всем user- и tool-сообщениям
         for msg in messages:
             if msg["role"] == "user":
-                # Вставляем заголовок в начало содержимого
                 msg["content"] = self.token_tracker.format_info_header() + msg["content"]
             elif msg["role"] == "tool":
-                # Для инструментов – заголовок + пометка [Tool Result]
                 prefix = self.token_tracker.format_info_header() + f"{ENVIRONMENT_PREFIX} [Tool Result]\n"
                 msg["content"] = prefix + msg["content"]
+
         return messages
 
-    def _execute_tools(self, tool_calls) -> List[Dict]:
+    def _execute_tools(self, tool_calls: list[ToolCall]) -> list[ToolResult]:
+        """Выполняет инструменты, возвращает доменные объекты."""
         results = []
         for tc in tool_calls:
-            name = tc.function.name
-            args_str = tc.function.arguments or "{}"
+            name = tc.name
+            args_str = tc.arguments or "{}"
 
             self.loop_detector.add_call(name, args_str)
 
             tool_info = self._all_tools.get(name)
             if not tool_info:
-                results.append({
-                    "tool_call_id": tc.id, "role": "tool", "name": name,
-                    "content": f"Error: Unknown tool '{name}'"
-                })
+                results.append(ToolResult.error(tc.id, name, f"Unknown tool '{name}'"))
                 continue
 
             args_dict = None
-            parse_err = None
             try:
                 args_dict = json.loads(args_str) if args_str != "{}" else {}
             except Exception as e:
-                parse_err = e
+                results.append(ToolResult.error(tc.id, name, f"Invalid JSON: {e}"))
+                continue
 
             if tool_info.get('requires_confirmation', False):
-                if parse_err:
-                    raise parse_err
                 if not self.on_confirm(name, args_dict):
-                    results.append({
-                        "tool_call_id": tc.id, "role": "tool", "name": name,
-                        "content": f"User denied tool call remotely. ASK them why they denied and what to do next."
-                    })
+                    results.append(ToolResult.user_denied(tc.id, name))
                     continue
 
             try:
-                if parse_err:
-                    raise parse_err
                 handler = tool_info['handler']
                 if tool_info['is_instance_method']:
                     full_result = handler(self, **args_dict)
                 else:
                     full_result = handler(**args_dict)
-                # ИЗМЕНЕНИЕ: теперь без обогащения
                 content = str(full_result) if full_result is not None else "Tool executed successfully"
+                results.append(ToolResult.success(tc.id, name, content))
             except Exception as e:
                 self.on_system_msg(f"[ERROR] Tool '{name}' FAILED: {e}")
-                content = f"Error: {e}"
-
-            results.append({
-                "tool_call_id": tc.id, "role": "tool", "name": name, "content": content
-            })
+                results.append(ToolResult.error(tc.id, name, str(e)))
 
         loop_info = self.loop_detector.detect_loop()
         if loop_info:
@@ -611,11 +802,6 @@ class LLMAgent:
         return results
 
     def _process_llm_response(self, message_obj) -> str:
-        """
-        Универсальный обработчик ответа LLM.
-        Добавляет сообщение в историю, рендерит, выполняет инструменты.
-        Возвращает финальный текст ответа или текст после выполнения инструментов.
-        """
         if not message_obj:
             return "Empty response"
 
@@ -623,7 +809,6 @@ class LLMAgent:
         clean_content = content.replace("</think>", "").strip()
 
         assistant_msg = self._build_assistant_msg(message_obj, clean_content)
-
         self.history.add(assistant_msg)
         self.on_render(assistant_msg)
 
@@ -631,18 +816,72 @@ class LLMAgent:
             return clean_content
 
         # Выполняем инструменты
-        tool_results = self._execute_tools(message_obj.tool_calls)
+        tool_results = self._execute_tools(assistant_msg.tool_calls)
         self.history.extend(tool_results)
         for tr in tool_results:
             self.on_render(tr)
+
+        # Очистка старых ошибок
+        self._prune_all_failed_tool_calls_except_last()
+
         return clean_content
+
+    def _prune_all_failed_tool_calls_except_last(self):
+        """Удаляет все неудачные вызовы, кроме последнего обмена."""
+        if len(self.history) <= Config.AFTER_SYSTEM_PROMPT + 1:
+            return
+
+        # Находим последний AssistantMessage
+        last_assistant_idx = -1
+        for i in range(len(self.history) - 1, Config.AFTER_SYSTEM_PROMPT - 1, -1):
+            if isinstance(self.history[i], AssistantMessage):
+                last_assistant_idx = i
+                break
+
+        if last_assistant_idx == -1:
+            return
+
+        indices_to_remove = set()
+
+        i = Config.AFTER_SYSTEM_PROMPT
+        while i < len(self.history):
+            msg = self.history[i]
+
+            # Ищем пустой AssistantMessage с tool_calls
+            if (isinstance(msg, AssistantMessage) and
+                    msg.has_tool_calls()):
+
+                # Проверяем следующее сообщение
+                if (i + 1 < len(self.history) and
+                        isinstance(self.history[i + 1], ToolResult)):
+
+                    tool_result = self.history[i + 1]
+
+                    # Удаляем только ошибки, не трогая user_denied
+                    if tool_result.is_error and not tool_result.is_user_denied:
+                        # Не трогаем последний обмен
+                        if i < last_assistant_idx:
+                            indices_to_remove.add(i)
+                            indices_to_remove.add(i + 1)
+                            i += 2
+                            continue
+            i += 1
+
+        if indices_to_remove:
+            for idx in sorted(indices_to_remove, reverse=True):
+                del self.history._messages[idx]
+            self.on_system_msg(
+                f"[CLEANUP] Removed {len(indices_to_remove)} messages "
+                f"({len(indices_to_remove)//2} failed calls)"
+            )
+            self.history.normalize()
 
     def chat(self, message: str, max_iter: int = 5, prefill: str = None) -> str:
         if self.self_consistency_mode:
             return self._chat_self_consistent(message, prefill)
 
         # Сохраняем исходное сообщение без заголовка (заголовок добавится позже в _prepare_messages_for_api)
-        user_msg = {"role": "user", "content": message}
+        user_msg = UserMessage(content=message)
         self.history.add(user_msg)
 
         current_prefill = self._get_effective_prefill(prefill)
@@ -681,26 +920,42 @@ class LLMAgent:
 
     @tool(description="Get short indexed current history with ids")
     def get_msg_ids(self, chars_per_message: int = 35):
-        history = self.history.get_all()
+        history = self.history._messages
         if len(history) <= Config.AFTER_SYSTEM_PROMPT:
             return f"{ENVIRONMENT_PREFIX} История пока пустая."
 
         lines = ["=== SHORT DIALOG ==="]
         for i in range(Config.AFTER_SYSTEM_PROMPT, len(history)):
             msg = history[i]
-            role = msg["role"]
-            content = msg.get("content", "") or ""
+
+            # Определяем роль и контент
+            if isinstance(msg, SystemMessage):
+                continue
+            elif isinstance(msg, UserMessage):
+                role = "USER"
+                content = msg.content
+            elif isinstance(msg, AssistantMessage):
+                role = "ASSISTANT"
+                content = msg.content or ""
+                if msg.has_tool_calls():
+                    tc_info = ", ".join(tc.name for tc in msg.tool_calls)
+                    content += f" [Tools: {tc_info}]"
+            elif isinstance(msg, ToolResult):
+                role = "TOOL"
+                prefix = f"[{msg.name}] "
+                content = prefix + msg.content
+                # Добавляем короткий индикатор
+                if msg.is_error:
+                    content += " ❌"
+                elif msg.is_user_denied:
+                    content += " 🚫"
+            else:
+                continue
 
             if len(content) > chars_per_message:
                 content = content[:chars_per_message] + " ..."
 
-            if role == "assistant" and msg.get("tool_calls"):
-                tc_info = ", ".join(tc["function"]["name"] for tc in msg["tool_calls"])
-                content += f" [Tools: {tc_info}]"
-
-            tool_name = msg.get("name", "")
-            prefix = f"[{tool_name}] " if tool_name else ""
-            lines.append(f"[id {i}] {role.upper()}: {prefix}{content.strip()}")
+            lines.append(f"[id {i}] {role}: {content.strip()}")
 
         return f"{ENVIRONMENT_PREFIX} Your current history:\n" + "\n".join(lines)
 
@@ -721,27 +976,23 @@ class LLMAgent:
 
 class ConsoleUI:
     @staticmethod
-    def render_message(msg: Dict):
-        role = msg.get("role")
-        content = msg.get("content")
-
-        if role == "system":
+    def render_message(msg: Message):
+        if isinstance(msg, SystemMessage):
             return
-        elif role == "user":
-            print(f"\n👤 User: {content}")
-        elif role == "assistant":
-            if content:
+        elif isinstance(msg, UserMessage):
+            print(f"\n👤 User: {msg.content}")
+        elif isinstance(msg, AssistantMessage):
+            if msg.content.strip():
                 print('\n' + '=' * 15)
-                print(f"🤖 Agent: {content}")
+                print(f"🤖 Agent: {msg.content}")
                 print('=' * 15)
-            for tc in msg.get("tool_calls", []):
-                func = tc.get("function", {})
-                print(f"🛠️ [Tool Call: {func.get('name')}({func.get('arguments')})]")
-        elif role == "tool":
-            display = str(content)
+            for tc in msg.tool_calls:
+                print(f"🛠️ [Tool Call: {tc.name}({tc.arguments})]")
+        elif isinstance(msg, ToolResult):
+            display = str(msg.content)
             if len(display) > 300:
                 display = display[:300] + "\n... [TRUNCATED]"
-            print(f"✅ [Result '{msg.get('name')}']: {display}")
+            print(f"✅ [Result '{msg.name}']: {display}")
 
     @staticmethod
     def system_msg(text: str):
@@ -750,7 +1001,7 @@ class ConsoleUI:
             print(f"\n⚙️ [System]: {text}")
 
     @staticmethod
-    def confirm_action(name: str, args: Dict) -> bool:
+    def confirm_action(name: str, args: dict) -> bool:
         print(f"\n[WARNING] Tool '{name}' modifies state")
         resp = input("Execute? (y/n): ").strip().lower()
         return resp == 'y'
@@ -772,7 +1023,7 @@ class CLI:
             "/multiline": self.cmd_multiline
         }
 
-    def cmd_regen(self, parts: List[str]):
+    def cmd_regen(self, parts: list[str]):
         n = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 1
         for _ in range(n - 1):
             self.agent.history.pop_until_user()
@@ -785,15 +1036,15 @@ class CLI:
         ConsoleUI.system_msg(f"Regenerating response for: '{user_msg}'")
         self.agent.chat(user_msg, max_iter=5, prefill=self.pending_prefill)
 
-    def cmd_think_on(self, parts: List[str]):
+    def cmd_think_on(self, parts: list[str]):
         self.agent.thinking_enabled = True
         ConsoleUI.system_msg("Force think ENABLED")
 
-    def cmd_think_off(self, parts: List[str]):
+    def cmd_think_off(self, parts: list[str]):
         self.agent.thinking_enabled = False
         ConsoleUI.system_msg("Force think DISABLED (using dirty hack)")
 
-    def cmd_prefill(self, parts: List[str]):
+    def cmd_prefill(self, parts: list[str]):
         if len(parts) > 1:
             self.pending_prefill = parts[1]
             ConsoleUI.system_msg(f"Next message will start with prefill: '{self.pending_prefill}'")
@@ -801,7 +1052,7 @@ class CLI:
             self.pending_prefill = None
             ConsoleUI.system_msg("Prefill cleared")
 
-    def cmd_save(self, parts: List[str]):
+    def cmd_save(self, parts: list[str]):
         filename = parts[1] if len(parts) > 1 else "default_history.json"
         try:
             self.agent.history.save(filename)
@@ -809,7 +1060,7 @@ class CLI:
         except Exception as e:
             ConsoleUI.system_msg(f"Error saving history: {e}")
 
-    def cmd_load(self, parts: List[str]):
+    def cmd_load(self, parts: list[str]):
         filename = parts[1] if len(parts) > 1 else "default_history.json"
         if not os.path.exists(filename):
             ConsoleUI.system_msg(f"File '{filename}' not found")
@@ -823,7 +1074,7 @@ class CLI:
         except Exception as e:
             ConsoleUI.system_msg(f"Error loading history: {e}")
 
-    def cmd_consistent(self, parts: List[str]):
+    def cmd_consistent(self, parts: list[str]):
         """Toggle self-consistency mode on/off"""
         self.agent.self_consistency_mode = not self.agent.self_consistency_mode
         status = "ON" if self.agent.self_consistency_mode else "OFF"

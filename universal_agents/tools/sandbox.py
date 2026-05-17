@@ -82,38 +82,48 @@ class UnifiedDockerAgent:
     def execute_python(cls, code: str, timeout: int = 60) -> str:
         cls._ensure_container()
         cmd = ["docker", "exec", "-i", cls.CONTAINER_NAME, "python3", "-"]
+        return cls._run_cmd(cmd, timeout, stdin_input=code)
+
+    @classmethod
+    def _run_cmd(cls, cmd: list, timeout: int, stdin_input: str = None) -> str:
         try:
             result = subprocess.run(
                 cmd,
-                input=code,
+                input=stdin_input,
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
                 timeout=timeout
             )
-            output = result.stdout or ""
-            if result.stderr:
-                output += f"\n[stderr]\n{result.stderr}"
-            output += f"\n[exit_code]: {result.returncode}"
-            return output
-        except subprocess.TimeoutExpired:
-            return f"Error: Python execution timed out after {timeout}s"
-        except Exception as e:
-            return f"Error: {e}"
 
-    @classmethod
-    def _run_cmd(cls, cmd: list, timeout: int) -> str:
-        try:
-            result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", timeout=timeout)
             output = result.stdout or ""
+
+            if result.returncode != 0:
+                error_msg = result.stderr or result.stdout or "Unknown error"
+                raise RuntimeError(
+                    f"Command failed with exit code {result.returncode}:\n{error_msg}"
+                )
+
             if result.stderr:
                 output += f"\n[stderr]\n{result.stderr}"
+
             output += f"\n[exit_code]: {result.returncode}"
             return output
+
         except subprocess.TimeoutExpired:
-            return f"Error: Timeout after {timeout}s"
+            raise TimeoutError(f"Command timed out after {timeout}s")
+        except RuntimeError:
+            raise
         except Exception as e:
-            return f"Error: {e}"
+            raise RuntimeError(f"Unexpected error during command execution: {e}")
+
+        except subprocess.TimeoutExpired:
+            raise TimeoutError(f"Command timed out after {timeout}s")
+        except RuntimeError:
+            # Пробрасываем наши ошибки дальше
+            raise
+        except Exception as e:
+            raise RuntimeError(f"Unexpected error during command execution: {e}")
 
     @classmethod
     def stop(cls) -> str:

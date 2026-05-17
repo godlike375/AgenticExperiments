@@ -59,7 +59,7 @@ def cwd(path: str = None):
             os.chdir(path)
             return f'{ENVIRONMENT_PREFIX} Successfully set cwd'
         except Exception as e:
-            return f"{ENVIRONMENT_PREFIX} Error changing cwd: {e}"
+            raise RuntimeError(f"Error changing cwd: {e}")  # Было return, стало raise
     return os.getcwd()
 
 @tool(
@@ -77,7 +77,6 @@ def edit_file(path: str, old: str, new: str, mode: str = "one"):
     with open(path, "r", encoding="utf-8") as f:
         content = f.read()
 
-    # Специальная обработка: если old == '', заменяем весь файл
     if old == '':
         new_content = new
     else:
@@ -86,17 +85,20 @@ def edit_file(path: str, old: str, new: str, mode: str = "one"):
         search_len = max(len(old), 1)
         while True:
             pos = content.find(old, idx)
-            if pos == -1: break
+            if pos == -1:
+                break
             matches.append(pos)
             idx = pos + search_len
 
         if not matches:
-            return f"{ENVIRONMENT_PREFIX} Error: No matches found for old substring. Try again with different argument"
+            raise ValueError("No matches found for old substring. Try again with different argument")  # Было return
 
         m_mode = mode.strip().lower()
 
         if m_mode == "one" and len(matches) > 1:
-            return f"Found {len(matches)} matches. Make old substring more specific or use mode='all'."
+            raise ValueError(
+                f"Found {len(matches)} matches. Make old substring more specific or use mode='all'."
+            )  # Было return
 
         new_content = content
         for pos in reversed(matches):
@@ -106,8 +108,9 @@ def edit_file(path: str, old: str, new: str, mode: str = "one"):
         with open(path, "w", encoding="utf-8") as f:
             f.write(new_content)
     except Exception as e:
-        return f"Write failed: {e}"
+        raise RuntimeError(f"Write failed: {e}")  # Было return
 
+    # Дальше формирование красивого diff без изменений
     if old == '':
         return f"File fully replaced with new content '{new[:20]}...'"
 
@@ -122,7 +125,6 @@ def edit_file(path: str, old: str, new: str, mode: str = "one"):
             n=1
         ))
 
-        # Убираем технические строки
         diff_lines = [line for line in diff
                       if not line.startswith('---')
                       and not line.startswith('+++')
@@ -130,9 +132,8 @@ def edit_file(path: str, old: str, new: str, mode: str = "one"):
 
         result = ["Successfully replaced:"]
 
-        # Находим номер первой строки в контексте
         pos = matches[0]
-        start_line = content[:pos].count('\n') - 1  # -1 чтобы захватить предыдущую строку
+        start_line = content[:pos].count('\n') - 1
         if start_line < 0:
             start_line = 0
 
@@ -141,20 +142,20 @@ def edit_file(path: str, old: str, new: str, mode: str = "one"):
         for line in diff_lines:
             stripped = line[2:].rstrip('\n') if len(line) > 2 else line.rstrip('\n')
 
-            if line.startswith('  '):   # контекст
+            if line.startswith('  '):
                 result.append(f"{current_line:2d}   {stripped}")
-            elif line.startswith('- '): # удалено
+            elif line.startswith('- '):
                 result.append(f"{current_line:2d} - {stripped}")
                 current_line += 1
-            elif line.startswith('+ '): # добавлено
-                result.append(f"   + {stripped}")  # не увеличиваем номер, т.к. это новая строка
+            elif line.startswith('+ '):
+                result.append(f"   + {stripped}")
             else:
                 result.append(f"{current_line:2d}   {stripped}")
                 current_line += 1
 
         return "\n".join(result)
 
-    # Режим 'all' — показываем контекст для первых 3 совпадений
+    # Режим 'all'
     lines = content.splitlines(True)
     display_limit = min(len(matches), 3)
     preview = [f"Successfully replaced {len(matches)} matches:\n"]
