@@ -52,9 +52,9 @@ class ChatHistory:
         safe_start = max(start_id, Config.AFTER_SYSTEM_PROMPT)
         safe_end = end_id
         if safe_start > safe_end:
-            return f"{ENVIRONMENT_PREFIX} Success (Nothing to delete)"
+            return f"{ENVIRONMENT_PREFIX} Nothing to delete"
         del self._messages[safe_start:safe_end + 1]
-        return f'{ENVIRONMENT_PREFIX} Success'
+        return f'{ENVIRONMENT_PREFIX} Successfully deleted messages {start_id} - {end_id}'
 
     def edit_message(self, idx: int, new_text: str, old_text: str = '') -> str:
         if not (0 <= idx < len(self._messages)):
@@ -73,33 +73,51 @@ class ChatHistory:
             return 'Replacing to empty text led to deleting the message block.'
         return f'{ENVIRONMENT_PREFIX} Success'
 
-    def normalize(self):
+    def normalize(self, is_error_recovery: bool = False):
         if len(self._messages) <= Config.AFTER_SYSTEM_PROMPT:
             return
+
         raw = self._messages
         valid = [raw[0]]
+
+        # Ищем первое сообщение пользователя
         first_user_idx = Config.AFTER_SYSTEM_PROMPT
         while first_user_idx < len(raw) and not isinstance(raw[first_user_idx], UserMessage):
             first_user_idx += 1
+
+        # Если сообщений пользователя нет вовсе — возвращаем историю к исходному системному промпту
         if first_user_idx >= len(raw):
             self._messages = valid
             return
+
         valid.append(raw[first_user_idx])
+
+        # Фильтруем и объединяем оставшуюся историю
         for i in range(first_user_idx + 1, len(raw)):
             msg = raw[i]
             last = valid[-1]
+
             if isinstance(msg, ToolResult):
                 if isinstance(last, AssistantMessage) and last.has_tool_calls():
                     call_ids = [tc.id for tc in last.tool_calls]
                     if msg.tool_call_id in call_ids:
                         valid.append(msg)
                 continue
+
             if type(msg) == type(last) and isinstance(msg, (UserMessage, AssistantMessage)):
                 last.content = (last.content or "") + "\n" + (msg.content or "")
                 if isinstance(msg, AssistantMessage) and msg.has_tool_calls():
                     last.tool_calls = last.tool_calls + msg.tool_calls
                 continue
+
             valid.append(msg)
+
+        # Добавляем заглушку ассистента ТОЛЬКО при восстановлении после сбоя
+        if is_error_recovery and isinstance(valid[-1], ToolResult):
+            valid.append(AssistantMessage(
+                content=f"{ENVIRONMENT_PREFIX} This is a message from system because a sequence of failed tool calls was detected and pruned. The system gave control to the user."
+            ))
+
         self._messages = valid
 
     def save(self, path: str):

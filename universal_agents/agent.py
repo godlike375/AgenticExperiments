@@ -363,22 +363,29 @@ class LLMAgent:
 
         return results
 
-    def _process_llm_response(self, message_obj) -> str:
+    def _process_llm_response(self, message_obj) -> tuple[str, bool]:
         if not message_obj:
-            return "Empty response"
+            return "Empty response", True
         content = message_obj.content or ""
         clean_content = content.replace("</think>", "").strip()
         assistant_msg = self._build_assistant_msg(message_obj, clean_content)
         self.history.add(assistant_msg)
         self.on_render(assistant_msg)
         if not message_obj.tool_calls:
-            return clean_content
+            # Если вызовов инструментов нет — возвращаем текст и флаг отсутствия ошибок (False)
+            return clean_content, False
+
         tool_results = self._execute_tools(assistant_msg.tool_calls)
         self.history.extend(tool_results)
         for tr in tool_results:
             self.on_render(tr)
         self._prune_all_failed_tool_calls_except_last()
-        return clean_content
+
+        # Проверяем, были ли ошибки при выполнении инструментов (исключая отказы пользователя в подтверждении)
+        tool_error_occurred = any(tr.is_error and not tr.is_user_denied for tr in tool_results)
+
+        # Возвращаем кортеж: текст ответа модели и статус наличия ошибок
+        return clean_content, tool_error_occurred
 
     def _prune_all_failed_tool_calls_except_last(self):
         if len(self.history) <= Config.AFTER_SYSTEM_PROMPT + 1:
@@ -415,12 +422,15 @@ class LLMAgent:
             )
             self.history.normalize()
 
-    def chat(self, message: str, max_iter: int = 5, prefill: str = None) -> str:
+    def chat(self, message: str, max_iter: int = 5, prefill: str = None):
         if self.self_consistency_mode:
             return self._chat_self_consistent(message, prefill)
         user_msg = UserMessage(content=message)
         self.history.add(user_msg)
         current_prefill = self._get_effective_prefill(prefill)
+
+        consecutive_errors = 0
+        MAX_CONSECUTIVE_ERRORS = 5
 
         for i in range(max_iter):
             step_prefill = current_prefill if i == 0 else None
@@ -430,6 +440,7 @@ class LLMAgent:
             max_generation_attempts = 3
             message_obj = None
             last_duplicate_info = None
+            api_error_occurred = False
 
             for attempt in range(max_generation_attempts):
                 current_temp = self.temp
@@ -437,12 +448,10 @@ class LLMAgent:
                     current_temp = Config.BOOST_TEMP
                     self._temp_boost_active = False
 
-                # Глубокое копирование словарей для предотвращения мутации оригинальной истории
                 active_messages = [dict(msg) for msg in messages_to_send]
 
                 if last_duplicate_info:
                     dup_name, dup_args = last_duplicate_info
-                    # Формируем текст предупреждения
                     warning_text = (
                         f"\n\n{ENVIRONMENT_PREFIX} Your previous attempt to call tool '{dup_name}' "
                         f"with arguments '{dup_args}' was blocked because it is a duplicate of a call already made "
@@ -450,7 +459,6 @@ class LLMAgent:
                         f"Use other parameters, call a different tool, or provide your final response."
                     )
 
-                    # Безопасно внедряем предупреждение в конец содержимого последнего сообщения
                     if active_messages:
                         last_msg = active_messages[-1]
                         last_msg["content"] = (last_msg.get("content") or "") + warning_text
@@ -463,14 +471,14 @@ class LLMAgent:
                 if usage:
                     self.token_tracker.update_from_usage(usage)
                 if err:
-                    error = f"[API Error] {err}"
-                    self.on_system_msg(error)
-                    return error
+                    self.on_system_msg(f"[API Error] {err}")
+                    api_error_occurred = True
+                    break
 
                 if not message_obj:
-                    return "Empty response"
+                    api_error_occurred = True
+                    break
 
-                # Проверка предложенных вызовов на дублирование в рамках текущего хода
                 if message_obj.tool_calls:
                     has_duplicate = False
                     current_history = self.history.get_all()
@@ -489,17 +497,36 @@ class LLMAgent:
 
                     if has_duplicate:
                         self._temp_boost_active = True
-                        # Повторяем попытку генерации с подсказкой и повышенной температурой
                         continue
 
-                # Если дубликатов нет, выходим из цикла попыток
                 break
             else:
                 self.on_system_msg(
                     "[PROACTIVE LOOP DETECTOR] Max re-generation attempts reached. Proceeding to execution safety nets."
                 )
 
-            result_text = self._process_llm_response(message_obj)
+            # ПРИ СБОЕ API: Восстанавливаем роли, сигнализируя, что это аварийный случай
+            if api_error_occurred or not message_obj:
+                self.history.normalize(is_error_recovery=True)
+                self.on_system_msg("[RECOVERY] API error occurred. Role sequence restored. Handing control to user.")
+                return
+
+            result_text, tool_error_occurred = self._process_llm_response(message_obj)
+
+            if tool_error_occurred:
+                consecutive_errors += 1
+            else:
+                consecutive_errors = 0
+
+            # ПРИ ПРЕВЫШЕНИИ ОШИБОК ИНСТРУМЕНТОВ: Восстанавливаем роли перед выходом к пользователю
+            if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+                self.history.normalize(is_error_recovery=True)
+                self.on_system_msg(
+                    f"[LIMIT REACHED] {MAX_CONSECUTIVE_ERRORS} consecutive tool errors. Handing control to user."
+                )
+                return
+
             if not message_obj.tool_calls:
-                return result_text
-        return "Max iterations reached without final answer"
+                return
+
+        return
