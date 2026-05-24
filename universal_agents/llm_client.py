@@ -42,9 +42,8 @@ class TokenUsageTracker:
         return f" ===>>\n\n"
 
 class LoopDetector:
-    def __init__(self, threshold: int = 3):
-        self.threshold = threshold
-        self.recent_calls = deque(maxlen=threshold)
+    def __init__(self):
+        self.threshold = 1
 
     @staticmethod
     def normalize_args(args_str: str) -> str:
@@ -56,21 +55,27 @@ class LoopDetector:
         except Exception:
             return args_str.strip()
 
-    def add_call(self, tool_name: str, arguments: str):
+    def check_duplicate_in_turn(self, tool_name: str, arguments: str, messages: list) -> bool:
+        """
+        Проверяет, вызывался ли уже этот инструмент с такими же параметрами
+        после последнего сообщения пользователя (в рамках текущего хода).
+        """
         norm_args = self.normalize_args(arguments)
-        self.recent_calls.append((tool_name, norm_args))
 
-    def detect_loop(self) -> Optional[tuple]:
-        if len(self.recent_calls) < self.threshold:
-            return None
-        last_n = list(self.recent_calls)[-self.threshold:]
-        first = last_n[0]
-        if all(call == first for call in last_n):
-            return first[0], first[1], self.threshold
-        return None
+        # Идем с конца истории сообщений
+        for msg in reversed(messages):
+            # Если дошли до сообщения пользователя, значит этот ход начался здесь.
+            # Всё, что было до него, не считается повтором в текущем ходу.
+            from models import UserMessage, AssistantMessage
+            if isinstance(msg, UserMessage):
+                break
 
-    def reset(self):
-        self.recent_calls.clear()
+            if isinstance(msg, AssistantMessage):
+                for tc in msg.tool_calls:
+                    if tc.name == tool_name:
+                        if self.normalize_args(tc.arguments) == norm_args:
+                            return True
+        return False
 
 class LLMClient:
     _client = None

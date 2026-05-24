@@ -68,7 +68,7 @@ class LLMAgent:
                 internal_tools[name] = self._build_tool_dict(func, is_instance_method=False)
         self._all_tools = internal_tools
         self._filter_tools(tools_config)
-        self.loop_detector = LoopDetector(threshold=2)
+        self.loop_detector = LoopDetector()
         self._temp_boost_active = False
         self._original_temp = temp
 
@@ -126,7 +126,7 @@ class LLMAgent:
 
     # ---------- Tools ----------
     @tool(description="Get short indexed current history with ids")
-    def get_msg_ids(self, chars_per_message: int = 35):
+    def get_messages(self, chars_per_message: int = 30):
         history = self.history
         if len(history) <= Config.AFTER_SYSTEM_PROMPT:
             return f"{ENVIRONMENT_PREFIX} История пока пустая."
@@ -139,7 +139,7 @@ class LLMAgent:
                 role = "USER"
                 content = msg.content
             elif isinstance(msg, AssistantMessage):
-                role = "ASSISTANT"
+                role = "AI"
                 content = msg.content
                 if msg.has_tool_calls():
                     tc_info = ", ".join(tc.name for tc in msg.tool_calls)
@@ -156,7 +156,7 @@ class LLMAgent:
                 continue
             if len(content) > chars_per_message:
                 content = content[:chars_per_message] + " ..."
-            lines.append(f"[id {i}] {role}: {content.strip()}")
+            lines.append(f"{i}. {role}: {content.strip()}")
         return f"{ENVIRONMENT_PREFIX} Your current history:\n" + "\n".join(lines)
 
     @tool(description="Edits a specific message in the history",
@@ -261,7 +261,7 @@ class LLMAgent:
         if final_usage:
             self.token_tracker.update_from_usage(final_usage)
         if final_err or not final_obj:
-            return clean_content or "Tool executed successfully"
+            return msg_obj.content or "Tool executed successfully"
         final_content = final_obj.content.strip()
         final_assistant_msg = self._build_assistant_msg(final_obj, final_content)
         self.history.add(final_assistant_msg)
@@ -313,20 +313,38 @@ class LLMAgent:
 
     def _execute_tools(self, tool_calls: list[ToolCall]) -> list[ToolResult]:
         results = []
+        history_before_current_turn = self.history.get_all()[:-1]
+
         for tc in tool_calls:
             name = tc.name
             args_str = tc.arguments or "{}"
-            self.loop_detector.add_call(name, args_str)
+
+            # Резервный предохранитель, если проактивное упреждение в chat() исчерпало лимит попыток
+            if self.loop_detector.check_duplicate_in_turn(name, args_str, history_before_current_turn):
+                warning_msg = (
+                    f"{ENVIRONMENT_PREFIX} System rejected duplicate call of tool '{name}'. "
+                    f"This tool was just called with the exact same parameters in the previous step. "
+                    f"Do NOT call it again in the current moment even if user asked to. Try a different approach, use other parameters, "
+                    f"or complete your response with the final answer."
+                )
+                self.on_system_msg(
+                    f"[LOOP PREVENTED] Blocked repeated call to '{name}' during execution."
+                )
+                results.append(ToolResult.error(tc.id, name, warning_msg))
+                continue
+
             tool_info = self._all_tools.get(name)
             if not tool_info:
                 results.append(ToolResult.error(tc.id, name, f"Unknown tool '{name}'"))
                 continue
+
             args_dict = None
             try:
                 args_dict = json.loads(args_str) if args_str != "{}" else {}
             except Exception as e:
                 results.append(ToolResult.error(tc.id, name, f"Invalid JSON: {e}"))
                 continue
+
             if tool_info.get('requires_confirmation', False):
                 if not self.on_confirm(name, args_dict):
                     results.append(ToolResult.user_denied(tc.id, name))
@@ -342,11 +360,7 @@ class LLMAgent:
             except Exception as e:
                 self.on_system_msg(f"[ERROR] Tool '{name}' FAILED: {e}")
                 results.append(ToolResult.error(tc.id, name, str(e)))
-        loop_info = self.loop_detector.detect_loop()
-        if loop_info:
-            tool_name, norm_args, count = loop_info
-            self._break_tool_loop(tool_name, norm_args, count)
-            self._temp_boost_active = True
+
         return results
 
     def _process_llm_response(self, message_obj) -> str:
@@ -407,24 +421,84 @@ class LLMAgent:
         user_msg = UserMessage(content=message)
         self.history.add(user_msg)
         current_prefill = self._get_effective_prefill(prefill)
+
         for i in range(max_iter):
             step_prefill = current_prefill if i == 0 else None
             messages_to_send = self._prepare_messages_for_api()
-            current_temp = self.temp
-            if self._temp_boost_active:
-                current_temp = Config.BOOST_TEMP
-                self._temp_boost_active = False
-            message_obj, err, usage = LLMClient.call(
-                messages_to_send, current_temp, self.timeout,
-                tools=self.tools if self.tools else None,
-                prefill=step_prefill
-            )
-            if usage:
-                self.token_tracker.update_from_usage(usage)
-            if err:
-                error = f"[API Error] {err}"
-                self.on_system_msg(error)
-                return error
+
+            # Внутренний цикл проактивного упреждения повторных вызовов
+            max_generation_attempts = 3
+            message_obj = None
+            last_duplicate_info = None
+
+            for attempt in range(max_generation_attempts):
+                current_temp = self.temp
+                if self._temp_boost_active:
+                    current_temp = Config.BOOST_TEMP
+                    self._temp_boost_active = False
+
+                # Глубокое копирование словарей для предотвращения мутации оригинальной истории
+                active_messages = [dict(msg) for msg in messages_to_send]
+
+                if last_duplicate_info:
+                    dup_name, dup_args = last_duplicate_info
+                    # Формируем текст предупреждения
+                    warning_text = (
+                        f"\n\n{ENVIRONMENT_PREFIX} Your previous attempt to call tool '{dup_name}' "
+                        f"with arguments '{dup_args}' was blocked because it is a duplicate of a call already made "
+                        f"in this turn. Do NOT call '{dup_name}' again with the same parameters. "
+                        f"Use other parameters, call a different tool, or provide your final response."
+                    )
+
+                    # Безопасно внедряем предупреждение в конец содержимого последнего сообщения
+                    if active_messages:
+                        last_msg = active_messages[-1]
+                        last_msg["content"] = (last_msg.get("content") or "") + warning_text
+
+                message_obj, err, usage = LLMClient.call(
+                    active_messages, current_temp, self.timeout,
+                    tools=self.tools if self.tools else None,
+                    prefill=step_prefill
+                )
+                if usage:
+                    self.token_tracker.update_from_usage(usage)
+                if err:
+                    error = f"[API Error] {err}"
+                    self.on_system_msg(error)
+                    return error
+
+                if not message_obj:
+                    return "Empty response"
+
+                # Проверка предложенных вызовов на дублирование в рамках текущего хода
+                if message_obj.tool_calls:
+                    has_duplicate = False
+                    current_history = self.history.get_all()
+                    for tc in message_obj.tool_calls:
+                        tc_name = tc.function.name
+                        tc_args = tc.function.arguments
+                        if self.loop_detector.check_duplicate_in_turn(tc_name, tc_args, current_history):
+                            has_duplicate = True
+                            last_duplicate_info = (tc_name, tc_args)
+                            self.on_system_msg(
+                                f"[PROACTIVE LOOP DETECTED] Intercepted duplicate call to '{tc_name}'. "
+                                f"Discarding response. Activating temperature boost ({Config.BOOST_TEMP}) "
+                                f"and injecting temporary warning. Attempt {attempt + 1}/{max_generation_attempts}."
+                            )
+                            break
+
+                    if has_duplicate:
+                        self._temp_boost_active = True
+                        # Повторяем попытку генерации с подсказкой и повышенной температурой
+                        continue
+
+                # Если дубликатов нет, выходим из цикла попыток
+                break
+            else:
+                self.on_system_msg(
+                    "[PROACTIVE LOOP DETECTOR] Max re-generation attempts reached. Proceeding to execution safety nets."
+                )
+
             result_text = self._process_llm_response(message_obj)
             if not message_obj.tool_calls:
                 return result_text

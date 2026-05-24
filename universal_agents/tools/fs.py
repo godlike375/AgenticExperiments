@@ -57,7 +57,7 @@ def cwd(path: str = None):
     if path:
         try:
             os.chdir(path)
-            return f'{ENVIRONMENT_PREFIX} Successfully set cwd'
+            return f'{ENVIRONMENT_PREFIX} Successfully set cwd to {path}'
         except Exception as e:
             raise RuntimeError(f"Error changing cwd: {e}")  # Было return, стало raise
     return os.getcwd()
