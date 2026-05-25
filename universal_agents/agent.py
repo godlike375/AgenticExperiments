@@ -319,7 +319,6 @@ class LLMAgent:
             name = tc.name
             args_str = tc.arguments or "{}"
 
-            # Резервный предохранитель, если проактивное упреждение в chat() исчерпало лимит попыток
             if self.loop_detector.check_duplicate_in_turn(name, args_str, history_before_current_turn):
                 warning_msg = (
                     f"{ENVIRONMENT_PREFIX} System rejected duplicate call of tool '{name}'. "
@@ -366,13 +365,46 @@ class LLMAgent:
     def _process_llm_response(self, message_obj) -> tuple[str, bool]:
         if not message_obj:
             return "Empty response", True
+
         content = message_obj.content or ""
         clean_content = content.replace("</think>", "").strip()
         assistant_msg = self._build_assistant_msg(message_obj, clean_content)
+
+        # ФИЛЬТРАЦИЯ: Оставляем только первый валидный вызов инструмента из множества
+        if assistant_msg.has_tool_calls():
+            valid_tc = None
+            fallback_tc = assistant_msg.tool_calls[0]
+
+            for tc in assistant_msg.tool_calls:
+                if tc.name in self._all_tools:
+                    args_str = tc.arguments or "{}"
+                    try:
+                        if args_str != "{}":
+                            json.loads(args_str)
+                        valid_tc = tc
+                        break
+                    except Exception:
+                        pass
+
+            chosen_tc = valid_tc if valid_tc else fallback_tc
+
+            if len(assistant_msg.tool_calls) > 1:
+                self.on_system_msg(f"[MULTIPLE TOOLS DETECTED] Kept only '{chosen_tc.name}', removed others.")
+                assistant_msg.tool_calls = [chosen_tc]
+                if hasattr(message_obj, 'tool_calls') and message_obj.tool_calls:
+                    message_obj.tool_calls = [tc for tc in message_obj.tool_calls if tc.id == chosen_tc.id]
+
+        # ЗАЩИТА ОТ ПУСТОГО ОТВЕТА (API вырезал сломанный tool_call)
+        if not clean_content and not assistant_msg.has_tool_calls():
+            self.on_system_msg("[EMPTY RESPONSE] Model returned no content. Discarding and retrying with temp boost...")
+            self._temp_boost_active = True
+            return clean_content, True
+
+        # Если всё ок — только теперь добавляем сообщение ассистента в историю
         self.history.add(assistant_msg)
         self.on_render(assistant_msg)
-        if not message_obj.tool_calls:
-            # Если вызовов инструментов нет — возвращаем текст и флаг отсутствия ошибок (False)
+
+        if not assistant_msg.has_tool_calls():
             return clean_content, False
 
         tool_results = self._execute_tools(assistant_msg.tool_calls)
@@ -381,10 +413,8 @@ class LLMAgent:
             self.on_render(tr)
         self._prune_all_failed_tool_calls_except_last()
 
-        # Проверяем, были ли ошибки при выполнении инструментов (исключая отказы пользователя в подтверждении)
         tool_error_occurred = any(tr.is_error and not tr.is_user_denied for tr in tool_results)
 
-        # Возвращаем кортеж: текст ответа модели и статус наличия ошибок
         return clean_content, tool_error_occurred
 
     def _prune_all_failed_tool_calls_except_last(self):
@@ -436,7 +466,6 @@ class LLMAgent:
             step_prefill = current_prefill if i == 0 else None
             messages_to_send = self._prepare_messages_for_api()
 
-            # Внутренний цикл проактивного упреждения повторных вызовов
             max_generation_attempts = 3
             message_obj = None
             last_duplicate_info = None
@@ -505,7 +534,6 @@ class LLMAgent:
                     "[PROACTIVE LOOP DETECTOR] Max re-generation attempts reached. Proceeding to execution safety nets."
                 )
 
-            # ПРИ СБОЕ API: Восстанавливаем роли, сигнализируя, что это аварийный случай
             if api_error_occurred or not message_obj:
                 self.history.normalize(is_error_recovery=True)
                 self.on_system_msg("[RECOVERY] API error occurred. Role sequence restored. Handing control to user.")
@@ -518,7 +546,6 @@ class LLMAgent:
             else:
                 consecutive_errors = 0
 
-            # ПРИ ПРЕВЫШЕНИИ ОШИБОК ИНСТРУМЕНТОВ: Восстанавливаем роли перед выходом к пользователю
             if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
                 self.history.normalize(is_error_recovery=True)
                 self.on_system_msg(
@@ -526,7 +553,7 @@ class LLMAgent:
                 )
                 return
 
-            if not message_obj.tool_calls:
+            if not message_obj.tool_calls and not tool_error_occurred:
                 return
 
         return

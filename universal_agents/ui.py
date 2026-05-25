@@ -1,3 +1,4 @@
+import json
 import os
 import shlex
 from models import Message, SystemMessage, UserMessage, AssistantMessage, ToolResult
@@ -31,6 +32,13 @@ class ConsoleUI:
     @staticmethod
     def confirm_action(name: str, args: dict) -> bool:
         print(f"\n[WARNING] Tool '{name}' modifies state")
+
+        if args:
+            formatted_args = json.dumps(args, indent=2, ensure_ascii=False)
+            print(f"Arguments:\n{formatted_args}")
+        else:
+            print("Arguments: {} (None)")
+
         resp = input("Execute? (y/n): ").strip().lower()
         return resp == 'y'
 

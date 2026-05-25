@@ -71,9 +71,10 @@ def cwd(path: str = None):
     mode=("str", "'one' for 1 exclusive match, otherwise 'all' (default 'one')")
 )
 def edit_file(path: str, new: str, old: str = '', mode: str = "one"):
+    created_file = False
+    m_mode = mode.strip().lower()
     if not os.path.isfile(path):
         # Создаём файл, если его нет
-        created_file = False
         try:
             os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
             with open(path, "w", encoding="utf-8") as f:
@@ -100,8 +101,6 @@ def edit_file(path: str, new: str, old: str = '', mode: str = "one"):
 
         if not matches:
             raise ValueError("No matches found for old substring. Try again with different argument")
-
-        m_mode = mode.strip().lower()
 
         if m_mode == "one" and len(matches) > 1:
             raise ValueError(
