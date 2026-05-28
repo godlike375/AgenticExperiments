@@ -6,9 +6,11 @@ import inspect
 from typing import Union, Callable, Optional
 from universal_agents.tool import tool, ENVIRONMENT_PREFIX
 from config import Config
-from models import UserMessage, AssistantMessage, ToolCall, ToolResult, Message, SystemMessage
+from models import UserMessage, AssistantMessage, ToolCall, ToolResult, SystemMessage
 from llm_client import LLMClient, TokenUsageTracker, LoopDetector
 from history import ChatHistory
+from sub_agent import SubAgent
+
 
 def load_external_plugins(plugins_dir="tools"):
     external_tools = {}
@@ -36,6 +38,7 @@ def load_external_plugins(plugins_dir="tools"):
             print(f"Error loading plugin {filename}: {e}")
     return external_tools
 
+
 class LLMAgent:
     def __init__(
             self,
@@ -47,7 +50,8 @@ class LLMAgent:
             on_confirm: Callable[[str, dict], bool] = lambda n, a: True,
             on_system_msg: Callable[[str], None] = lambda x: None,
             external_plugins: dict[str, Callable] = None,
-            max_context_tokens: int = 16384
+            max_context_tokens: int = 16384,
+            _create_judge: bool = True
     ):
         self.history = ChatHistory(system_prompt)
         self.temp = temp
@@ -124,7 +128,8 @@ class LLMAgent:
         messages.append(UserMessage(warning))
         self.on_system_msg(f"[LOOP DETECTED] '{tool_name}' ×{count}")
 
-    # ---------- Tools ----------
+    # === Tools ===
+
     @tool(description="Get short indexed current history with ids")
     def get_messages(self, chars_per_message: int = 30):
         history = self.history
@@ -173,6 +178,97 @@ class LLMAgent:
           end_id=("int", "Optional ending message ID (-1 for last)"))
     def delete_messages(self, start_id: int, end_id: int = -1):
         return self.history.delete_range(start_id, end_id)
+
+    @tool(
+        description="Summarizes a range of dialog messages into a single concise UserMessage. "
+                    "Use to free context tokens. Cannot summarize system prompt. ",
+        requires_confirmation=True,
+        start_id=("int", "Start index of messages to summarize"),
+        end_id=("int", "End index (inclusive). Use -1 for last message")
+    )
+    def summarize_messages(self, start_id: int, end_id: int = -1) -> str:
+        history = self.history
+        if end_id == -1 or end_id >= len(history):
+            end_id = len(history) - 3
+
+        safe_start = max(start_id, Config.AFTER_SYSTEM_PROMPT)
+        safe_end = min(end_id, len(history) - 3)
+
+        if safe_start > safe_end:
+            return (f"{ENVIRONMENT_PREFIX} Cannot summarize: range [{start_id}:{end_id}] "
+                    f"is invalid or overlaps with protected last 2 messages.")
+
+        lines = []
+        for i in range(safe_start, safe_end + 1):
+            msg = history[i]
+            role = type(msg).__name__.replace("Message", "").upper()
+            role = role if role!='ASSISTANT' else 'AI'
+            content = getattr(msg, 'content', str(msg))
+            lines.append(f"{role}: {content}")
+
+        raw_text = "\n".join(lines)
+        summary = self._summarize_text(
+            raw_text
+        )
+        if not summary:
+            return f"{ENVIRONMENT_PREFIX} Summarization failed (empty response or error)."
+
+        summary_content = (f"{ENVIRONMENT_PREFIX} [SUMMARY of messages {safe_start}-{safe_end}]: "
+                           f"{summary}")
+        del history._messages[safe_start:safe_end + 1]
+        history._messages.insert(safe_start, UserMessage(content=summary_content))
+        history.normalize()
+
+        freed = len(raw_text) - len(summary_content)
+        return (f"{ENVIRONMENT_PREFIX} Successfully summarized "
+                f"{safe_end - safe_start + 1} messages into 1. Freed ~{freed} chars.")
+
+    @tool(
+        description="Delegates a subtask to an isolated sub-agent. "
+                    "The sub-agent has its own history and safe read-only tools. "
+                    "Use for analysis, research, or multi-step tasks that would clutter main context. "
+                    "Include all necessary context in the task description. "
+                    "Returns only the final result.",
+        task=("str", "Clear task description with all necessary context"),
+        max_iter=("int", "Optional max tool calls for sub-agent (default 5)")
+    )
+    def delegate_to_subagent(self, task: str, max_iter: int = 5) -> str:
+        # Сбор всех зарегистрированных обработчиков инструментов главного агента
+        sub_plugins = {}
+        for name, tool_info in self._all_tools.items():
+            # Исключаем сам инструмент делегирования для предотвращения неконтролируемой рекурсии
+            if name == "delegate_to_subagent":
+                continue
+            sub_plugins[name] = tool_info["handler"]
+
+        sub = SubAgent(
+            system_prompt=(
+                "You are a sub-agent working on a specific subtask. "
+                "You have access to safe read-only tools. "
+                "Complete the task and provide a concise final answer. "
+                "Do NOT ask clarifying questions — work with what you have."
+            ),
+            max_context_tokens=8192,
+            tools_config={"exclude": [
+                "edit_message", "delete_messages", "summarize_messages",
+                "delegate_to_subagent"
+            ]},
+            external_plugins=sub_plugins, # Пробрасываем собранные инструменты
+            safe_only=True,               # Автоматически отсекает инструменты с requires_confirmation=True
+            max_iter=max_iter,
+            temp=0.1,
+            on_log=self.on_system_msg,
+        )
+
+        self.on_system_msg(f"[DELEGATE] Starting sub-agent for: {task[:100]}...")
+        result = sub.run(task)
+        self.on_system_msg(f"[DELEGATE] Completed. Tokens spent by sub-agent: {sub.tokens_spent}")
+
+        if not result.strip():
+            return f"{ENVIRONMENT_PREFIX} Sub-agent returned empty result."
+        return f"{ENVIRONMENT_PREFIX} Sub-agent result:\n{result}"
+
+    # === Internal ===
 
     def _collect_internal_tools(self, classes):
         tools = {}
@@ -355,12 +451,241 @@ class LLMAgent:
                 else:
                     full_result = handler(**args_dict)
                 content = str(full_result) if full_result is not None else "Tool executed successfully"
-                results.append(ToolResult.success(tc.id, name, content))
+                tr = ToolResult.success(tc.id, name, content)
+
+                self._auto_compress_tool_result(tr)
+
+                results.append(tr)
             except Exception as e:
                 self.on_system_msg(f"[ERROR] Tool '{name}' FAILED: {e}")
                 results.append(ToolResult.error(tc.id, name, str(e)))
 
         return results
+
+    # === Auto-compression ===
+
+    def _summarize_text(self, text: str) -> Optional[str]:
+        """Универсальная LLM-суммаризация произвольного текста."""
+        prompt = (
+            f"{ENVIRONMENT_PREFIX} Summarize the following text. "
+            f"Preserve all key facts, specific data, decisions, etc. "
+            f"Remove temporal reasoning and other things that aren't important anymore."
+            f"Output ONLY the concise summary text.\n\n"
+            f"The original text:\n```\n{text}\n```\n "
+            f"*Use the following text's language!* "
+            f"If you see the dialog of AI and User, treat it as your own dialog with User!"
+        )
+        msgs = [{"role": "user", "content": prompt}]
+        msg_obj, err, usage = LLMClient.call(msgs, temp=0.1, timeout=60, tools=None)
+        if usage:
+            self.token_tracker.update_from_usage(usage)
+        if err or not msg_obj or not msg_obj.content:
+            return None
+        return msg_obj.content.strip()
+
+    def _synthesize_task_goal(self, tool_name: str) -> str:
+        """
+        Анализирует всю историю диалога через LLM и формулирует точную цель
+        для анализа вывода конкретного инструмента.
+        """
+        self.on_system_msg(f"[GOAL SYNTHESIS] Analyzing conversation history to formulate goal for '{tool_name}'...")
+
+        # Получаем подготовленные сообщения для API (включая системный промпт)
+        messages_base = self._prepare_messages_for_api()[:-1]
+
+        # Инструкция для мета-анализа истории
+        synthesis_prompt = (
+            f"{ENVIRONMENT_PREFIX}\n"
+            f"Based on the conversation history above, identify the current concrete user's goal "
+            f"to accomplish.\n"
+            f"Formulate a clear, concise instruction (1-2 sentences) for a sub-agent describing "
+            f"EXACTLY it needs to do and which result is being expected from sub-agent. "
+            f"Focus strictly on the technical objective of this step.\n"
+            f"Output ONLY the formulated instruction for sub-agent."
+        )
+
+        # Добавляем инструкцию к контексту
+        synthesis_messages = messages_base + [{"role": "user", "content": synthesis_prompt}]
+
+        # Делаем быстрый запрос с низкой температурой для точности
+        msg_obj, err, usage = LLMClient.call(
+            synthesis_messages,
+            temp=0.1,
+            timeout=30,
+            tools=None
+        )
+
+        if usage:
+            self.token_tracker.update_from_usage(usage)
+
+        if err or not msg_obj or not msg_obj.content:
+            # Резервный вариант при сбое (откат к последней реплике пользователя)
+            self.on_system_msg("[GOAL SYNTHESIS] Failed to synthesize goal via LLM. Falling back to last user message.")
+            for msg in reversed(self.history.get_all()):
+                if isinstance(msg, UserMessage) and not msg.content.startswith(ENVIRONMENT_PREFIX):
+                    return msg.content
+            return "Extract any useful facts and errors relevant to the general task."
+
+        synthesized_goal = msg_obj.content.strip()
+        self.on_system_msg(f"[GOAL SYNTHESIS] Synthesized objective: \"{synthesized_goal}\"")
+        return synthesized_goal
+
+    def _auto_compress_tool_result(self, tool_result: ToolResult):
+        """
+        Автоматически сжимает вывод инструмента перед добавлением в историю,
+        если он длинный, используя порционный анализ и динамический синтез цели.
+        """
+        if tool_result.is_error or tool_result.is_user_denied:
+            return
+
+        # Если вывод небольшой, оставляем его без изменений
+        if len(tool_result.content) <= Config.COMPRESS_THRESHOLD:
+            return
+
+        # Интеллектуально синтезируем цель анализа на основе всей истории через LLM
+        task_goal = self._synthesize_task_goal(tool_result.name)
+
+        # Запускаем итеративную обработку порциями с вычисленной целью
+        compressed_output = self._chunk_and_summarize_large_text(
+            text=tool_result.content,
+            tool_name=tool_result.name,
+            task_goal=task_goal
+        )
+
+        original_len = len(tool_result.content)
+        tool_result.content = f"{ENVIRONMENT_PREFIX} [AUTO-SUMMARIZED]\n{compressed_output}"
+
+        self.on_system_msg(
+            f"[AUTO-COMPRESS] Summarized '{tool_result.name}' output: "
+            f"{original_len} → {len(tool_result.content)} chars"
+        )
+
+    def _chunk_and_summarize_large_text(self, text: str, tool_name: str, task_goal: str) -> str:
+        """
+        Инкрементально собирает факты по каждому чанку и синтезирует их в единый связный отчет.
+        Гарантирует отсутствие потери информации из ранних порций данных.
+        """
+        self.on_system_msg(f"[CHUNK ANALYZER] Starting chunked analysis of {len(text)} chars for tool '{tool_name}'...")
+
+        token_limit = self.token_tracker.max_context_tokens
+        token_chunk_size = max(token_limit // 5, 2500)
+        chunk_size = int(token_chunk_size * 2.5)
+
+        chunks = []
+        pos = 0
+        while pos < len(text):
+            if pos + chunk_size >= len(text):
+                chunks.append(text[pos:])
+                break
+            split_pos = text.rfind('\n', pos, pos + chunk_size)
+            if split_pos == -1 or split_pos <= pos:
+                split_pos = pos + chunk_size
+            chunks.append(text[pos:split_pos])
+            pos = split_pos
+
+        total_chunks = len(chunks)
+
+        # Список для накопления уникальных находок из каждого чанка в Python
+        findings_by_portion = []
+
+        # Переменная для фиксации решения субагента на каждом шаге
+        decision_data = {"chunk_findings": "", "decision": "continue", "reason": ""}
+
+        # Объявляем точечный инструмент сбора информации с более жесткими описаниями решений
+        @tool(
+            description="Report findings from the current chunk and decide about the next step.",
+            chunk_findings=("str", "Key facts, data, or errors extracted strictly from this current chunk that are highly relevant to the goal. Be precise and specific. Write 'None' if nothing useful is found."),
+            decision=("str", "One of: "
+                             "'continue' (select this if think looking at remaining portions is perspective/useful), "
+                             "'stop_found' (select this if you have already extracted what is needed to satisfy the goal), "
+                             "'stop_useless' (select this ONLY if the entire file/output is completely unrelated to the task and cannot help at all)"),
+            reason=("str", "Very brief explanation for your decision")
+        )
+        def report_step(chunk_findings: str, decision: str, reason: str = "") -> str:
+            decision_data["chunk_findings"] = chunk_findings
+            decision_data["decision"] = decision.strip().lower()
+            decision_data["reason"] = reason
+            return f"Step recorded."
+
+        # 2. Итеративно собираем факты
+        for idx, chunk in enumerate(chunks):
+            current_num = idx + 1
+            self.on_system_msg(f"[CHUNK ANALYZER] Processing portion {current_num}/{total_chunks}...")
+
+            # Формируем историю находок для контекста субагента, чтобы он не дублировал информацию
+            history_str = "\n".join(findings_by_portion) if findings_by_portion else "No findings yet."
+
+            step_agent = SubAgent(
+                system_prompt=(
+                    "You are an expert data analyst. Your job is to inspect portions of output. "
+                    "Extract new, highly specific facts, values, errors, or data points relevant to the goal. "
+                    "Do NOT duplicate what has already been found in previous portions.\n"
+                    "You MUST call the `report_step` tool to submit your findings."
+                ),
+                max_context_tokens=8192,
+                tools_config=["report_step"],  # Разрешен только инструмент сбора
+                external_plugins={"report_step": report_step},
+                safe_only=True,
+                max_iter=1,
+                temp=0.0,
+                on_log=lambda x: None
+            )
+
+            prompt = (
+                f"MAIN TASK GOAL: {task_goal}\n"
+                f"SOURCE TOOL: {tool_name}\n\n"
+                f"FINDINGS EXTRACTED FROM PREVIOUS PORTIONS:\n{history_str}\n\n"
+                f"--- CURRENT PORTION ({current_num} of {total_chunks}) ---\n"
+                f"{chunk}\n"
+                f"--- END OF PORTION ---\n\n"
+                f"Instructions:\n"
+                f"1. Analyze the current portion.\n"
+                f"2. Extract useful facts that are NOT yet present in the previous findings.\n"
+                f"3. Call `report_step` with your findings, decision, and short reasoning."
+            )
+
+            step_agent.run(prompt)
+
+            tc = step_agent.get_last_tool_call()
+            if not tc or tc.name != "report_step":
+                self.on_system_msg(f"[CHUNK ANALYZER] Warning: Subagent missed tool call at portion {current_num}. Skipping.")
+                last_msg = step_agent._agent.history.get_last_message()
+                if last_msg and last_msg.content:
+                    findings_by_portion.append(f"\n[Portion {current_num}]: {last_msg.content}")
+                continue
+
+            findings = decision_data["chunk_findings"].strip()
+            decision = decision_data["decision"]
+            reason = decision_data["reason"]
+
+            # Сохраняем находки, если они содержат полезную информацию
+            if findings and findings.lower() != "none":
+                findings_by_portion.append(f"- [Portion {current_num}]: {findings}")
+
+            self.on_system_msg(f"[CHUNK ANALYZER] Portion {current_num} decision: '{decision}' ({reason})")
+
+            # Логика остановки
+            if decision == 'stop_found':
+                self.on_system_msg(f"[CHUNK ANALYZER] Early stop: Target located. Proceeding to synthesis...")
+                break
+
+            elif decision == 'stop_useless':
+                # Если модель решила, что файл бесполезен, мы в любом случае останавливаем чтение
+                self.on_system_msg(f"[CHUNK ANALYZER] Early stop: Source determined irrelevant. Reason: {reason}")
+
+                # Но если мы УЖЕ успели что-то найти ранее, мы не выбрасываем это, а идем на финальный синтез
+                if len(findings_by_portion) == 0:
+                    return f"[ANALYSIS ABORTED] Source output is irrelevant to the task. Reason: {reason}"
+                break
+
+        # 3. Финальный синтез результатов
+        if not findings_by_portion:
+            return "No relevant information found in the tool output."
+
+        self.on_system_msg("[CHUNK ANALYZER] Synthesizing final response from all collected portions...")
+        raw_accumulated_findings = "\n".join(findings_by_portion)
+
+        return raw_accumulated_findings
 
     def _process_llm_response(self, message_obj) -> tuple[str, bool]:
         if not message_obj:
@@ -370,7 +695,6 @@ class LLMAgent:
         clean_content = content.replace("</think>", "").strip()
         assistant_msg = self._build_assistant_msg(message_obj, clean_content)
 
-        # ФИЛЬТРАЦИЯ: Оставляем только первый валидный вызов инструмента из множества
         if assistant_msg.has_tool_calls():
             valid_tc = None
             fallback_tc = assistant_msg.tool_calls[0]
@@ -394,13 +718,11 @@ class LLMAgent:
                 if hasattr(message_obj, 'tool_calls') and message_obj.tool_calls:
                     message_obj.tool_calls = [tc for tc in message_obj.tool_calls if tc.id == chosen_tc.id]
 
-        # ЗАЩИТА ОТ ПУСТОГО ОТВЕТА (API вырезал сломанный tool_call)
         if not clean_content and not assistant_msg.has_tool_calls():
             self.on_system_msg("[EMPTY RESPONSE] Model returned no content. Discarding and retrying with temp boost...")
             self._temp_boost_active = True
             return clean_content, True
 
-        # Если всё ок — только теперь добавляем сообщение ассистента в историю
         self.history.add(assistant_msg)
         self.on_render(assistant_msg)
 

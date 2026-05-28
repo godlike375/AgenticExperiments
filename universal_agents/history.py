@@ -105,7 +105,7 @@ class ChatHistory:
                 continue
 
             if type(msg) == type(last) and isinstance(msg, (UserMessage, AssistantMessage)):
-                last.content = (last.content or "") + "\n" + (msg.content or "")
+                last.content = (last.content or "") + "\n\n" + (msg.content or "")
                 if isinstance(msg, AssistantMessage) and msg.has_tool_calls():
                     last.tool_calls = last.tool_calls + msg.tool_calls
                 continue

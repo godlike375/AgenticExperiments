@@ -100,7 +100,9 @@ class LLMClient:
                 tools=tools,
                 parallel_tool_calls=False,
                 timeout=timeout,
-                reasoning_effort="none"
+                reasoning_effort="none",
+                frequency_penalty=0.0,
+                presence_penalty=0.0
             )
             msg = response.choices[0].message
             if prefill and msg.content and not msg.content.startswith(prefill):
