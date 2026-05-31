@@ -7,14 +7,16 @@ from universal_agents.tool import ENVIRONMENT_PREFIX
 from config import Config
 
 class TokenUsageTracker:
-    def __init__(self, max_context_tokens: int = 8192):
+    def __init__(self, system_prompt: str, max_context_tokens: int = 8192):
         self.max_context_tokens = max_context_tokens
         self.last_usage = None
+        self.system_prompt = system_prompt
 
     def update_from_usage(self, usage: dict):
         self.last_usage = usage
 
-    def estimate_tokens(self, text: str) -> int:
+    @staticmethod
+    def estimate_tokens(text: str) -> int:
         """Грубая оценка токенов: символы / 2.5"""
         return int(len(text) / 2.5)
 
@@ -25,6 +27,11 @@ class TokenUsageTracker:
         if last_user_content:
             known += self.estimate_tokens(last_user_content)
         return known
+
+    def get_remaining(self, last_user_content: str = ""):
+        total = self.get_total_context_tokens(self.system_prompt, last_user_content)
+        remaining = self.max_context_tokens - total
+        return remaining
 
     def format_timestamp_header(self, msg) -> str:
         """Метка времени из timestamp сообщения."""
@@ -101,7 +108,7 @@ class LLMClient:
                 parallel_tool_calls=False,
                 timeout=timeout,
                 reasoning_effort="none",
-                frequency_penalty=0.0,
+                frequency_penalty=0.2,
                 presence_penalty=0.0
             )
             msg = response.choices[0].message

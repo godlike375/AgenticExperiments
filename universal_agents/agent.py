@@ -43,7 +43,7 @@ class LLMAgent:
     def __init__(
             self,
             system_prompt: str = "You are a helpful assistant",
-            temp: float = 0.05,
+            temp: float = 0.0,
             timeout: int = 1800,
             tools_config: Union[list[str], dict, None] = None,
             on_render: Callable = lambda x: None,
@@ -61,7 +61,7 @@ class LLMAgent:
         self.on_system_msg = on_system_msg
         self.self_consistency_mode = False
         self.sc_samples = 3
-        self.token_tracker = TokenUsageTracker(max_context_tokens)
+        self.token_tracker = TokenUsageTracker(system_prompt, max_context_tokens)
 
         internal_tools = self._collect_internal_tools([self.__class__])
         if external_plugins:
@@ -224,11 +224,10 @@ class LLMAgent:
                 f"{safe_end - safe_start + 1} messages into 1. Freed ~{freed} chars.")
 
     @tool(
-        description="Delegates a subtask to an isolated sub-agent. "
-                    "The sub-agent has its own history and safe read-only tools. "
-                    "Use for analysis, research, or multi-step tasks that would clutter main context. "
-                    "Include all necessary context in the task description. "
-                    "Returns only the final result.",
+        description="Delegates a task to a limited sub-agent that has its own dialog history and just read-only tools unlike you. "
+                    "You can delegate to it, for example, 1 step of a multi-step task. "
+                    "Include necessary context for execution in task description. "
+                    "The tool returns only the final result of a task.",
         task=("str", "Clear task description with all necessary context"),
         max_iter=("int", "Optional max tool calls for sub-agent (default 5)")
     )
@@ -244,11 +243,11 @@ class LLMAgent:
         sub = SubAgent(
             system_prompt=(
                 "You are a sub-agent working on a specific subtask. "
-                "You have access to safe read-only tools. "
-                "Complete the task and provide a concise final answer. "
-                "Do NOT ask clarifying questions — work with what you have."
+                "You have access to read-only tools. "
+                "Complete the task using tools if needed and provide a final answer. "
+                "Do NOT ever ask clarifying questions — work with what you have."
             ),
-            max_context_tokens=8192,
+            max_context_tokens=self.token_tracker.max_context_tokens // 3,
             tools_config={"exclude": [
                 "edit_message", "delete_messages", "summarize_messages",
                 "delegate_to_subagent"
@@ -496,11 +495,11 @@ class LLMAgent:
         # Инструкция для мета-анализа истории
         synthesis_prompt = (
             f"{ENVIRONMENT_PREFIX}\n"
-            f"Based on the conversation history above, identify the current concrete user's goal "
-            f"to accomplish.\n"
-            f"Formulate a clear, concise instruction (1-2 sentences) for a sub-agent describing "
-            f"EXACTLY it needs to do and which result is being expected from sub-agent. "
-            f"Focus strictly on the technical objective of this step.\n"
+            f"Based on the current conversation context above create a tip for a sub-agent who will parse the output "
+            f"of tool '{tool_name}' and summarize it for you because tool output is too long for your memory. "
+            f"You only will read the summarization of the sub-agent so you need to note specific things that sub-agent "
+            f"must pay attention to.\n"
+            f"It must be a clear relatively concise instruction.\n"
             f"Output ONLY the formulated instruction for sub-agent."
         )
 
@@ -510,8 +509,8 @@ class LLMAgent:
         # Делаем быстрый запрос с низкой температурой для точности
         msg_obj, err, usage = LLMClient.call(
             synthesis_messages,
-            temp=0.1,
-            timeout=30,
+            temp=self.temp,
+            timeout=self.timeout,
             tools=None
         )
 
@@ -538,8 +537,10 @@ class LLMAgent:
         if tool_result.is_error or tool_result.is_user_denied:
             return
 
+        remaining = self.token_tracker.get_remaining(self.history.get_last_user_message().content)
+
         # Если вывод небольшой, оставляем его без изменений
-        if len(tool_result.content) <= Config.COMPRESS_THRESHOLD:
+        if TokenUsageTracker.estimate_tokens(tool_result.content) < remaining / 6:
             return
 
         # Интеллектуально синтезируем цель анализа на основе всей истории через LLM
@@ -553,7 +554,8 @@ class LLMAgent:
         )
 
         original_len = len(tool_result.content)
-        tool_result.content = f"{ENVIRONMENT_PREFIX} [AUTO-SUMMARIZED]\n{compressed_output}"
+        tool_result.content = (f"{ENVIRONMENT_PREFIX} Tool result content is too large so it was summarized automatically. "
+                               f"Don't repeat reading the file, it will lead to the same result and won't help to change anything. Summarization: \n{compressed_output}")
 
         self.on_system_msg(
             f"[AUTO-COMPRESS] Summarized '{tool_result.name}' output: "
@@ -568,7 +570,7 @@ class LLMAgent:
         self.on_system_msg(f"[CHUNK ANALYZER] Starting chunked analysis of {len(text)} chars for tool '{tool_name}'...")
 
         token_limit = self.token_tracker.max_context_tokens
-        token_chunk_size = max(token_limit // 5, 2500)
+        token_chunk_size = max(int(token_limit / 3.5), 3000)
         chunk_size = int(token_chunk_size * 2.5)
 
         chunks = []
@@ -594,12 +596,13 @@ class LLMAgent:
         # Объявляем точечный инструмент сбора информации с более жесткими описаниями решений
         @tool(
             description="Report findings from the current chunk and decide about the next step.",
-            chunk_findings=("str", "Key facts, data, or errors extracted strictly from this current chunk that are highly relevant to the goal. Be precise and specific. Write 'None' if nothing useful is found."),
+            chunk_findings=("str", "Key facts, data, or errors extracted from this current chunk that are highly relevant to the goal/task. Be precise and concrete. Write 'None' if nothing useful found."),
+            reason=("str", "Very brief explanation for your decision"),
             decision=("str", "One of: "
                              "'continue' (select this if think looking at remaining portions is perspective/useful), "
                              "'stop_found' (select this if you have already extracted what is needed to satisfy the goal), "
                              "'stop_useless' (select this ONLY if the entire file/output is completely unrelated to the task and cannot help at all)"),
-            reason=("str", "Very brief explanation for your decision")
+
         )
         def report_step(chunk_findings: str, decision: str, reason: str = "") -> str:
             decision_data["chunk_findings"] = chunk_findings
@@ -617,12 +620,12 @@ class LLMAgent:
 
             step_agent = SubAgent(
                 system_prompt=(
-                    "You are an expert data analyst. Your job is to inspect portions of output. "
-                    "Extract new, highly specific facts, values, errors, or data points relevant to the goal. "
+                    "You're a info extractor sub-agent. Your main job is to extract and preserve most useful highly relevant to "
+                    "the goal info from portions of text. Try to separate the useful signal from the noise, keeping only the signal. "
+                    "You basically need to intelligently summarize what you read. YOU MUST CITE PORTION TEXT. "
                     "Do NOT duplicate what has already been found in previous portions.\n"
-                    "You MUST call the `report_step` tool to submit your findings."
                 ),
-                max_context_tokens=8192,
+                max_context_tokens=token_chunk_size * 2,
                 tools_config=["report_step"],  # Разрешен только инструмент сбора
                 external_plugins={"report_step": report_step},
                 safe_only=True,
@@ -632,16 +635,14 @@ class LLMAgent:
             )
 
             prompt = (
-                f"MAIN TASK GOAL: {task_goal}\n"
-                f"SOURCE TOOL: {tool_name}\n\n"
-                f"FINDINGS EXTRACTED FROM PREVIOUS PORTIONS:\n{history_str}\n\n"
-                f"--- CURRENT PORTION ({current_num} of {total_chunks}) ---\n"
-                f"{chunk}\n"
-                f"--- END OF PORTION ---\n\n"
+                f"MAIN GOAL: {task_goal}\n"
                 f"Instructions:\n"
-                f"1. Analyze the current portion.\n"
-                f"2. Extract useful facts that are NOT yet present in the previous findings.\n"
-                f"3. Call `report_step` with your findings, decision, and short reasoning."
+                f"Just call `report_step` with only fresh new very detailed findings and citations from {current_num} portion, very brief reasoning and final decision.\n"
+                f"YOUR FINDINGS FROM PREVIOUS PORTIONS:\n{history_str}\n\n"
+                f"--- PORTION ({current_num} / {total_chunks}) ---\n"
+                f"{chunk}\n---\n\n"
+                f"Consider that your findings will be read by another agent that can't read the original text unlike you. "
+                f"So preserve many details except useless noise. Basically summarize the portions considering the goal."
             )
 
             step_agent.run(prompt)
@@ -682,8 +683,8 @@ class LLMAgent:
         if not findings_by_portion:
             return "No relevant information found in the tool output."
 
-        self.on_system_msg("[CHUNK ANALYZER] Synthesizing final response from all collected portions...")
         raw_accumulated_findings = "\n".join(findings_by_portion)
+        self.on_system_msg(f"[CHUNK ANALYZER] Synthesizing final response from all collected portions: {raw_accumulated_findings}")
 
         return raw_accumulated_findings
 
@@ -692,7 +693,7 @@ class LLMAgent:
             return "Empty response", True
 
         content = message_obj.content or ""
-        clean_content = content.replace("</think>", "").strip()
+        clean_content = content.strip()
         assistant_msg = self._build_assistant_msg(message_obj, clean_content)
 
         if assistant_msg.has_tool_calls():

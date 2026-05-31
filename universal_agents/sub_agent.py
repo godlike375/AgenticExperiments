@@ -1,8 +1,6 @@
-import json
 from typing import Optional, Callable, Union
 from models import AssistantMessage
 from llm_client import TokenUsageTracker
-from universal_agents.tool import tool
 
 
 class SubAgent:
@@ -39,7 +37,7 @@ class SubAgent:
             }
 
         # Изолированный трекер: траты субагента НЕ влияют на бюджет основного агента
-        self._own_tracker = TokenUsageTracker(max_context_tokens)
+        self._own_tracker = TokenUsageTracker(system_prompt, max_context_tokens)
 
         self._agent = LLMAgent(
             system_prompt=system_prompt,

@@ -187,7 +187,7 @@ def edit_file(path: str, new: str, old: str = '', mode: str = "one"):
 
 import os
 
-@tool(description="Gets file content or dir tree (lines are numbered for precise editing)",
+@tool(description="Gets file content or dir tree (lines are numbered for precise editing). If content is too large - it will be automatically summarized for sure.",
       path=("str", "Optional path to file/dir (default '.'). Use '..' to open parent dir"))
 def read(path: str = '.'):
     if not os.path.exists(path):

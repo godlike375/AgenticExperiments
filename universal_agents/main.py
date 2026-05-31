@@ -22,7 +22,7 @@ if __name__ == "__main__":
         on_render=ConsoleUI.render_message,
         on_confirm=ConsoleUI.confirm_action,
         on_system_msg=ConsoleUI.system_msg,
-        max_context_tokens=49152
+        max_context_tokens=65535
     )
 
     cli = CLI(agent)

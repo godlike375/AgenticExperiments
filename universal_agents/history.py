@@ -163,5 +163,11 @@ class ChatHistory:
                 return msg
         return None
 
+    def get_last_user_message(self) -> Optional[UserMessage]:
+        for msg in reversed(self._messages):
+            if isinstance(msg, UserMessage):
+                return msg
+        return None
+
     def get_messages_by_type(self, msg_type) -> list[Message]:
         return [msg for msg in self._messages if isinstance(msg, msg_type)]
