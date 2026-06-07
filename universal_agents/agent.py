@@ -43,7 +43,7 @@ class LLMAgent:
     def __init__(
             self,
             system_prompt: str = "You are a helpful assistant",
-            temp: float = 0.0,
+            temp: float = 0.15,
             timeout: int = 1800,
             tools_config: Union[list[str], dict, None] = None,
             on_render: Callable = lambda x: None,
