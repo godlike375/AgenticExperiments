@@ -1,4 +1,5 @@
-from agent import LLMAgent, load_external_plugins
+from agent import LLMAgent
+from tool_registry import load_external_plugins
 from ui import ConsoleUI, CLI
 from universal_agents.tool import ENVIRONMENT_PREFIX
 
@@ -22,7 +23,7 @@ if __name__ == "__main__":
         on_render=ConsoleUI.render_message,
         on_confirm=ConsoleUI.confirm_action,
         on_system_msg=ConsoleUI.system_msg,
-        max_context_tokens=65535
+        max_context_tokens=50000
     )
 
     cli = CLI(agent)
