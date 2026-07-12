@@ -7,10 +7,21 @@ def tool(description="", requires_confirmation=False, **params):
         func._tool_name = func.__name__
         func._requires_confirmation = requires_confirmation
 
+        # Маппинг имён типов Python в стандартные JSON Schema-типы,
+        _PY_TO_JSON_TYPE = {
+            "str": "string",
+            "int": "integer",
+            "float": "number",
+            "bool": "boolean",
+            "list": "array",
+            "dict": "object",
+        }
+
         properties = {}
         required = []
         for pname, (ptype, pdesc) in params.items():
-            properties[pname] = {"type": ptype, "description": pdesc}
+            json_type = _PY_TO_JSON_TYPE.get(ptype, ptype)
+            properties[pname] = {"type": json_type, "description": pdesc}
             if not pdesc.lower().startswith("optional"):
                 required.append(pname)
 
