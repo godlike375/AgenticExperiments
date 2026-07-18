@@ -5,8 +5,16 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 
+LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "zen_proxy_log.txt")
+
+def _log(msg):
+    line = f"{msg}\n"
+    print(line, end="")
+    with open(LOG_FILE, "a", encoding="utf-8") as f:
+        f.write(line)
+
 LISTEN_HOST = os.environ.get("LISTEN_HOST", "0.0.0.0")
-LISTEN_PORT = int(os.environ.get("LISTEN_PORT", "8000"))
+LISTEN_PORT = int(os.environ.get("LISTEN_PORT", "1234"))
 
 UPSTREAM_URL = "https://opencode.ai/zen/v1/chat/completions"
 API_KEY = "public"
@@ -16,6 +24,50 @@ ZEN_MODELS = [
     "mimo-v2.5-free", "nemotron-3-ultra-free",
     "north-mini-code-free",
 ]
+
+
+def _sanitize_chunk(chunk):
+    """Strip fields from SSE chunks that Zed's LM Studio adapter can't parse."""
+    if not isinstance(chunk, dict):
+        return chunk
+    choices = chunk.get("choices", [])
+    for choice in choices:
+        delta = choice.get("delta")
+        if isinstance(delta, dict):
+            clean = {}
+            for key in ("content", "tool_calls"):
+                if key in delta and delta[key] is not None and delta[key] != "":
+                    clean[key] = delta[key]
+            # Only include role if there's actual payload (content or tool_calls)
+            if clean and "role" in delta and delta["role"] is not None:
+                clean["role"] = delta["role"]
+            choice["delta"] = clean
+        # Remove non-standard fields
+        choice.pop("native_finish_reason", None)
+        choice.pop("logprobs", None)
+    # Remove non-standard top-level fields
+    chunk.pop("provider", None)
+    chunk.pop("service_tier", None)
+    chunk.pop("native_finish_reason", None)
+    chunk.pop("usage", None)
+    # Remove empty choices + cost chunk at end - return None to skip
+    if not choices and "cost" in chunk:
+        return None
+    # Skip chunks that carry no useful payload:
+    # reasoning-only (no content, no tool_calls) or empty delta
+    has_payload = False
+    for c in choices:
+        d = c.get("delta", {})
+        if isinstance(d, dict):
+            if "content" in d or "tool_calls" in d:
+                has_payload = True
+                break
+        if c.get("finish_reason") is not None:
+            has_payload = True
+            break
+    if not has_payload:
+        return None
+    return chunk
 
 
 def _random_id(prefix):
@@ -69,37 +121,148 @@ def _openai_to_ollama(body):
 
 
 class Handler(BaseHTTPRequestHandler):
+    def _cors(self):
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Headers", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+
     def _send_json(self, status, payload):
         data = json.dumps(payload).encode("utf-8")
         self.send_response(status)
+        self._cors()
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
 
-    def _send_raw(self, status, data):
+    def _send_raw(self, status, data, ctype="application/json"):
         self.send_response(status)
-        self.send_header("Content-Type", "application/json")
+        self._cors()
+        self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
+
+    def _sanitize_body(self, body):
+        """Clean up request body for upstream compatibility."""
+        clean = dict(body)
+        # Remove invalid max_tokens (negative or zero)
+        mt = clean.get("max_tokens")
+        if mt is not None and (not isinstance(mt, int) or mt <= 0):
+            del clean["max_tokens"]
+        # Remove empty stop array
+        st = clean.get("stop")
+        if st is not None and isinstance(st, list) and len(st) == 0:
+            del clean["stop"]
+        # Remove tools array if model doesn't support them or upstream rejects them
+        # (keep only if we know the model handles them)
+        if clean.get("tools") and clean.get("model") == "deepseek-v4-flash-free":
+            del clean["tools"]
+        return clean
+
+    def _forward_sse(self, body):
+        # Sanitize body for upstream compatibility
+        body = self._sanitize_body(body)
+        data = json.dumps(body).encode("utf-8")
+        req = Request(UPSTREAM_URL, data=data, headers=_zen_headers(), method="POST")
+        try:
+            resp = urlopen(req, timeout=300)
+        except (HTTPError, URLError) as e:
+            status = getattr(e, "code", 502)
+            err_body = getattr(e, "read", lambda: json.dumps({"error": str(e.reason)}).encode("utf-8"))()
+            _log(f"[proxy]   UPSTREAM ERROR: {status} {err_body.decode('utf-8', errors='replace')[:500]}")
+            self._send_raw(status, err_body, "application/json")
+            return
+        status = resp.status
+        ctype = resp.headers.get("Content-Type", "text/event-stream")
+        self.send_response(status)
+        self._cors()
+        self.send_header("Content-Type", ctype)
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        sent_done = False
+        sent_stop = False
+        try:
+            for line in resp:
+                text = line.decode("utf-8", errors="replace")
+                if text.startswith("data:"):
+                    payload = text[len("data:"):].strip()
+                    if payload == "[DONE]":
+                        self.wfile.write(b"data: [DONE]\n\n")
+                        self.wfile.flush()
+                        sent_done = True
+                        continue
+                    try:
+                        raw_chunk = json.loads(payload)
+                        _log(f"[proxy]   RAW: {json.dumps(raw_chunk)[:800]}")
+                        is_eos = not raw_chunk.get("choices") and "cost" in raw_chunk
+                        clean = _sanitize_chunk(raw_chunk)
+                        if clean is None:
+                            if is_eos:
+                                _log("[proxy]   CLEAN: null (end-of-stream)")
+                                break
+                            _log("[proxy]   CLEAN: null (reasoning-only)")
+                            continue
+                        # Skip duplicate stop chunks
+                        choices = clean.get("choices", [])
+                        if choices and choices[0].get("finish_reason") is not None:
+                            if sent_stop:
+                                _log("[proxy]   SKIP: duplicate stop chunk")
+                                continue
+                            sent_stop = True
+                        _log(f"[proxy]   CLEAN: {json.dumps(clean)[:800]}")
+                        self.wfile.write(("data: " + json.dumps(clean) + "\n\n").encode("utf-8"))
+                    except Exception:
+                        self.wfile.write(line)
+                    self.wfile.flush()
+                else:
+                    self.wfile.write(line)
+                    self.wfile.flush()
+        except Exception:
+            pass
+        finally:
+            if not sent_done:
+                self.wfile.write(b"data: [DONE]\n\n")
+                self.wfile.flush()
+            resp.close()
+            self.close_connection = True
 
     def _forward(self, body):
+        body = self._sanitize_body(body)
         data = json.dumps(body).encode("utf-8")
         req = Request(UPSTREAM_URL, data=data, headers=_zen_headers(), method="POST")
         try:
             with urlopen(req, timeout=300) as resp:
                 upstream = resp.read()
-            return resp.status, upstream
+                ctype = resp.headers.get("Content-Type", "application/json")
+            return resp.status, upstream, ctype
         except HTTPError as e:
-            return e.code, e.read()
+            return e.code, e.read(), e.headers.get("Content-Type", "application/json")
         except URLError as e:
             return 502, json.dumps({
                 "error": {"message": f"upstream error: {e.reason}", "type": "upstream_error"}
-            }).encode("utf-8")
+            }).encode("utf-8"), "application/json"
+
+    def do_OPTIONS(self):
+        path = self.path.split("?", 1)[0].rstrip("/")
+        self._log_request("OPTIONS", path)
+        self.send_response(204)
+        self._cors()
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def _log_request(self, method, path, body=None):
+        _log(f"[proxy] {method} {path}")
+        if body:
+            _log(f"[proxy]   body: {body[:2000]}")
+        for h in ("Content-Type", "Authorization", "User-Agent"):
+            val = self.headers.get(h)
+            if val:
+                _log(f"[proxy]   {h}: {val[:200] if h == 'Authorization' else val}")
 
     def do_GET(self):
         path = self.path.split("?", 1)[0].rstrip("/")
+        self._log_request("GET", path)
         if path in ("/v1/models", "/models"):
             self._send_json(200, {
                 "object": "list",
@@ -113,47 +276,58 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(200, {
                 "models": [{"name": m, "model": m} for m in ZEN_MODELS]
             })
-        elif path in ("/api/v1/models",):
-            # Native LM Studio model listing (OpenAI-style)
+        elif path in ("/api/v1/models", "/api/v0/models"):
+            # Native LM Studio model listing
             self._send_json(200, {
-                "object": "list",
                 "data": [
-                    {"id": m, "object": "model", "created": 0, "owned_by": "lmstudio"}
+                    {
+                        "id": m,
+                        "object": "model",
+                        "type": "llm",
+                        "publisher": "opencode",
+                        "arch": "unknown",
+                        "compatibility_type": "gguf",
+                        "quantization": "remote",
+                        "state": "not-loaded",
+                        "max_context_length": 200000,
+                        "capabilities": ["tool_use"],
+                    }
                     for m in ZEN_MODELS
-                ],
+                ]
             })
         else:
             self._send_json(200, {"status": "ok", "proxy": "opencode-zen"})
 
     def do_POST(self):
         path = self.path.split("?", 1)[0].rstrip("/")
+        length = int(self.headers.get("Content-Length", 0))
+        raw = self.rfile.read(length) if length else b"{}"
+        self._log_request("POST", path, raw.decode("utf-8", errors="replace"))
 
         if path in ("/v1/chat/completions", "/chat/completions"):
-            length = int(self.headers.get("Content-Length", 0))
-            raw = self.rfile.read(length) if length else b"{}"
             try:
                 body = json.loads(raw.decode("utf-8"))
             except Exception as e:
                 self._send_json(400, {"error": {"message": f"invalid json: {e}", "type": "invalid_request"}})
                 return
-            status, upstream = self._forward(body)
-            self._send_raw(status, upstream)
+            if body.get("stream"):
+                self._forward_sse(body)
+            else:
+                status, upstream, ctype = self._forward(body)
+                self._send_raw(status, upstream, ctype)
             return
 
         if path in ("/api/chat", "/api/generate"):
-            # Native Ollama endpoints -> normalize to OpenAI then back
-            length = int(self.headers.get("Content-Length", 0))
-            raw = self.rfile.read(length) if length else b"{}"
             try:
                 body = json.loads(raw.decode("utf-8"))
             except Exception as e:
                 self._send_json(400, {"error": {"message": f"invalid json: {e}", "type": "invalid_request"}})
                 return
             oai = _ollama_to_openai(body)
-            status, upstream = self._forward(oai)
+            status, upstream, ctype = self._forward(oai)
             if body.get("stream"):
-                # Streaming: pass through SSE but convert each OpenAI chunk
                 self.send_response(status)
+                self._cors()
                 self.send_header("Content-Type", "application/x-ndjson")
                 self.end_headers()
                 for line in upstream.decode("utf-8").splitlines():
@@ -183,23 +357,22 @@ class Handler(BaseHTTPRequestHandler):
                     self._send_raw(status, upstream)
             return
 
-        if path in ("/api/v1/chat", "/api/v1/chat/completions"):
-            # Native LM Studio chat endpoint (OpenAI-compatible payload)
-            length = int(self.headers.get("Content-Length", 0))
-            raw = self.rfile.read(length) if length else b"{}"
+        if path in ("/api/v1/chat", "/api/v1/chat/completions", "/api/v0/chat", "/api/v0/chat/completions"):
             try:
                 body = json.loads(raw.decode("utf-8"))
             except Exception as e:
                 self._send_json(400, {"error": {"message": f"invalid json: {e}", "type": "invalid_request"}})
                 return
-            status, upstream = self._forward(body)
-            self._send_raw(status, upstream)
+            if body.get("stream"):
+                self._forward_sse(body)
+            else:
+                status, upstream, ctype = self._forward(body)
+                self._send_raw(status, upstream, ctype)
             return
 
-        if path in ("/api/v1/models/load",):
-            # LM Studio model loading stub - proxy serves remote zen models
+        if path in ("/api/v1/models/load", "/api/v0/models/load"):
             try:
-                body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0)) or 0) or b"{}")
+                body = json.loads(raw.decode("utf-8")) if raw else {}
             except Exception:
                 body = {}
             model = body.get("model_key") or body.get("model") or ZEN_MODELS[0]
@@ -210,10 +383,9 @@ class Handler(BaseHTTPRequestHandler):
             })
             return
 
-        if path in ("/api/v1/models/download",):
-            # LM Studio download stub
+        if path in ("/api/v1/models/download", "/api/v0/models/download"):
             try:
-                body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0)) or 0) or b"{}")
+                body = json.loads(raw.decode("utf-8")) if raw else {}
             except Exception:
                 body = {}
             self._send_json(200, {
@@ -223,8 +395,7 @@ class Handler(BaseHTTPRequestHandler):
             })
             return
 
-        if path.startswith("/api/v1/models/download/status/"):
-            # LM Studio download status stub
+        if path.startswith("/api/v1/models/download/status/") or path.startswith("/api/v0/models/download/status/"):
             job_id = path.rsplit("/", 1)[-1]
             self._send_json(200, {
                 "success": True,
@@ -238,12 +409,12 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json(404, {"error": {"message": "not found", "type": "invalid_request"}})
 
     def log_message(self, fmt, *args):
-        print("[proxy]", fmt % args)
+        _log("[proxy]" + fmt % args)
 
 
 if __name__ == "__main__":
-    print(f"OpenCode Zen proxy listening on http://{LISTEN_HOST}:{LISTEN_PORT}")
-    print(f"Upstream: {UPSTREAM_URL}")
-    print("Accepts: OpenAI-compatible (LM Studio / Ollama / llama.cpp),")
-    print("         native Ollama /api/chat, native LM Studio /api/v1/*")
+    _log(f"OpenCode Zen proxy listening on http://{LISTEN_HOST}:{LISTEN_PORT}")
+    _log(f"Upstream: {UPSTREAM_URL}")
+    _log("Accepts: OpenAI-compatible (LM Studio / Ollama / llama.cpp),")
+    _log("         native Ollama /api/chat, native LM Studio /api/v1/*")
     HTTPServer((LISTEN_HOST, LISTEN_PORT), Handler).serve_forever()
