@@ -1,11 +1,13 @@
-from agent import LLMAgent
-from tool_registry import load_external_plugins
-from ui import ConsoleUI, CLI
+from universal_agents.agent import LLMAgent
+from universal_agents.tool_registry import load_external_plugins
+from universal_agents.ui import ConsoleUI, CLI
 from universal_agents.tool import ENVIRONMENT_PREFIX
 
 if __name__ == "__main__":
-    external_tools = load_external_plugins("tools")
-    print(f"Loaded external tools: {list(external_tools.keys())}")
+    all_tools = load_external_plugins("tools")
+    startup_tools = {n: f for n, f in all_tools.items() if n in ("load_tool", "tool_description")}
+    print(f"Loaded external tools: {list(startup_tools.keys())}")
+    print("Use load_tool to load additional tools dynamically.")
 
     sys_prompt = (
         "* You are assistant that can call tools. Speak Russian.\n"
@@ -19,7 +21,7 @@ if __name__ == "__main__":
     agent = LLMAgent(
         system_prompt=sys_prompt,
         tools_config=None,
-        external_plugins=external_tools,
+        external_plugins=startup_tools,
         on_render=ConsoleUI.render_message,
         on_confirm=ConsoleUI.confirm_action,
         on_system_msg=ConsoleUI.system_msg,

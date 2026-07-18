@@ -1,18 +1,13 @@
 from __future__ import annotations
-import sys
-import os
 from typing import TYPE_CHECKING
 
-# Добавить родительскую папку в path, чтобы импорты работали как из корня
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 from universal_agents.tool import tool, ENVIRONMENT_PREFIX
-from config import Config
-from models import UserMessage, AssistantMessage, ToolResult, SystemMessage
-from sub_agent import SubAgent
+from universal_agents.config import Config
+from universal_agents.models import UserMessage, AssistantMessage, ToolResult, SystemMessage
+from universal_agents.sub_agent import SubAgent
 
 if TYPE_CHECKING:
-    from agent import LLMAgent
+    from universal_agents.agent import LLMAgent
 
 
 @tool(description="Get short indexed current history with ids")
@@ -79,7 +74,7 @@ def delete_messages(agent: LLMAgent, start_id: int, end_id: int = -1) -> str:
     end_id=("int", "End index (inclusive). Use -1 for last message"),
 )
 def summarize_messages(agent: LLMAgent, start_id: int, end_id: int = -1) -> str:
-    from compressors import summarize_text
+    from universal_agents.compressors import summarize_text
 
     history = agent.history
     if end_id == -1 or end_id >= len(history):
@@ -160,3 +155,29 @@ def delegate_to_subagent(agent: LLMAgent, task: str, max_iter: int = 5) -> str:
     if not result.strip():
         return f"{ENVIRONMENT_PREFIX} Sub-agent returned empty result."
     return f"{ENVIRONMENT_PREFIX} Sub-agent result:\n{result}"
+
+
+@tool(
+    description="Load tool by name or list available tools if called with no args.",
+    name=("str", "Optional tool name to load."),
+)
+def load_tool(agent: LLMAgent, name: str = "") -> str:
+    if not name:
+        return agent.list_available_tools()
+    return agent.load_tool(name)
+
+
+@tool(
+    description="Disable a currently loaded tool by name. Cannot disable core tools like load_tool, disable_tool, get_messages.",
+    name=("str", "Name of the tool to disable"),
+)
+def disable_tool(agent: LLMAgent, name: str) -> str:
+    return agent.disable_tool(name)
+
+
+@tool(
+    description="Get the description of a tool by name for tools not yet loaded. Use this to understand what a tool does before deciding to load it.",
+    name=("str", "Tool name to get description"),
+)
+def tool_description(agent: LLMAgent, name: str) -> str:
+    return agent.tool_description(name)

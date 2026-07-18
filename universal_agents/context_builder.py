@@ -1,10 +1,10 @@
 from __future__ import annotations
 from typing import Optional, TYPE_CHECKING
 
-from models import SystemMessage, UserMessage, AssistantMessage, ToolResult
+from universal_agents.models import SystemMessage, UserMessage, AssistantMessage, ToolResult
 
 if TYPE_CHECKING:
-    from agent import LLMAgent
+    from universal_agents.agent import LLMAgent
 
 
 def prepare_messages_for_api(agent: LLMAgent) -> list[dict]:

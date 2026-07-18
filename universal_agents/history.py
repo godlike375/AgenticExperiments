@@ -1,8 +1,8 @@
 import json
 from typing import Optional, Any
 from universal_agents.tool import ENVIRONMENT_PREFIX
-from config import Config
-from models import SystemMessage, UserMessage, AssistantMessage, ToolResult, ToolCall, Message
+from universal_agents.config import Config
+from universal_agents.models import SystemMessage, UserMessage, AssistantMessage, ToolResult, ToolCall, Message
 
 class ChatHistory:
     def __init__(self, system_prompt: str):

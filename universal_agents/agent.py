@@ -4,14 +4,14 @@ import json
 from typing import Union, Callable, Optional
 
 from universal_agents.tool import ENVIRONMENT_PREFIX
-from config import Config
-from models import UserMessage, AssistantMessage, ToolCall, ToolResult
-from llm_client import LLMClient, TokenUsageTracker, LoopDetector
-from history import ChatHistory
+from universal_agents.config import Config
+from universal_agents.models import UserMessage, AssistantMessage, ToolCall, ToolResult
+from universal_agents.llm_client import LLMClient, TokenUsageTracker, LoopDetector
+from universal_agents.history import ChatHistory
 
-from compressors import auto_compress_tool_result
-from context_builder import prepare_messages_for_api, get_effective_prefill
-from history_repair import prune_all_failed_tool_calls_except_last
+from universal_agents.compressors import auto_compress_tool_result
+from universal_agents.context_builder import prepare_messages_for_api, get_effective_prefill
+from universal_agents.history_repair import prune_all_failed_tool_calls_except_last
 
 
 class LLMAgent:
@@ -61,6 +61,82 @@ class LLMAgent:
             raise ValueError("Invalid tools_config")
         self._all_tools = {k: v for k, v in self._all_tools.items() if k in active}
         self.tools = [v['schema'] for v in self._all_tools.values()]
+
+    def _refresh_tools_list(self):
+        """Refresh the tools list sent to the API from _all_tools."""
+        self.tools = [v['schema'] for v in self._all_tools.values()]
+
+    def tool_description(self, name: str) -> str:
+        """Get the description of a tool from disk without enabling it."""
+        from universal_agents.tool_registry import load_external_plugins
+        import os
+
+        if name in self._all_tools:
+            if len(self.history) > 0 and isinstance(self.history[-1], AssistantMessage) and self.history[-1].has_tool_calls():
+                self.history._messages.pop()
+            return ""
+
+        tools_dir = os.path.join(os.path.dirname(__file__), "tools")
+        external_tools = load_external_plugins(tools_dir)
+        if name not in external_tools:
+            raise ValueError(f"Tool '{name}' not found. Check available tools.")
+
+        func = external_tools[name]
+        schema = func._tool_schema
+        fn_info = schema.get("function", {})
+        desc = fn_info.get("description", "No description")
+
+        result = f"'{name}' {desc}"
+        return result
+
+    def load_tool(self, name: str) -> str:
+        """Enable a previously disabled tool by name."""
+        from universal_agents.tool_registry import load_external_plugins
+        if name in self._all_tools:
+            return f"Tool '{name}' is already enabled."
+
+        import os
+        tools_dir = os.path.join(os.path.dirname(__file__), "tools")
+        external_tools = load_external_plugins(tools_dir)
+        if name in external_tools:
+            self._all_tools[name] = self._build_tool_dict(external_tools[name], is_instance_method=False)
+
+            non_core = [n for n in self._all_tools if n not in ("load_tool", "disable_tool", "tool_description")]
+            if len(non_core) >= 1 and "disable_tool" not in self._all_tools and "disable_tool" in external_tools:
+                self._all_tools["disable_tool"] = self._build_tool_dict(external_tools["disable_tool"], is_instance_method=False)
+
+            self._refresh_tools_list()
+            return f"Tool '{name}' loaded."
+
+        return f"Tool '{name}' not found. Check available tools."
+
+    def disable_tool(self, name: str) -> str:
+        """Disable a tool by name, removing it from available tools."""
+        if name not in self._all_tools:
+            return f"Tool '{name}' is not currently enabled."
+
+        if name in ("load_tool", "disable_tool", "get_messages", "tool_description"):
+            return f"Cannot disable built-in tool '{name}'."
+
+        del self._all_tools[name]
+
+        non_core = [n for n in self._all_tools if n not in ("load_tool", "disable_tool", "tool_description")]
+        if len(non_core) == 0 and "disable_tool" in self._all_tools:
+            del self._all_tools["disable_tool"]
+
+        self._refresh_tools_list()
+        return f"Tool '{name}' disabled successfully."
+
+    def list_available_tools(self) -> str:
+        """List all available (loadable) tools from plugins directory."""
+        from universal_agents.tool_registry import load_external_plugins
+        import os
+        tools_dir = os.path.join(os.path.dirname(__file__), "tools")
+        external_tools = load_external_plugins(tools_dir)
+        enabled = set(self._all_tools.keys())
+        available = set(external_tools.keys()) - enabled
+        lines = ["=== AVAILABLE TO ENABLE TOOLS ==="] + sorted(available)
+        return "\n".join(lines)
 
     # --------------------------------------------------------
     # Подготовка сообщений (делегаты)

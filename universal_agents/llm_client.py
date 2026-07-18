@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Optional
 from openai import OpenAI
 from universal_agents.tool import ENVIRONMENT_PREFIX
-from config import Config
+from universal_agents.config import Config
 
 class TokenUsageTracker:
     def __init__(self, system_prompt: str, max_context_tokens: int = 8192):
@@ -73,7 +73,7 @@ class LoopDetector:
         for msg in reversed(messages):
             # Если дошли до сообщения пользователя, значит этот ход начался здесь.
             # Всё, что было до него, не считается повтором в текущем ходу.
-            from models import UserMessage, AssistantMessage
+            from universal_agents.models import UserMessage, AssistantMessage
             if isinstance(msg, UserMessage):
                 break
 

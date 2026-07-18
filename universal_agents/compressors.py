@@ -2,11 +2,11 @@ from __future__ import annotations
 from typing import Optional, TYPE_CHECKING
 
 from universal_agents.tool import tool, ENVIRONMENT_PREFIX
-from models import UserMessage, ToolResult
-from llm_client import LLMClient, TokenUsageTracker
+from universal_agents.models import UserMessage, ToolResult
+from universal_agents.llm_client import LLMClient, TokenUsageTracker
 
 if TYPE_CHECKING:
-    from agent import LLMAgent
+    from universal_agents.agent import LLMAgent
 
 
 # ============================================================
@@ -134,7 +134,7 @@ def chunk_and_summarize_large_text(agent: LLMAgent, text: str, tool_name: str, t
     findings_by_portion: list[str] = []
     decision_data = {"chunk_findings": "", "decision": "continue", "reason": ""}
 
-    from sub_agent import SubAgent
+    from universal_agents.sub_agent import SubAgent
 
     @tool(
         description="Report findings from the current chunk and decide about the next step.",

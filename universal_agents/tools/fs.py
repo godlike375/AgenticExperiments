@@ -191,7 +191,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from sub_agent import SubAgent
+from universal_agents.sub_agent import SubAgent
 
 CHARS_PER_TOKEN = 2.5
 

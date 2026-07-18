@@ -1,8 +1,8 @@
 import json
 import os
 import shlex
-from models import Message, SystemMessage, UserMessage, AssistantMessage, ToolResult
-from agent import LLMAgent
+from universal_agents.models import Message, SystemMessage, UserMessage, AssistantMessage, ToolResult
+from universal_agents.agent import LLMAgent
 
 class ConsoleUI:
     @staticmethod

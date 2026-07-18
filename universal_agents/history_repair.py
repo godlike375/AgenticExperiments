@@ -2,8 +2,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from universal_agents.tool import ENVIRONMENT_PREFIX
-from config import Config
-from models import UserMessage, AssistantMessage, ToolResult
+from universal_agents.config import Config
+from universal_agents.models import UserMessage, AssistantMessage, ToolResult
 
 if TYPE_CHECKING:
     from agent import LLMAgent
