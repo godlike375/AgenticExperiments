@@ -162,6 +162,8 @@ def delegate_to_subagent(agent: LLMAgent, task: str, max_iter: int = 5) -> str:
     name=("str", "Optional tool name to load."),
 )
 def load_tools(agent: LLMAgent, name: str = "") -> str:
+    if "tool_description" not in agent._all_tools:
+        agent.load_tools("tool_description")
     if not name:
         return agent.list_available_tools()
     return agent.load_tools(name)
