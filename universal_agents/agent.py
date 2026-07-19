@@ -18,8 +18,8 @@ class LLMAgent:
     def __init__(
         self,
         system_prompt: str = "You are a helpful assistant",
-        temp: float = 0.45,
-        timeout: int = 1800,
+        temp: float = None,
+        timeout: int = None,
         tools_config: Union[list[str], dict, None] = None,
         on_render: Callable = lambda x: None,
         on_confirm: Callable[[str, dict], bool] = lambda n, a: True,
@@ -27,10 +27,18 @@ class LLMAgent:
         external_plugins: dict[str, Callable] = None,
         max_context_tokens: int = 16384,
         _create_judge: bool = True,
+        top_p: float = None,
+        frequency_penalty: float = None,
+        presence_penalty: float = None,
+        max_tokens: int = None,
     ):
         self.history = ChatHistory(system_prompt)
-        self.temp = temp
-        self.timeout = timeout
+        self.temp = temp if temp is not None else Config.TEMP
+        self.timeout = timeout if timeout is not None else Config.TIMEOUT
+        self.top_p = top_p if top_p is not None else Config.TOP_P
+        self.frequency_penalty = frequency_penalty if frequency_penalty is not None else Config.FREQUENCY_PENALTY
+        self.presence_penalty = presence_penalty if presence_penalty is not None else Config.PRESENCE_PENALTY
+        self.max_tokens = max_tokens if max_tokens is not None else Config.MAX_TOKENS
         self.on_render = on_render
         self.on_confirm = on_confirm
         self.on_system_msg = on_system_msg
@@ -102,8 +110,11 @@ class LLMAgent:
             self._all_tools[name] = self._build_tool_dict(external_tools[name], is_instance_method=False)
 
             non_core = [n for n in self._all_tools if n not in ("load_tools", "disable_tool", "tool_description")]
-            if len(non_core) >= 1 and "disable_tool" not in self._all_tools and "disable_tool" in external_tools:
-                self._all_tools["disable_tool"] = self._build_tool_dict(external_tools["disable_tool"], is_instance_method=False)
+            if len(non_core) >= 1:
+                if "disable_tool" not in self._all_tools and "disable_tool" in external_tools:
+                    self._all_tools["disable_tool"] = self._build_tool_dict(external_tools["disable_tool"], is_instance_method=False)
+                if "tool_description" not in self._all_tools and "tool_description" in external_tools:
+                    self._all_tools["tool_description"] = self._build_tool_dict(external_tools["tool_description"], is_instance_method=False)
 
             self._refresh_tools_list()
             return f"Tool '{name}' loaded."
@@ -289,6 +300,10 @@ class LLMAgent:
                 draft_messages, draft_temp, draft_timeout,
                 tools=self.tools if self.tools else None,
                 prefill=prefill_val,
+                top_p=self.top_p,
+                frequency_penalty=self.frequency_penalty,
+                presence_penalty=self.presence_penalty,
+                max_tokens=self.max_tokens,
             )
             if msg_obj and not err:
                 return msg_obj
@@ -327,6 +342,10 @@ class LLMAgent:
             synthesis_messages, temp=0.2, timeout=self.timeout,
             tools=self.tools if self.tools else None,
             prefill=current_prefill,
+            top_p=self.top_p,
+            frequency_penalty=self.frequency_penalty,
+            presence_penalty=self.presence_penalty,
+            max_tokens=self.max_tokens,
         )
         if usage:
             self.token_tracker.update_from_usage(usage)
@@ -355,6 +374,10 @@ class LLMAgent:
         )
         final_obj, final_err, final_usage = LLMClient.call(
             followup_dicts, temp=0.1, timeout=self.timeout, tools=None,
+            top_p=self.top_p,
+            frequency_penalty=self.frequency_penalty,
+            presence_penalty=self.presence_penalty,
+            max_tokens=self.max_tokens,
         )
         if final_usage:
             self.token_tracker.update_from_usage(final_usage)
@@ -414,6 +437,10 @@ class LLMAgent:
                     active_messages, current_temp, self.timeout,
                     tools=self.tools if self.tools else None,
                     prefill=step_prefill,
+                    top_p=self.top_p,
+                    frequency_penalty=self.frequency_penalty,
+                    presence_penalty=self.presence_penalty,
+                    max_tokens=self.max_tokens,
                 )
                 if usage:
                     self.token_tracker.update_from_usage(usage)

@@ -94,7 +94,17 @@ class LLMClient:
         return cls._client
 
     @staticmethod
-    def call(messages: list[dict], temp: float, timeout: int, tools: list[dict] = None, prefill: str = None):
+    def call(
+        messages: list[dict],
+        temp: float = None,
+        timeout: int = None,
+        tools: list[dict] = None,
+        prefill: str = None,
+        top_p: float = None,
+        frequency_penalty: float = None,
+        presence_penalty: float = None,
+        max_tokens: int = None,
+    ):
         messages_to_send = list(messages)
         if prefill:
             messages_to_send.append({"role": "assistant", "content": prefill})
@@ -102,15 +112,15 @@ class LLMClient:
             response = LLMClient.get_client().chat.completions.create(
                 model=Config.MODEL_NAME,
                 messages=messages_to_send,
-                temperature=temp,
-                max_tokens=12000,
+                temperature=temp if temp is not None else Config.TEMP,
+                max_tokens=max_tokens if max_tokens is not None else Config.MAX_TOKENS,
                 tools=tools,
                 parallel_tool_calls=False,
-                timeout=timeout,
+                timeout=timeout if timeout is not None else Config.TIMEOUT,
                 reasoning_effort="none",
-                frequency_penalty=0.0,
-                presence_penalty=0.0,
-                top_p=1.0,
+                frequency_penalty=frequency_penalty if frequency_penalty is not None else Config.FREQUENCY_PENALTY,
+                presence_penalty=presence_penalty if presence_penalty is not None else Config.PRESENCE_PENALTY,
+                top_p=top_p if top_p is not None else Config.TOP_P,
             )
             msg = response.choices[0].message
             if prefill and msg.content and not msg.content.startswith(prefill):

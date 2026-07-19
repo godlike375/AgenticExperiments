@@ -5,9 +5,9 @@ from universal_agents.tool import ENVIRONMENT_PREFIX
 
 if __name__ == "__main__":
     all_tools = load_external_plugins("tools")
-    startup_tools = {n: f for n, f in all_tools.items() if n in ("load_tools", "tool_description")}
-    print(f"Loaded external tools: {list(startup_tools.keys())}")
-    print("Use load_tools to load additional tools dynamically.")
+    startup_tools = {n: f for n, f in all_tools.items() if n == "load_tools"}
+    print(f"Loaded startup tools: {list(startup_tools.keys())}")
+    print("Use load_tools to load tools and tool_description dynamically.")
 
     sys_prompt = (
         "* You are a Russian speaking tool calling AI-assistant.\n"

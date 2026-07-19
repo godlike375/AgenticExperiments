@@ -14,7 +14,10 @@ Python. Запускает одного основного `LLMAgent` (и при
 
 - **Динамическое управление инструментами** — LLM может включать/отключать
   инструменты через `load_tools` и `disable_tool`, самостоятельно управляя
-  своим инструментарием в процессе работы.
+  своим инструментарием в процессе работы. При старте загружен **только**
+  `load_tools`; после первого вызова `load_tools` автоматически подгружаются
+  `disable_tool` и `tool_description`, остальные инструменты агент
+  подгружает по мере необходимости.
 - **Плагинные инструменты** — достаточно положить `.py`-файл в `tools/`,
   использующий декоратор `@tool`, и он подгрузится при запуске автоматически.
 - **Субагенты** — делегируют самодостаточную подзадачу изолированному агенту
@@ -51,9 +54,10 @@ universal_agents/
 ├── tool_registry.py     # Загрузка функций с @tool из директории tools/
 ├── models.py            # Датаклассы сообщений (System/User/Assistant/ToolResult)
 ├── history.py           # ChatHistory: добавление/редактирование/удаление/суммаризация/сохранение/загрузка
-├── context_builder.py   # Подготовка истории для API (заголовки, prefill)
+├── context_builder.py   # Подготовка истории для API (заголовки токенов, таймстемпов, prefill)
 ├── history_repair.py    # Разрыв циклов и очистка неудачных вызовов
 ├── compressors.py       # Суммаризация на базе LLM и порционный анализ
+├── code_extractor.py    # Слепок структуры проекта для контекста LLM (dump_project)
 ├── ui.py                # Консольный рендерер и интерактивный CLI
 └── tools/
     ├── builtin.py       # get_messages, edit_message, delete_messages,
@@ -66,14 +70,40 @@ universal_agents/
 
 1. `main.py` загружает внешние инструменты через
    `load_external_plugins("tools")` (`tool_registry.py`) и создаёт `LLMAgent`.
+   В систему загружается **только** `load_tools`; после первого его вызова
+   автоматически подгружаются `disable_tool` и `tool_description`;
+   остальные инструменты агент подгружает динамически.
 2. CLI (`ui.py`) считывает ввод пользователя и вызывает `agent.chat(...)`.
+   В каждое сообщение пользователя `context_builder.py` внедряет служебные
+   заголовки: «| Tokens spent: X (Remaining: Y)» и таймстемп вида
+   `<<[[SYS ENV]] === [datetime]`.
 3. `agent.chat` в цикле: собирает сообщения для API (`context_builder.py`),
    вызывает модель (`llm_client.py`), обрабатывает ответ, выполняет вызовы
    инструментов (`agent._execute_tools`) и добавляет результаты в историю.
+   `llm_client.LoopDetector` блокирует повторные вызовы одного инструмента
+   с теми же аргументами в рамках одного хода.
 4. Выводы инструментов сжимаются на лету (`compressors.py`), когда превышают
-   порог токенов относительно оставшегося бюджета.
+   порог токенов относительно оставшегося бюджета. Для суммаризации больших
+   файлов используется специализированный sub-agent с промптом file-skeleton
+   анализатора.
 5. После каждого хода история восстанавливается/нормализуется
    (`history_repair.py`, `history.py`).
+
+### Системные промпты
+
+Основной агент получает промпт из `main.py` с правилами: говорить по-русски,
+начинать с одним инструментом (`load_tools`), немедленно загружать нужный
+инструмент по запросу пользователя, не вызывать один инструмент дважды
+подряд, вызывать только 1 инструмент за ход.
+
+`SubAgent` (через `delegate_to_subagent`) использует промпт:
+«You are a sub-agent working on a specific subtask. You have access to
+read-only tools. Complete the task using tools if needed and provide a
+final answer. Do NOT ever ask clarifying questions — work with what you have.»
+
+Суммаризатор больших файлов (в `tools/fs.py`) использует промпт
+file-skeleton анализатора: «You output a compact short skeleton with the
+most top-level identifiers and their exact line ranges.»
 
 ## Требования
 
@@ -116,14 +146,61 @@ python main.py
 ```python
 class Config:
     API_URL = "http://localhost:1234/v1"  # OpenAI-совместимый эндпоинт
-    MODEL_NAME = "local-model"             # Идентификатор модели, известный эндпоинту
-    AFTER_SYSTEM_PROMPT = 1                # Индекс, с которого начинается диалог
-    BOOST_TEMP = 0.875                      # Температура при восстановлении после циклов/пустых ответов
+    MODEL_NAME = ""                       # Идентификатор модели, известный эндпоинту
+    AFTER_SYSTEM_PROMPT = 1               # Индекс, с которого начинается диалог
+    BOOST_TEMP = 1.1                      # Температура при восстановлении после циклов/пустых ответов
+
+    # Параметры генерации (используются по умолчанию во всех вызовах API)
+    TEMP = 0.45              # Температура сэмплирования
+    TOP_P = 1.0              # Top-p (nucleus sampling)
+    FREQUENCY_PENALTY = 0.0  # Штраф за частоту повторения токенов
+    PRESENCE_PENALTY = 0.0   # Штраф за присутствие токенов
+    MAX_TOKENS = 12000       # Максимальная длина ответа
+    TIMEOUT = 1800           # Таймаут запроса (секунды)
 ```
+
+Эти параметры передаются в `LLMClient.call()` по умолчанию. `LLMAgent` и
+`SubAgent` читают их из `Config` при инициализации, но позволяют переопределить
+каждый из них через аргументы конструктора.
 
 Параметр `max_context_tokens` агента (например, `50000` в `main.py`) задаёт
 бюджет токенов, на основе которого работают автосжатие и внедряемые
 заголовки с расходом токенов.
+
+### Параметры LLMAgent
+
+```python
+LLMAgent(
+    system_prompt: str = "You are a helpful assistant",
+    temp: float = None,          # → Config.TEMP
+    timeout: int = None,         # → Config.TIMEOUT
+    top_p: float = None,         # → Config.TOP_P
+    frequency_penalty: float = None,  # → Config.FREQUENCY_PENALTY
+    presence_penalty: float = None,   # → Config.PRESENCE_PENALTY
+    max_tokens: int = None,      # → Config.MAX_TOKENS
+    tools_config: list | dict | None = None,
+    max_context_tokens: int = 16384,
+    ...
+)
+```
+
+### Параметры SubAgent
+
+```python
+SubAgent(
+    system_prompt: str,
+    temp: float = None,          # → Config.TEMP
+    timeout: int = None,         # → 60 (не Config.TIMEOUT — субагенты по умолчанию короче)
+    top_p: float = None,         # → Config.TOP_P
+    frequency_penalty: float = None,  # → Config.FREQUENCY_PENALTY
+    presence_penalty: float = None,   # → Config.PRESENCE_PENALTY
+    max_tokens: int = None,      # → Config.MAX_TOKENS
+    max_context_tokens: int = 8192,
+    max_iter: int = 5,
+    safe_only: bool = True,
+    ...
+)
+```
 
 ## Написание своего инструмента
 
@@ -156,13 +233,14 @@ def greet(name: str) -> str:
 ## Инструменты по умолчанию
 
 **Встроенные (`tools/builtin.py`)**
-- `get_messages` — краткий индексированный вид текущей истории
+- `load_tools` — загрузить инструмент по имени; без аргументов показывает список доступных для включения. **Core** — всегда доступен.
+- `get_messages` — краткий индексированный вид текущей истории. **Core** — всегда доступен.
+- `tool_description` — показать описание инструмента до его загрузки. Появляется автоматически после первого вызова `load_tools`.
+- `disable_tool` — отключить активный инструмент по имени. Появляется автоматически после первого вызова `load_tools`.
 - `edit_message` *(подтверждение)* — отредактировать сообщение по id
 - `delete_messages` *(подтверждение)* — удалить диапазон сообщений
 - `summarize_messages` *(подтверждение)* — сжать диапазон в одно саммари-сообщение
 - `delegate_to_subagent` — передать подзадачу изолированному безопасному субагенту
-- `load_tools` — включить ранее отключённый инструмент по имени; без аргументов показывает список доступных для включения инструментов
-- `disable_tool` — отключить активный инструмент по имени (нельзя отключить `get_messages`, `load_tools`, `disable_tool`)
 
 **Файловая система (`tools/fs.py`)**
 - `cwd` — получить/сменить рабочую директорию

@@ -3,3 +3,11 @@ class Config:
     MODEL_NAME = ""
     AFTER_SYSTEM_PROMPT = 1  # Index after which dialog starts (0 = system)
     BOOST_TEMP = 1.1
+
+    # Параметры генерации
+    TEMP = 0.45
+    TOP_P = 1.0
+    FREQUENCY_PENALTY = 0.0
+    PRESENCE_PENALTY = 0.0
+    MAX_TOKENS = 12000
+    TIMEOUT = 1800

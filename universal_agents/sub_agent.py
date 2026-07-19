@@ -1,6 +1,7 @@
 from typing import Optional, Callable, Union
 from universal_agents.models import AssistantMessage
 from universal_agents.llm_client import TokenUsageTracker
+from universal_agents.config import Config
 
 
 class SubAgent:
@@ -19,8 +20,13 @@ class SubAgent:
             external_plugins: Optional[dict] = None,
             safe_only: bool = True,
             max_iter: int = 5,
-            temp: float = 0.33,
+            temp: float = None,
             on_log: Callable[[str], None] = lambda x: None,
+            top_p: float = None,
+            frequency_penalty: float = None,
+            presence_penalty: float = None,
+            max_tokens: int = None,
+            timeout: int = None,
     ):
         # Отложенный импорт для разрыва цикла agent ↔ sub_agent
         from agent import LLMAgent
@@ -41,8 +47,8 @@ class SubAgent:
 
         self._agent = LLMAgent(
             system_prompt=system_prompt,
-            temp=temp,
-            timeout=60,
+            temp=temp if temp is not None else Config.TEMP,
+            timeout=timeout if timeout is not None else 60,
             tools_config=tools_config,
             external_plugins=safe_plugins,
             on_render=lambda msg: None,
@@ -50,6 +56,10 @@ class SubAgent:
             on_system_msg=on_log,
             max_context_tokens=max_context_tokens,
             _create_judge=False,  # <-- предотвращает рекурсию
+            top_p=top_p if top_p is not None else Config.TOP_P,
+            frequency_penalty=frequency_penalty if frequency_penalty is not None else Config.FREQUENCY_PENALTY,
+            presence_penalty=presence_penalty if presence_penalty is not None else Config.PRESENCE_PENALTY,
+            max_tokens=max_tokens if max_tokens is not None else Config.MAX_TOKENS,
         )
         self._agent.token_tracker = self._own_tracker
 
