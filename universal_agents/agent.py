@@ -18,7 +18,7 @@ class LLMAgent:
     def __init__(
         self,
         system_prompt: str = "You are a helpful assistant",
-        temp: float = 0.3,
+        temp: float = 0.45,
         timeout: int = 1800,
         tools_config: Union[list[str], dict, None] = None,
         on_render: Callable = lambda x: None,
@@ -89,7 +89,7 @@ class LLMAgent:
         result = f"'{name}' {desc}"
         return result
 
-    def load_tool(self, name: str) -> str:
+    def load_tools(self, name: str) -> str:
         """Enable a previously disabled tool by name."""
         from universal_agents.tool_registry import load_external_plugins
         if name in self._all_tools:
@@ -101,7 +101,7 @@ class LLMAgent:
         if name in external_tools:
             self._all_tools[name] = self._build_tool_dict(external_tools[name], is_instance_method=False)
 
-            non_core = [n for n in self._all_tools if n not in ("load_tool", "disable_tool", "tool_description")]
+            non_core = [n for n in self._all_tools if n not in ("load_tools", "disable_tool", "tool_description")]
             if len(non_core) >= 1 and "disable_tool" not in self._all_tools and "disable_tool" in external_tools:
                 self._all_tools["disable_tool"] = self._build_tool_dict(external_tools["disable_tool"], is_instance_method=False)
 
@@ -115,12 +115,12 @@ class LLMAgent:
         if name not in self._all_tools:
             return f"Tool '{name}' is not currently enabled."
 
-        if name in ("load_tool", "disable_tool", "get_messages", "tool_description"):
+        if name in ("load_tools", "disable_tool", "get_messages", "tool_description"):
             return f"Cannot disable built-in tool '{name}'."
 
         del self._all_tools[name]
 
-        non_core = [n for n in self._all_tools if n not in ("load_tool", "disable_tool", "tool_description")]
+        non_core = [n for n in self._all_tools if n not in ("load_tools", "disable_tool", "tool_description")]
         if len(non_core) == 0 and "disable_tool" in self._all_tools:
             del self._all_tools["disable_tool"]
 
@@ -135,7 +135,7 @@ class LLMAgent:
         external_tools = load_external_plugins(tools_dir)
         enabled = set(self._all_tools.keys())
         available = set(external_tools.keys()) - enabled
-        lines = ["=== AVAILABLE TO ENABLE TOOLS ==="] + sorted(available)
+        lines = ["TOOLS TO LOAD:\n"] + sorted(available)
         return "\n".join(lines)
 
     # --------------------------------------------------------
@@ -181,7 +181,7 @@ class LLMAgent:
 
             tool_info = self._all_tools.get(name)
             if not tool_info:
-                results.append(ToolResult.error(tc.id, name, f"Unknown tool '{name}'"))
+                results.append(ToolResult.error(tc.id, name, f"Unknown tool '{name}'. It's probably misspelled or must be loaded first."))
                 continue
 
             args_dict = None

@@ -5,17 +5,17 @@ from universal_agents.tool import ENVIRONMENT_PREFIX
 
 if __name__ == "__main__":
     all_tools = load_external_plugins("tools")
-    startup_tools = {n: f for n, f in all_tools.items() if n in ("load_tool", "tool_description")}
+    startup_tools = {n: f for n, f in all_tools.items() if n in ("load_tools", "tool_description")}
     print(f"Loaded external tools: {list(startup_tools.keys())}")
-    print("Use load_tool to load additional tools dynamically.")
+    print("Use load_tools to load additional tools dynamically.")
 
     sys_prompt = (
-        "* You are assistant that can call tools. Speak Russian.\n"
-        "* You're launched in a special environment.\n"
-        f"{ENVIRONMENT_PREFIX} prefix means the system outputs something, it's not what user said.\n"
-        f"When remaining tokens amount is about equal to spent tokens, it's time to start cleaning up your context. "
-        f"You can compress or delete some messages to free some more tokens to continue working. Avoid calling any tool twice in a row. "
-        f"You can call only 1 tool at a turn. So you must wait for the tool results before making any next call."
+        "* You are a Russian speaking tool calling AI-assistant.\n"
+        "* You're launched in a special program environment to be able to use tools.\n"
+        f"{ENVIRONMENT_PREFIX} prefix means the system output, it's not what user says.\n"
+        "* If the user asks you to do something that requires tools you load the right tool first.\n"
+        "* Avoid calling same tool with same arguments twice in a row. You can call only 1 tool at a turn. "
+        "So you must wait for the tool results before making next calls."
     )
 
     agent = LLMAgent(

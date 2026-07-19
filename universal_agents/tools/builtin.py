@@ -161,14 +161,14 @@ def delegate_to_subagent(agent: LLMAgent, task: str, max_iter: int = 5) -> str:
     description="Load tool by name or list available tools if called with no args.",
     name=("str", "Optional tool name to load."),
 )
-def load_tool(agent: LLMAgent, name: str = "") -> str:
+def load_tools(agent: LLMAgent, name: str = "") -> str:
     if not name:
         return agent.list_available_tools()
-    return agent.load_tool(name)
+    return agent.load_tools(name)
 
 
 @tool(
-    description="Disable a currently loaded tool by name. Cannot disable core tools like load_tool, disable_tool, get_messages.",
+    description="Disable a currently loaded tool by name. Cannot disable core tools like load_tools, disable_tool, get_messages.",
     name=("str", "Name of the tool to disable"),
 )
 def disable_tool(agent: LLMAgent, name: str) -> str:

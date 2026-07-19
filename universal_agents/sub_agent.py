@@ -19,7 +19,7 @@ class SubAgent:
             external_plugins: Optional[dict] = None,
             safe_only: bool = True,
             max_iter: int = 5,
-            temp: float = 0.2,
+            temp: float = 0.33,
             on_log: Callable[[str], None] = lambda x: None,
     ):
         # Отложенный импорт для разрыва цикла agent ↔ sub_agent
