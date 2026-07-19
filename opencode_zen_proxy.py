@@ -6,9 +6,12 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 
+LOG_ENABLED = False
 LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "zen_proxy_log.txt")
 
 def _log(msg):
+    if not LOG_ENABLED:
+        return
     line = f"{msg}\n"
     print(line, end="")
     with open(LOG_FILE, "a", encoding="utf-8") as f:
