@@ -11,3 +11,7 @@ class Config:
     PRESENCE_PENALTY = 0.0
     MAX_TOKENS = 12000
     TIMEOUT = 1800
+    
+    # Streaming
+    STREAM_ENABLED = True  # Включить streaming по умолчанию
+    STREAM_CHUNK_DELAY = 0.0  # Задержка между чанками (для демонстрации)

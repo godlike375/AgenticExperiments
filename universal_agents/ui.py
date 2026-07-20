@@ -12,7 +12,7 @@ class ConsoleUI:
         elif isinstance(msg, UserMessage):
             print(f"\n👤 User: {msg.content}")
         elif isinstance(msg, AssistantMessage):
-            if msg.content.strip():
+            if msg.content and msg.content.strip() and not getattr(msg, '_streamed', False):
                 print('\n' + '=' * 15)
                 print(f"🤖 Agent: {msg.content}")
                 print('=' * 15)
@@ -41,6 +41,22 @@ class ConsoleUI:
 
         resp = input("Execute? (y/n): ").strip().lower()
         return resp == 'y'
+    
+    @staticmethod
+    def start_stream():
+        """Начало streaming вывода"""
+        print('\n' + '=' * 15)
+        print("🤖 Agent: ", end="", flush=True)
+    
+    @staticmethod
+    def stream_chunk(chunk: str):
+        """Вывод чанка streaming"""
+        print(chunk, end="", flush=True)
+    
+    @staticmethod
+    def end_stream():
+        """Завершение streaming вывода"""
+        print('\n' + '=' * 15)
 
 class CLI:
     def __init__(self, agent: LLMAgent):

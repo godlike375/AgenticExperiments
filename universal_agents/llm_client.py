@@ -136,3 +136,44 @@ class LLMClient:
             return msg, None, usage
         except Exception as e:
             return None, str(e), None
+
+
+    @staticmethod
+    def stream(
+        messages: list[dict],
+        temp: float = None,
+        timeout: int = None,
+        tools: list[dict] = None,
+        prefill: str = None,
+        top_p: float = None,
+        frequency_penalty: float = None,
+        presence_penalty: float = None,
+        max_tokens: int = None,
+    ):
+        """Streaming version of call() - returns generator of chunks"""
+        messages_to_send = list(messages)
+        if prefill:
+            messages_to_send.append({"role": "assistant", "content": prefill})
+        
+        try:
+            stream = LLMClient.get_client().chat.completions.create(
+                model=Config.MODEL_NAME,
+                messages=messages_to_send,
+                temperature=temp if temp is not None else Config.TEMP,
+                max_tokens=max_tokens if max_tokens is not None else Config.MAX_TOKENS,
+                tools=tools,
+                parallel_tool_calls=False,
+                timeout=timeout if timeout is not None else Config.TIMEOUT,
+                reasoning_effort="none",
+                frequency_penalty=frequency_penalty if frequency_penalty is not None else Config.FREQUENCY_PENALTY,
+                presence_penalty=presence_penalty if presence_penalty is not None else Config.PRESENCE_PENALTY,
+                top_p=top_p if top_p is not None else Config.TOP_P,
+                stream=True,
+                stream_options={"include_usage": True},
+            )
+            return stream
+        except Exception as e:
+            # Для streaming ошибки возвращаем генератор с ошибкой
+            def error_generator():
+                yield {"error": str(e)}
+            return error_generator()

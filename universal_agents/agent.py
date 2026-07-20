@@ -31,6 +31,10 @@ class LLMAgent:
         frequency_penalty: float = None,
         presence_penalty: float = None,
         max_tokens: int = None,
+        on_stream_chunk: Callable[[str], None] = None,
+        on_stream_start: Callable[[], None] = None,
+        on_stream_end: Callable[[], None] = None,
+        streaming_enabled: bool = None,
     ):
         self.history = ChatHistory(system_prompt)
         self.temp = temp if temp is not None else Config.TEMP
@@ -53,6 +57,10 @@ class LLMAgent:
         self.loop_detector = LoopDetector()
         self._temp_boost_active = False
         self._original_temp = temp
+        self.on_stream_chunk = on_stream_chunk
+        self.on_stream_start = on_stream_start
+        self.on_stream_end = on_stream_end
+        self.streaming_enabled = streaming_enabled if streaming_enabled is not None else Config.STREAM_ENABLED
 
     # --------------------------------------------------------
     # Фильтрация инструментов
@@ -233,13 +241,150 @@ class LLMAgent:
         tool_calls = []
         if msg_obj.tool_calls:
             for tc in msg_obj.tool_calls:
+                if hasattr(tc, 'function'):
+                    name = tc.function.name
+                    arguments = tc.function.arguments
+                else:
+                    name = tc.name
+                    arguments = tc.arguments
                 tool_calls.append(ToolCall(
                     id=tc.id,
-                    name=tc.function.name,
-                    arguments=tc.function.arguments,
+                    name=name,
+                    arguments=arguments,
                 ))
-        return AssistantMessage(content=clean_content, tool_calls=tool_calls)
+        result = AssistantMessage(content=clean_content, tool_calls=tool_calls)
+        result._streamed = getattr(msg_obj, '_streamed', False)
+        return result
 
+    def _call_with_streaming(
+        self,
+        messages: list[dict],
+        temp: float,
+        prefill: str = None,
+        tools: list[dict] = None,
+        top_p: float = None,
+        frequency_penalty: float = None,
+        presence_penalty: float = None,
+        max_tokens: int = None,
+    ) -> tuple:
+        """
+        Вызов LLM с streaming для текста.
+        Возвращает (message_obj, error, usage) как обычный LLMClient.call().
+        """
+        try:
+            stream = LLMClient.stream(
+                messages,
+                temp=temp,
+                timeout=self.timeout,
+                tools=tools,
+                prefill=prefill,
+                top_p=top_p,
+                frequency_penalty=frequency_penalty,
+                presence_penalty=presence_penalty,
+                max_tokens=max_tokens,
+            )
+            
+            full_content = ""
+            tool_calls_data = {}
+            usage = None
+            finish_reason = None
+            
+            # Проверяем, не вернулся ли генератор ошибки
+            first_chunk = next(stream)
+            if isinstance(first_chunk, dict) and "error" in first_chunk:
+                return None, first_chunk["error"], None
+            
+            if self.on_stream_start:
+                self.on_stream_start()
+            
+            # Обрабатываем первый чанк
+            self._process_stream_chunk(first_chunk, tool_calls_data)
+            if first_chunk.usage:
+                usage = {
+                    "prompt_tokens": first_chunk.usage.prompt_tokens,
+                    "completion_tokens": first_chunk.usage.completion_tokens,
+                    "total_tokens": first_chunk.usage.total_tokens
+                }
+            if first_chunk.choices:
+                finish_reason = first_chunk.choices[0].finish_reason
+                if first_chunk.choices[0].delta.content:
+                    full_content += first_chunk.choices[0].delta.content
+                    if self.on_stream_chunk:
+                        self.on_stream_chunk(first_chunk.choices[0].delta.content)
+            
+            # Обрабатываем остальные чанки
+            for chunk in stream:
+                self._process_stream_chunk(chunk, tool_calls_data)
+                if chunk.usage:
+                    usage = {
+                        "prompt_tokens": chunk.usage.prompt_tokens,
+                        "completion_tokens": chunk.usage.completion_tokens,
+                        "total_tokens": chunk.usage.total_tokens
+                    }
+                if chunk.choices:
+                    finish_reason = chunk.choices[0].finish_reason
+                    if chunk.choices[0].delta.content:
+                        full_content += chunk.choices[0].delta.content
+                        if self.on_stream_chunk:
+                            self.on_stream_chunk(chunk.choices[0].delta.content)
+            
+            if self.on_stream_end:
+                self.on_stream_end()
+            
+            # Формируем message_obj
+            tool_calls = []
+            if tool_calls_data:
+                for tc_data in tool_calls_data.values():
+                    tool_calls.append(ToolCall(
+                        id=tc_data["id"],
+                        name=tc_data["function"]["name"],
+                        arguments=tc_data["function"]["arguments"]
+                    ))
+            
+            message_obj = AssistantMessage(
+                content=full_content,
+                tool_calls=tool_calls,
+            )
+            message_obj._streamed = True
+            
+            # Обработка prefill (как в обычном режиме)
+            if prefill and message_obj.content and not message_obj.content.startswith(prefill):
+                message_obj.content = prefill + message_obj.content
+            
+            return message_obj, None, usage
+            
+        except Exception as e:
+            return None, str(e), None
+    
+    def _process_stream_chunk(self, chunk, tool_calls_data: dict):
+        """Обработка чанка для сбора tool calls"""
+        if not chunk.choices:
+            return
+            
+        delta = chunk.choices[0].delta
+        if not delta.tool_calls:
+            return
+            
+        for tc in delta.tool_calls:
+            idx = tc.index
+            if idx not in tool_calls_data:
+                tool_calls_data[idx] = {
+                    "id": tc.id or "",
+                    "type": "function",
+                    "function": {
+                        "name": tc.function.name if tc.function and tc.function.name else "",
+                        "arguments": tc.function.arguments if tc.function and tc.function.arguments else ""
+                    }
+                }
+            else:
+                if tc.id:
+                    tool_calls_data[idx]["id"] = tc.id
+                if tc.function:
+                    if tc.function.name:
+                        tool_calls_data[idx]["function"]["name"] += tc.function.name
+                    if tc.function.arguments:
+                        tool_calls_data[idx]["function"]["arguments"] += tc.function.arguments
+    
     def _process_llm_response(self, message_obj) -> tuple[str, bool]:
         if not message_obj:
             return "Empty response", True
@@ -433,15 +578,27 @@ class LLMAgent:
                         last_msg = active_messages[-1]
                         last_msg["content"] = (last_msg.get("content") or "") + warning_text
 
-                message_obj, err, usage = LLMClient.call(
-                    active_messages, current_temp, self.timeout,
-                    tools=self.tools if self.tools else None,
-                    prefill=step_prefill,
-                    top_p=self.top_p,
-                    frequency_penalty=self.frequency_penalty,
-                    presence_penalty=self.presence_penalty,
-                    max_tokens=self.max_tokens,
-                )
+                # Streaming или обычный режим
+                if self.streaming_enabled and self.on_stream_chunk:
+                    message_obj, err, usage = self._call_with_streaming(
+                        active_messages, current_temp, step_prefill,
+                        tools=self.tools if self.tools else None,
+                        top_p=self.top_p,
+                        frequency_penalty=self.frequency_penalty,
+                        presence_penalty=self.presence_penalty,
+                        max_tokens=self.max_tokens,
+                    )
+                else:
+                    message_obj, err, usage = LLMClient.call(
+                        active_messages, current_temp, self.timeout,
+                        tools=self.tools if self.tools else None,
+                        prefill=step_prefill,
+                        top_p=self.top_p,
+                        frequency_penalty=self.frequency_penalty,
+                        presence_penalty=self.presence_penalty,
+                        max_tokens=self.max_tokens,
+                    )
+                
                 if usage:
                     self.token_tracker.update_from_usage(usage)
                 if err:
@@ -457,8 +614,8 @@ class LLMAgent:
                     has_duplicate = False
                     current_history = self.history.get_all()
                     for tc in message_obj.tool_calls:
-                        tc_name = tc.function.name
-                        tc_args = tc.function.arguments
+                        tc_name = tc.name
+                        tc_args = tc.arguments
                         if self.loop_detector.check_duplicate_in_turn(tc_name, tc_args, current_history):
                             has_duplicate = True
                             last_duplicate_info = (tc_name, tc_args)
