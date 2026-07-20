@@ -2,10 +2,10 @@ class Config:
     API_URL = "http://localhost:1234/v1"
     MODEL_NAME = ""
     AFTER_SYSTEM_PROMPT = 1  # Index after which dialog starts (0 = system)
-    BOOST_TEMP = 1.1
+    BOOST_TEMP = 2
 
     # Параметры генерации
-    TEMP = 0.45
+    TEMP = 0.5
     TOP_P = 1.0
     FREQUENCY_PENALTY = 0.0
     PRESENCE_PENALTY = 0.0

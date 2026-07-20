@@ -87,7 +87,7 @@ class LLMAgent:
         tools_dir = os.path.join(os.path.dirname(__file__), "tools")
         external_tools = load_external_plugins(tools_dir)
         if name not in external_tools:
-            raise ValueError(f"Tool '{name}' not found. Check loadable tools.")
+            raise ValueError(f"'{name}' does not exist. Try load_tools.")
 
         func = external_tools[name]
         schema = func._tool_schema
@@ -101,7 +101,7 @@ class LLMAgent:
         """Enable a previously disabled tool by name."""
         from universal_agents.tool_registry import load_external_plugins
         if name in self._all_tools:
-            return f"Tool '{name}' is already enabled."
+            return f"'{name}' is already loaded."
 
         import os
         tools_dir = os.path.join(os.path.dirname(__file__), "tools")
@@ -116,14 +116,16 @@ class LLMAgent:
                 self._all_tools["tool_description"] = self._build_tool_dict(external_tools["tool_description"], is_instance_method=False)
 
             self._refresh_tools_list()
-            return f"Tool '{name}' loaded."
+            if "tool_description" not in self._all_tools:
+                self.load_tools("tool_description")
+            return f"'{name}' loaded."
 
-        return f"Tool '{name}' not found. Check loadable tools."
+        return f"'{name}' not found in loadable tools"
 
     def disable_tool(self, name: str) -> str:
         """Disable a tool by name, removing it from available tools."""
         if name not in self._all_tools:
-            return f"Tool '{name}' is not currently enabled."
+            return f"Tool '{name}' is not loaded yet."
 
         if name in ("load_tools", "disable_tool", "get_messages", "tool_description"):
             return f"Cannot disable built-in tool '{name}'."
@@ -135,7 +137,7 @@ class LLMAgent:
             del self._all_tools["disable_tool"]
 
         self._refresh_tools_list()
-        return f"Tool '{name}' disabled successfully."
+        return f"'{name}' disabled successfully."
 
     def list_available_tools(self) -> str:
         """List all available (loadable) tools from plugins directory."""
@@ -218,7 +220,7 @@ class LLMAgent:
                 auto_compress_tool_result(self, tr)
                 results.append(tr)
             except Exception as e:
-                self.on_system_msg(f"[ERROR] Tool '{name}' FAILED: {e}")
+                self.on_system_msg(f"⚠️ [ERROR] Tool '{name}' FAILED: {e}")
                 results.append(ToolResult.error(tc.id, name, str(e)))
 
         return results
@@ -270,8 +272,7 @@ class LLMAgent:
                     message_obj.tool_calls = [tc for tc in message_obj.tool_calls if tc.id == chosen_tc.id]
 
         if not clean_content and not assistant_msg.has_tool_calls():
-            self.on_system_msg("[EMPTY RESPONSE] Model returned no content. Discarding and retrying with temp boost...")
-            self._temp_boost_active = True
+            self.on_system_msg("[EMPTY RESPONSE] Model returned no content. Discarding and retrying...")
             return clean_content, True
 
         self.history.add(assistant_msg)
@@ -349,7 +350,7 @@ class LLMAgent:
         if usage:
             self.token_tracker.update_from_usage(usage)
         if err or not msg_obj:
-            error = f"API Error during synthesis: {err}"
+            error = f"⚠️ API Error during synthesis: {err}"
             self.on_system_msg(error)
             return error
 
@@ -480,7 +481,7 @@ class LLMAgent:
 
             if api_error_occurred or not message_obj:
                 self.history.normalize(is_error_recovery=True)
-                self.on_system_msg("[RECOVERY] API error occurred. Role sequence restored. Handing control to user.")
+                self.on_system_msg("⚠️ [RECOVERY] API error occurred. Role sequence restored. Handing control to user.")
                 return
 
             result_text, tool_error_occurred = self._process_llm_response(message_obj)
@@ -493,7 +494,7 @@ class LLMAgent:
             if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
                 self.history.normalize(is_error_recovery=True)
                 self.on_system_msg(
-                    f"[LIMIT REACHED] {MAX_CONSECUTIVE_ERRORS} consecutive tool errors. Handing control to user."
+                    f"⚠️ [LIMIT REACHED] {MAX_CONSECUTIVE_ERRORS} consecutive tool errors. Handing control to user."
                 )
                 return
 

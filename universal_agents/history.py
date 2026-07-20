@@ -128,7 +128,7 @@ class ChatHistory:
         with open(path, 'r', encoding='utf-8') as f:
             data = json.load(f)
         if not isinstance(data, list) or not data:
-            raise ValueError(f"{ENVIRONMENT_PREFIX} Invalid history format")
+            raise ValueError(f"⚠️ {ENVIRONMENT_PREFIX} Invalid history format")
         self._messages = []
         for d in data:
             role = d.get("role")
