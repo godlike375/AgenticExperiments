@@ -19,7 +19,7 @@ class SubAgent:
             tools_config: Union[list[str], dict, None] = None,
             external_plugins: Optional[dict] = None,
             safe_only: bool = True,
-            max_iter: int = 5,
+            max_iter: int = None,
             temp: float = None,
             on_log: Callable[[str], None] = lambda x: None,
             top_p: float = None,
@@ -31,7 +31,7 @@ class SubAgent:
         # Отложенный импорт для разрыва цикла agent ↔ sub_agent
         from agent import LLMAgent
 
-        self._max_iter = max_iter
+        self._max_iter = max_iter if max_iter is not None else Config.MAX_ITER
         self._on_log = on_log
 
         # Фильтрация опасных инструментов

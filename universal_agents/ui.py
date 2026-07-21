@@ -81,7 +81,7 @@ class CLI:
             ConsoleUI.system_msg("Cannot find a preceding user message to regenerate")
             return
         ConsoleUI.system_msg(f"Regenerating response for: '{user_msg}'")
-        self.agent.chat(user_msg, max_iter=5, prefill=self.pending_prefill)
+        self.agent.chat(user_msg, prefill=self.pending_prefill)
 
     def cmd_prefill(self, parts: list[str]):
         if len(parts) > 1:
@@ -155,4 +155,4 @@ class CLI:
                 if handler: handler(parts)
                 else: ConsoleUI.system_msg(f"Unknown command: {parts[0]}")
                 continue
-            self.agent.chat(inp, max_iter=10, prefill=self.pending_prefill)
+            self.agent.chat(inp, prefill=self.pending_prefill)

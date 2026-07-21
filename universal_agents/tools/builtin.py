@@ -120,9 +120,9 @@ def summarize_messages(agent: LLMAgent, start_id: int, end_id: int = -1) -> str:
                 "Include necessary context for execution in task description. "
                 "The tool returns only the final result of a task.",
     task=("str", "Clear task description with all necessary context"),
-    max_iter=("int", "Optional max tool calls for sub-agent (default 5)"),
+    max_iter=("int", "Optional max tool calls for sub-agent"),
 )
-def delegate_to_subagent(agent: LLMAgent, task: str, max_iter: int = 5) -> str:
+def delegate_to_subagent(agent: LLMAgent, task: str, max_iter: int = None) -> str:
     sub_plugins = {}
     for name, tool_info in agent._all_tools.items():
         if name == "delegate_to_subagent":

@@ -82,6 +82,10 @@ class LLMAgent:
         """Refresh the tools list sent to the API from _all_tools."""
         self.tools = [v['schema'] for v in self._all_tools.values()]
 
+    def _emit_token_info(self):
+        if self.token_tracker.last_usage:
+            self.on_system_msg(self.token_tracker.format_user_token_info())
+
     def tool_description(self, name: str) -> str:
         """Get the description of a tool from disk without enabling it."""
         from universal_agents.tool_registry import load_external_plugins
@@ -422,6 +426,7 @@ class LLMAgent:
 
         self.history.add(assistant_msg)
         self.on_render(assistant_msg)
+        self._emit_token_info()
 
         if not assistant_msg.has_tool_calls():
             return clean_content, False
@@ -430,6 +435,7 @@ class LLMAgent:
         self.history.extend(tool_results)
         for tr in tool_results:
             self.on_render(tr)
+            self._emit_token_info()
         prune_all_failed_tool_calls_except_last(self)
 
         tool_error_occurred = any(tr.is_error and not tr.is_user_denied for tr in tool_results)
@@ -503,14 +509,17 @@ class LLMAgent:
         if not msg_obj.tool_calls:
             self.history.add(assistant_msg)
             self.on_render(assistant_msg)
+            self._emit_token_info()
             return msg_obj.content
 
         tool_results = self._execute_tools(assistant_msg.tool_calls)
         self.history.add(assistant_msg)
         self.on_render(assistant_msg)
+        self._emit_token_info()
         self.history.extend(tool_results)
         for tr in tool_results:
             self.on_render(tr)
+            self._emit_token_info()
 
         followup_dicts = (
             synthesis_messages
@@ -533,12 +542,14 @@ class LLMAgent:
         final_assistant_msg = self._build_assistant_msg(final_obj, final_content)
         self.history.add(final_assistant_msg)
         self.on_render(final_assistant_msg)
+        self._emit_token_info()
         return final_content
 
     # --------------------------------------------------------
     # Главный цикл
     # --------------------------------------------------------
-    def chat(self, message: str, max_iter: int = 5, prefill: str = None):
+    def chat(self, message: str, max_iter: int = None, prefill: str = None):
+        max_iter = max_iter if max_iter is not None else Config.MAX_ITER
         if self.self_consistency_mode:
             return self._chat_self_consistent(message, prefill)
 

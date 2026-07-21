@@ -48,6 +48,14 @@ class TokenUsageTracker:
         """Закрывающая часть заголовка."""
         return f" ===>>\n\n"
 
+    def format_user_token_info(self) -> str:
+        """Информация о токенах для отображения пользователю."""
+        if not self.last_usage:
+            return ""
+        total = self.last_usage.get("prompt_tokens", 0)
+        remaining = self.max_context_tokens - total
+        return f"Tokens spent: {total} (Remaining: {remaining})"
+
 class LoopDetector:
     def __init__(self):
         self.threshold = 1

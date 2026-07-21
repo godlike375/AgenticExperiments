@@ -11,6 +11,7 @@ class Config:
     PRESENCE_PENALTY = 0.0
     MAX_TOKENS = 12000
     TIMEOUT = 1800
+    MAX_ITER = 20
     
     # Streaming
     STREAM_ENABLED = True  # Включить streaming по умолчанию
