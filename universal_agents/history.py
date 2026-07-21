@@ -54,6 +54,13 @@ class ChatHistory:
         if safe_start > safe_end:
             return f"{ENVIRONMENT_PREFIX} Nothing to delete"
         del self._messages[safe_start:safe_end + 1]
+        
+        has_user_message = any(isinstance(m, UserMessage) for m in self._messages)
+        if not has_user_message:
+            self._messages.append(UserMessage(
+                content=f"{ENVIRONMENT_PREFIX} All user messages were deleted. Shortly introduce yourself in Russian."
+            ))
+        
         return f'{ENVIRONMENT_PREFIX} Successfully deleted messages {start_id} - {end_id}'
 
     def edit_message(self, idx: int, new_text: str, old_text: str = '') -> str:
