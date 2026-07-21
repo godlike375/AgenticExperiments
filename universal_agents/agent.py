@@ -61,6 +61,7 @@ class LLMAgent:
         self.on_stream_start = on_stream_start
         self.on_stream_end = on_stream_end
         self.streaming_enabled = streaming_enabled if streaming_enabled is not None else Config.STREAM_ENABLED
+        self._tool_usage: dict[str, int] = {}
 
     # --------------------------------------------------------
     # Фильтрация инструментов
@@ -83,8 +84,24 @@ class LLMAgent:
         self.tools = [v['schema'] for v in self._all_tools.values()]
 
     def _emit_token_info(self):
+        parts = []
         if self.token_tracker.last_usage:
-            self.on_system_msg(self.token_tracker.format_user_token_info())
+            parts.append(self.token_tracker.format_user_token_info())
+        if self._tool_usage:
+            parts.append(self._format_tool_stats())
+        if parts:
+            self.on_system_msg(" | ".join(parts))
+
+    def _format_tool_stats(self) -> str:
+        total = sum(self._tool_usage.values())
+        items = " · ".join(f"{name} ×{count}" for name, count in sorted(self._tool_usage.items(), key=lambda x: -x[1]))
+        return f"Tools: {items} ({total} total)"
+
+    def rebuild_tool_usage(self):
+        self._tool_usage.clear()
+        for msg in self.history.get_all():
+            if isinstance(msg, ToolResult) and not msg.is_error and not msg.is_user_denied:
+                self._tool_usage[msg.name] = self._tool_usage.get(msg.name, 0) + 1
 
     def tool_description(self, name: str) -> str:
         """Get the description of a tool from disk without enabling it."""
@@ -190,6 +207,7 @@ class LLMAgent:
 
         for tc in tool_calls:
             name = tc.name
+            self._tool_usage[name] = self._tool_usage.get(name, 0) + 1
             args_str = tc.arguments or "{}"
 
             if self.loop_detector.check_duplicate_in_turn(name, args_str, history_before_current_turn):
@@ -625,8 +643,12 @@ class LLMAgent:
                     has_duplicate = False
                     current_history = self.history.get_all()
                     for tc in message_obj.tool_calls:
-                        tc_name = tc.name
-                        tc_args = tc.arguments
+                        if hasattr(tc, 'function'):
+                            tc_name = tc.function.name
+                            tc_args = tc.function.arguments
+                        else:
+                            tc_name = tc.name
+                            tc_args = tc.arguments
                         if self.loop_detector.check_duplicate_in_turn(tc_name, tc_args, current_history):
                             has_duplicate = True
                             last_duplicate_info = (tc_name, tc_args)

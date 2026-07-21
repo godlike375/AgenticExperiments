@@ -106,6 +106,7 @@ class CLI:
             return
         try:
             self.agent.history.load(filename)
+            self.agent.rebuild_tool_usage()
             ConsoleUI.system_msg(f"History loaded. Total messages: {len(self.agent.history)}")
             print("\n" + "="*40 + "\n🔄 LOADED HISTORY:\n" + "="*40)
             for msg in self.agent.history.get_all():

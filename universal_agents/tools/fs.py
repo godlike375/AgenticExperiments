@@ -193,7 +193,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from universal_agents.sub_agent import SubAgent
 
-CHARS_PER_TOKEN = 2.5
+CHARS_PER_TOKEN = 2.6
 
 MIN_TOKENS_TO_SUMMARIZE = 1500
 _SUMMARY_THRESHOLD = int(MIN_TOKENS_TO_SUMMARIZE * CHARS_PER_TOKEN)

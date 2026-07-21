@@ -17,8 +17,8 @@ class TokenUsageTracker:
 
     @staticmethod
     def estimate_tokens(text: str) -> int:
-        """Грубая оценка токенов: символы / 2.5"""
-        return int(len(text) / 2.5)
+        """Грубая оценка токенов: символы / 2.6"""
+        return int(len(text) / 2.6)
 
     def get_total_context_tokens(self, first_system_message: str = "", last_user_content: str = "") -> int:
         known = self.estimate_tokens(first_system_message)

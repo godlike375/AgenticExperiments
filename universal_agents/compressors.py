@@ -116,7 +116,7 @@ def chunk_and_summarize_large_text(agent: LLMAgent, text: str, tool_name: str, t
 
     token_limit = agent.token_tracker.max_context_tokens
     token_chunk_size = max(int(token_limit / 3.5), 3000)
-    chunk_size = int(token_chunk_size * 2.5)
+    chunk_size = int(token_chunk_size * 2.6)
 
     chunks = []
     pos = 0
