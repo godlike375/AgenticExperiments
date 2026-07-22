@@ -149,11 +149,11 @@ class LLMAgent:
         external_tools = load_external_plugins(tools_dir)
         enabled = set(self._all_tools.keys())
         available = set(external_tools.keys()) - enabled
-        lines = ["TOOLS TO LOAD:\n"]
+        lines = ["LOADABLE TOOLS:\n"]
         for name in sorted(available):
             func = external_tools[name]
             desc = getattr(func, '_short_description', '')
-            lines.append(f"{name} - {desc}" if desc else name)
+            lines.append(f'"{name}" ({desc});' if desc else name)
         return "\n".join(lines)
 
     # --------------------------------------------------------

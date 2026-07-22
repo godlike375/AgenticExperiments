@@ -36,17 +36,17 @@ class TokenUsageTracker:
     def format_timestamp_header(self, msg) -> str:
         """Метка времени из timestamp сообщения."""
         ts = msg.timestamp.strftime("%Y-%m-%d %H:%M:%S")
-        return f"<<{ENVIRONMENT_PREFIX} === [{ts}]"
+        return '{'+f"{ENVIRONMENT_PREFIX}:\n{ts} \n"
 
     def format_token_header(self, first_system_message: str = "", last_user_content: str = "") -> str:
         """Только информация о токенах (с учётом последнего сообщения)."""
         total = self.get_total_context_tokens(first_system_message, last_user_content)
         remaining = self.max_context_tokens - total
-        return f" | Tokens spent: {total} (Remaining: {remaining})"
+        return f"Memory remaining: {remaining} tokens"
 
     def format_closing_header(self) -> str:
         """Закрывающая часть заголовка."""
-        return f" ===>>\n\n"
+        return " }\n\n"
 
     def format_user_token_info(self) -> str:
         """Информация о токенах для отображения пользователю."""
