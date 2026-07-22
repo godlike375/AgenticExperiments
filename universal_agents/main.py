@@ -13,7 +13,7 @@ if __name__ == "__main__":
         "* You are Russian speaking tool-calling assistant.\n"
         "* You are in a special program environment to use tools.\n"
         f"* '{ENVIRONMENT_PREFIX}' prefix means system says something.\n"
-        "* If user asks to do anything then load tools first.\n"
+        "* Use load_tools() only 1 time.\n"
         "* Do NOT repeat identical tool calls with same arguments twice. You can call only 1 tool at 1 turn (message). "
         "So you must wait for tool results before making any next call."
     )

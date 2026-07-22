@@ -5,8 +5,8 @@ class Config:
     BOOST_TEMP = 2
 
     # Параметры генерации
-    TEMP = 0.5
-    TOP_P = 1.0
+    TEMP = 0.575
+    TOP_P = 0.98
     FREQUENCY_PENALTY = 0.0
     PRESENCE_PENALTY = 0.0
     MAX_TOKENS = 12000
