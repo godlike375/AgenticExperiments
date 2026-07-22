@@ -11,7 +11,7 @@ if TYPE_CHECKING:
 
 
 @tool(description="Get short indexed current history with ids",
-       short_description="show dialog history")
+       short_description="show history")
 def get_messages(agent: LLMAgent, chars_per_message: int = 30) -> str:
     history = agent.history
     if len(history) <= Config.AFTER_SYSTEM_PROMPT:
@@ -48,7 +48,7 @@ def get_messages(agent: LLMAgent, chars_per_message: int = 30) -> str:
 
 @tool(
     description="Edits a specific message in the history",
-    short_description="edit a history message",
+    short_description="edit history",
     requires_confirmation=True,
     id=("int", "ID of the message to edit"),
     old=("str", "Optional exact substr to replace. Empty str replaces whole text"),
@@ -60,7 +60,7 @@ def edit_message(agent: LLMAgent, id: int, new: str, old: str = '') -> str:
 
 @tool(
     description="Deletes a range of messages from dialog history",
-    short_description="delete history messages",
+    short_description="delete history",
     requires_confirmation=True,
     start_id=("int", "Starting message ID to delete"),
     end_id=("int", "Optional ending message ID (-1 for last)"),
@@ -72,7 +72,7 @@ def delete_messages(agent: LLMAgent, start_id: int, end_id: int = -1) -> str:
 @tool(
     description="Summarizes a range of dialog messages into a single concise UserMessage. "
                 "Use to free context tokens. Cannot summarize system prompt.",
-    short_description="compress dialog range",
+    short_description="compress dialog",
     requires_confirmation=True,
     start_id=("int", "Start index of messages to summarize"),
     end_id=("int", "End index (inclusive). Use -1 for last message"),
@@ -180,12 +180,3 @@ def load_tools(agent: LLMAgent, name: str = "") -> str:
 )
 def unload_tool(agent: LLMAgent, name: str) -> str:
     return agent.unload_tool(name)
-
-
-@tool(
-    description="Get the description of a tool by name for tools not yet loaded. Use this to understand what a tool does before deciding to load it.",
-    short_description="describe a tool",
-    name=("str", "Tool name to get description"),
-)
-def tool_description(agent: LLMAgent, name: str) -> str:
-    return agent.tool_description(name)

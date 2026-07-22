@@ -103,29 +103,6 @@ class LLMAgent:
             if isinstance(msg, ToolResult) and not msg.is_error and not msg.is_user_denied:
                 self._tool_usage[msg.name] = self._tool_usage.get(msg.name, 0) + 1
 
-    def tool_description(self, name: str) -> str:
-        """Get the description of a tool from disk without enabling it."""
-        from universal_agents.tool_registry import load_external_plugins
-        import os
-
-        if name in self._all_tools:
-            if len(self.history) > 0 and isinstance(self.history[-1], AssistantMessage) and self.history[-1].has_tool_calls():
-                self.history._messages.pop()
-            return ""
-
-        tools_dir = os.path.join(os.path.dirname(__file__), "tools")
-        external_tools = load_external_plugins(tools_dir)
-        if name not in external_tools:
-            raise ValueError(f"'{name}' does not exist. Try load_tools.")
-
-        func = external_tools[name]
-        schema = func._tool_schema
-        fn_info = schema.get("function", {})
-        desc = fn_info.get("description", "No description")
-
-        result = f"'{name}' {desc}"
-        return result
-
     def load_tools(self, name: str) -> str:
         """Enable a previously disabled tool by name."""
         from universal_agents.tool_registry import load_external_plugins
@@ -138,15 +115,11 @@ class LLMAgent:
         if name in external_tools:
             self._all_tools[name] = self._build_tool_dict(external_tools[name], is_instance_method=False)
 
-            non_core = [n for n in self._all_tools if n not in ("load_tools", "unload_tool", "tool_description")]
+            non_core = [n for n in self._all_tools if n not in ("load_tools", "unload_tool")]
             if len(non_core) >= 1 and "unload_tool" not in self._all_tools and "unload_tool" in external_tools:
                 self._all_tools["unload_tool"] = self._build_tool_dict(external_tools["unload_tool"], is_instance_method=False)
-            if "tool_description" not in self._all_tools and "tool_description" in external_tools:
-                self._all_tools["tool_description"] = self._build_tool_dict(external_tools["tool_description"], is_instance_method=False)
 
             self._refresh_tools_list()
-            if "tool_description" not in self._all_tools:
-                self.load_tools("tool_description")
             return f"'{name}' loaded."
 
         return f"'{name}' not found in loadable tools"
@@ -156,12 +129,12 @@ class LLMAgent:
         if name not in self._all_tools:
             return f"Tool '{name}' is not loaded yet."
 
-        if name in ("load_tools", "unload_tool", "get_messages", "tool_description"):
+        if name in ("load_tools", "unload_tool"):
             return f"Cannot disable built-in tool '{name}'."
 
         del self._all_tools[name]
 
-        non_core = [n for n in self._all_tools if n not in ("load_tools", "unload_tool", "tool_description")]
+        non_core = [n for n in self._all_tools if n not in ("load_tools", "unload_tool")]
         if len(non_core) == 0 and "unload_tool" in self._all_tools:
             del self._all_tools["unload_tool"]
 

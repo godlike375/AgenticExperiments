@@ -7,7 +7,7 @@ if __name__ == "__main__":
     all_tools = load_external_plugins("tools")
     startup_tools = {n: f for n, f in all_tools.items() if n == "load_tools"}
     print(f"Loaded startup tools: {list(startup_tools.keys())}")
-    print("Use load_tools to load tools and tool_description dynamically.")
+    print("Use load_tools to load tools dynamically.")
 
     sys_prompt = (
         "* You are Russian speaking tool-calling assistant.\n"
