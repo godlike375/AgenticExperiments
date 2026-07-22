@@ -28,7 +28,6 @@ if __name__ == "__main__":
         on_stream_chunk=ConsoleUI.stream_chunk,
         on_stream_start=ConsoleUI.start_stream,
         on_stream_end=ConsoleUI.end_stream,
-        max_context_tokens=50000
     )
 
     cli = CLI(agent)

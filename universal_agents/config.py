@@ -12,6 +12,7 @@ class Config:
     MAX_TOKENS = 12000
     TIMEOUT = 1800
     MAX_ITER = 20
+    MAX_CONTEXT_TOKENS = 66000
     
     # Streaming
     STREAM_ENABLED = True  # Включить streaming по умолчанию

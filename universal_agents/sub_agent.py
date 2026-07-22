@@ -15,7 +15,7 @@ class SubAgent:
     def __init__(
             self,
             system_prompt: str,
-            max_context_tokens: int = 8192,
+            max_context_tokens: int = None,
             tools_config: Union[list[str], dict, None] = None,
             external_plugins: Optional[dict] = None,
             safe_only: bool = True,
@@ -43,7 +43,8 @@ class SubAgent:
             }
 
         # Изолированный трекер: траты субагента НЕ влияют на бюджет основного агента
-        self._own_tracker = TokenUsageTracker(system_prompt, max_context_tokens)
+        effective_max_context_tokens = max_context_tokens if max_context_tokens is not None else Config.MAX_CONTEXT_TOKENS
+        self._own_tracker = TokenUsageTracker(system_prompt, effective_max_context_tokens)
 
         self._agent = LLMAgent(
             system_prompt=system_prompt,
@@ -54,7 +55,7 @@ class SubAgent:
             on_render=lambda msg: None,
             on_confirm=lambda n, a: True,
             on_system_msg=on_log,
-            max_context_tokens=max_context_tokens,
+            max_context_tokens=effective_max_context_tokens,
             _create_judge=False,  # <-- предотвращает рекурсию
             top_p=top_p if top_p is not None else Config.TOP_P,
             frequency_penalty=frequency_penalty if frequency_penalty is not None else Config.FREQUENCY_PENALTY,

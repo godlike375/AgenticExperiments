@@ -25,7 +25,7 @@ class LLMAgent:
         on_confirm: Callable[[str, dict], bool] = lambda n, a: True,
         on_system_msg: Callable[[str], None] = lambda x: None,
         external_plugins: dict[str, Callable] = None,
-        max_context_tokens: int = 16384,
+        max_context_tokens: int = None,
         _create_judge: bool = True,
         top_p: float = None,
         frequency_penalty: float = None,
@@ -48,7 +48,7 @@ class LLMAgent:
         self.on_system_msg = on_system_msg
         self.self_consistency_mode = False
         self.sc_samples = 3
-        self.token_tracker = TokenUsageTracker(system_prompt, max_context_tokens)
+        self.token_tracker = TokenUsageTracker(system_prompt, max_context_tokens if max_context_tokens is not None else Config.MAX_CONTEXT_TOKENS)
         self._all_tools = {}
         if external_plugins:
             for name, func in external_plugins.items():
