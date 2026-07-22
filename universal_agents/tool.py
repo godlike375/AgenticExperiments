@@ -1,11 +1,12 @@
 ENVIRONMENT_PREFIX = '[[SYS ENV]]'
 
 
-def tool(description="", requires_confirmation=False, **params):
+def tool(description="", short_description="", requires_confirmation=False, **params):
     def decorator(func):
         func._is_tool = True
         func._tool_name = func.__name__
         func._requires_confirmation = requires_confirmation
+        func._short_description = short_description
 
         # Маппинг имён типов Python в стандартные JSON Schema-типы,
         _PY_TO_JSON_TYPE = {

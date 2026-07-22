@@ -138,9 +138,9 @@ class LLMAgent:
         if name in external_tools:
             self._all_tools[name] = self._build_tool_dict(external_tools[name], is_instance_method=False)
 
-            non_core = [n for n in self._all_tools if n not in ("load_tools", "disable_tool", "tool_description")]
-            if len(non_core) >= 1 and "disable_tool" not in self._all_tools and "disable_tool" in external_tools:
-                self._all_tools["disable_tool"] = self._build_tool_dict(external_tools["disable_tool"], is_instance_method=False)
+            non_core = [n for n in self._all_tools if n not in ("load_tools", "unload_tool", "tool_description")]
+            if len(non_core) >= 1 and "unload_tool" not in self._all_tools and "unload_tool" in external_tools:
+                self._all_tools["unload_tool"] = self._build_tool_dict(external_tools["unload_tool"], is_instance_method=False)
             if "tool_description" not in self._all_tools and "tool_description" in external_tools:
                 self._all_tools["tool_description"] = self._build_tool_dict(external_tools["tool_description"], is_instance_method=False)
 
@@ -151,19 +151,19 @@ class LLMAgent:
 
         return f"'{name}' not found in loadable tools"
 
-    def disable_tool(self, name: str) -> str:
+    def unload_tool(self, name: str) -> str:
         """Disable a tool by name, removing it from available tools."""
         if name not in self._all_tools:
             return f"Tool '{name}' is not loaded yet."
 
-        if name in ("load_tools", "disable_tool", "get_messages", "tool_description"):
+        if name in ("load_tools", "unload_tool", "get_messages", "tool_description"):
             return f"Cannot disable built-in tool '{name}'."
 
         del self._all_tools[name]
 
-        non_core = [n for n in self._all_tools if n not in ("load_tools", "disable_tool", "tool_description")]
-        if len(non_core) == 0 and "disable_tool" in self._all_tools:
-            del self._all_tools["disable_tool"]
+        non_core = [n for n in self._all_tools if n not in ("load_tools", "unload_tool", "tool_description")]
+        if len(non_core) == 0 and "unload_tool" in self._all_tools:
+            del self._all_tools["unload_tool"]
 
         self._refresh_tools_list()
         return f"'{name}' disabled successfully."
@@ -176,7 +176,11 @@ class LLMAgent:
         external_tools = load_external_plugins(tools_dir)
         enabled = set(self._all_tools.keys())
         available = set(external_tools.keys()) - enabled
-        lines = ["TOOLS TO LOAD:\n"] + sorted(available)
+        lines = ["TOOLS TO LOAD:\n"]
+        for name in sorted(available):
+            func = external_tools[name]
+            desc = getattr(func, '_short_description', '')
+            lines.append(f"{name} - {desc}" if desc else name)
         return "\n".join(lines)
 
     # --------------------------------------------------------

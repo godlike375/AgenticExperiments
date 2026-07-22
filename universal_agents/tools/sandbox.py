@@ -133,6 +133,7 @@ class UnifiedDockerAgent:
 
 @tool(
     description="Start a persistent sandbox container for a repository. Call this to set the working directory.",
+    short_description="start sandbox container",
     repo_path=("str", "Absolute or relative path to the git repository on the host")
 )
 def start_sandbox(repo_path: str):
@@ -141,6 +142,7 @@ def start_sandbox(repo_path: str):
 
 @tool(
     description="Execute a bash command. Auto-starts container in current directory if not already running.",
+    short_description="run bash command",
     command=("str", "The bash command to run"),
     timeout=("int", "Timeout in seconds (default 60)")
 )
@@ -150,6 +152,7 @@ def run_bash(command: str, timeout: int = 60):
 
 @tool(
     description="Execute Python code. Auto-starts container in current directory if not already running.",
+    short_description="run python code",
     code=("str", "The Python code to execute"),
     timeout=("int", "Timeout in seconds (default 60)")
 )
@@ -158,7 +161,8 @@ def run_python(code: str, timeout: int = 60):
 
 
 @tool(
-    description="Stop and remove the persistent sandbox container."
+    description="Stop and remove the persistent sandbox container.",
+    short_description="stop sandbox container"
 )
 def stop_sandbox():
     return UnifiedDockerAgent.stop()
