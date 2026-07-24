@@ -6,9 +6,11 @@ class Config:
 
     # Параметры генерации
     TEMP = 0.575
-    TOP_P = 0.98
     FREQUENCY_PENALTY = 0.0
     PRESENCE_PENALTY = 0.0
+    TOP_P = 0.962
+    FREQUENCY_PENALTY = 1.01
+    PRESENCE_PENALTY = 0
     MAX_TOKENS = 12000
     TIMEOUT = 1800
     MAX_ITER = 20
