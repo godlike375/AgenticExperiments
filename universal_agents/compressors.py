@@ -167,7 +167,7 @@ def chunk_and_summarize_large_text(agent: LLMAgent, text: str, tool_name: str, t
             safe_only=True,
             max_iter=1,
             temp=0.0,
-            on_log=lambda x: None,
+            on_log=agent.on_system_msg,
         )
 
         prompt = (

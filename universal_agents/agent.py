@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from typing import Union, Callable, Optional
 
 from universal_agents.tool import ENVIRONMENT_PREFIX
@@ -35,6 +36,7 @@ class LLMAgent:
         on_stream_start: Callable[[], None] = None,
         on_stream_end: Callable[[], None] = None,
         streaming_enabled: bool = None,
+        max_generation_attempts: int = None,
     ):
         self.history = ChatHistory(system_prompt)
         self.temp = temp if temp is not None else Config.TEMP
@@ -63,6 +65,32 @@ class LLMAgent:
         self.on_stream_end = on_stream_end
         self.streaming_enabled = streaming_enabled if streaming_enabled is not None else Config.STREAM_ENABLED
         self._tool_usage: dict[str, int] = {}
+        self._max_generation_attempts = max_generation_attempts
+        self.trusted_dirs: set[str] = set()
+
+    def trust_dir(self, path: str) -> str:
+        """Add a directory to trusted dirs (edit_file skips confirmation)."""
+        abs_path = os.path.abspath(path)
+        if not os.path.isdir(abs_path):
+            return f"'{path}' is not a directory"
+        self.trusted_dirs.add(abs_path)
+        return f"Trusted: {abs_path}"
+
+    def untrust_dir(self, path: str) -> str:
+        """Remove a directory from trusted dirs."""
+        abs_path = os.path.abspath(path)
+        if abs_path in self.trusted_dirs:
+            self.trusted_dirs.discard(abs_path)
+            return f"Untrusted: {abs_path}"
+        return f"'{path}' was not trusted"
+
+    def is_path_trusted(self, path: str) -> bool:
+        """Check if path is inside a trusted directory."""
+        abs_path = os.path.abspath(path)
+        for trusted in self.trusted_dirs:
+            if abs_path.startswith(trusted + os.sep) or abs_path == trusted:
+                return True
+        return False
 
     # --------------------------------------------------------
     # Фильтрация инструментов
@@ -228,7 +256,8 @@ class LLMAgent:
                 continue
 
             if tool_info.get('requires_confirmation', False):
-                if not self.on_confirm(name, args_dict):
+                skip_confirm = (name == "edit_file" and "path" in args_dict and self.is_path_trusted(args_dict["path"]))
+                if not skip_confirm and not self.on_confirm(name, args_dict):
                     results.append(ToolResult.user_denied(tc.id, name))
                     continue
 
@@ -576,7 +605,7 @@ class LLMAgent:
             step_prefill = current_prefill if i == 0 else None
             messages_to_send = self._prepare_messages_for_api()
 
-            max_generation_attempts = 3
+            max_generation_attempts = self._max_generation_attempts if self._max_generation_attempts is not None else 2
             message_obj = None
             last_duplicate_info = None
             api_error_occurred = False

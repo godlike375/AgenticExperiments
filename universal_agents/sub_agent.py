@@ -1,5 +1,5 @@
 from typing import Optional, Callable, Union
-from universal_agents.models import AssistantMessage
+from universal_agents.models import AssistantMessage, ToolResult
 from universal_agents.llm_client import TokenUsageTracker
 from universal_agents.config import Config
 
@@ -46,13 +46,22 @@ class SubAgent:
         effective_max_context_tokens = max_context_tokens if max_context_tokens is not None else Config.MAX_CONTEXT_TOKENS
         self._own_tracker = TokenUsageTracker(system_prompt, effective_max_context_tokens)
 
+        def _render_subagent(msg):
+            if isinstance(msg, AssistantMessage):
+                if msg.has_tool_calls():
+                    tc_names = [tc.name for tc in msg.tool_calls]
+                    on_log(f"[sub] calling: {', '.join(tc_names)}")
+            elif isinstance(msg, ToolResult):
+                preview = str(msg.content)[:80]
+                on_log(f"[sub] result: {preview}")
+
         self._agent = LLMAgent(
             system_prompt=system_prompt,
             temp=temp if temp is not None else Config.TEMP,
             timeout=timeout if timeout is not None else 60,
             tools_config=tools_config,
             external_plugins=safe_plugins,
-            on_render=lambda msg: None,
+            on_render=_render_subagent,
             on_confirm=lambda n, a: True,
             on_system_msg=on_log,
             max_context_tokens=effective_max_context_tokens,
@@ -61,6 +70,7 @@ class SubAgent:
             frequency_penalty=frequency_penalty if frequency_penalty is not None else Config.FREQUENCY_PENALTY,
             presence_penalty=presence_penalty if presence_penalty is not None else Config.PRESENCE_PENALTY,
             max_tokens=max_tokens if max_tokens is not None else Config.MAX_TOKENS,
+            max_generation_attempts=1,
         )
         self._agent.token_tracker = self._own_tracker
 

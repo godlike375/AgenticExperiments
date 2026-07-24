@@ -69,7 +69,9 @@ class CLI:
             "/save": self.cmd_save,
             "/load": self.cmd_load,
             "/consistent": self.cmd_consistent,
-            "/multiline": self.cmd_multiline
+            "/multiline": self.cmd_multiline,
+            "/trust": self.cmd_trust,
+            "/untrust": self.cmd_untrust,
         }
 
     def cmd_regen(self, parts: list[str]):
@@ -123,6 +125,29 @@ class CLI:
         self.multiline = not self.multiline
         status = "ON" if self.multiline else "OFF"
         ConsoleUI.system_msg(f"Multiline input mode turned {status}. Type Ctrl+D to finish the input.")
+
+    def cmd_trust(self, parts: list[str]):
+        if len(parts) < 2:
+            if self.agent.trusted_dirs:
+                dirs = "\n".join(f"  {d}" for d in sorted(self.agent.trusted_dirs))
+                ConsoleUI.system_msg(f"Trusted directories:\n{dirs}")
+            else:
+                ConsoleUI.system_msg("No trusted directories. Usage: /trust <directory>")
+            return
+        path = parts[1]
+        if path == "--clear":
+            self.agent.trusted_dirs.clear()
+            ConsoleUI.system_msg("All trusted directories cleared")
+            return
+        result = self.agent.trust_dir(path)
+        ConsoleUI.system_msg(result)
+
+    def cmd_untrust(self, parts: list[str]):
+        if len(parts) < 2:
+            ConsoleUI.system_msg("Usage: /untrust <directory>")
+            return
+        result = self.agent.untrust_dir(parts[1])
+        ConsoleUI.system_msg(result)
 
     def read_until_marker(self, marker="/mm"):
         lines = []
