@@ -89,7 +89,7 @@ def auto_compress_tool_result(agent: LLMAgent, tool_result: ToolResult) -> None:
         return
     remaining = agent.token_tracker.get_remaining(last_user.content)
 
-    if TokenUsageTracker.estimate_tokens(tool_result.content) < remaining / 6:
+    if TokenUsageTracker.estimate_tokens(tool_result.content) < remaining / 2 and remaining > 6000:
         return
 
     task_goal = synthesize_task_goal(agent, tool_result.name)
