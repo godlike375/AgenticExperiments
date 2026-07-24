@@ -53,6 +53,7 @@ class LLMAgent:
         if external_plugins:
             for name, func in external_plugins.items():
                 self._all_tools[name] = self._build_tool_dict(func, is_instance_method=False)
+        self._tools_config = tools_config
         self._filter_tools(tools_config)
         self.loop_detector = LoopDetector()
         self._temp_boost_active = False
@@ -109,6 +110,9 @@ class LLMAgent:
         if name in self._all_tools:
             return f"'{name}' is already loaded."
 
+        if not self._is_tool_allowed(name):
+            return f"'{name}' is not allowed by tools_config."
+
         import os
         tools_dir = os.path.join(os.path.dirname(__file__), "tools")
         external_tools = load_external_plugins(tools_dir)
@@ -141,6 +145,16 @@ class LLMAgent:
         self._refresh_tools_list()
         return f"'{name}' disabled successfully."
 
+    def _is_tool_allowed(self, name: str) -> bool:
+        """Check if tool is allowed by tools_config."""
+        if self._tools_config is None:
+            return True
+        if isinstance(self._tools_config, list):
+            return name in self._tools_config
+        if isinstance(self._tools_config, dict) and "exclude" in self._tools_config:
+            return name not in self._tools_config["exclude"]
+        return True
+
     def list_available_tools(self) -> str:
         """List all available (loadable) tools from plugins directory."""
         from universal_agents.tool_registry import load_external_plugins
@@ -151,6 +165,8 @@ class LLMAgent:
         available = set(external_tools.keys()) - enabled
         lines = ["LOADABLE TOOLS:\n"]
         for name in sorted(available):
+            if not self._is_tool_allowed(name):
+                continue
             func = external_tools[name]
             desc = getattr(func, '_short_description', '')
             lines.append(f'"{name}" ({desc});' if desc else name)
