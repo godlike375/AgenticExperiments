@@ -154,7 +154,7 @@ class LLMAgent:
             func = external_tools[name]
             desc = getattr(func, '_short_description', '')
             lines.append(f'"{name}" ({desc});' if desc else name)
-        lines.append(f'\nTo load a specific tool call: load_tools(name="tool_name")')
+        lines.append(f'\nTo load a specific tool call use load_tools with "tool_name" arg')
         return "\n".join(lines)
 
     # --------------------------------------------------------
