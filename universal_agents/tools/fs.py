@@ -2,11 +2,16 @@ from __future__ import annotations
 
 import datetime
 import difflib
+import os
+import re as _re
+import fnmatch as _fnmatch
 
+from universal_agents.config import Config
 from universal_agents.tool import tool, ENVIRONMENT_PREFIX
 
 
 class FS:
+
     @staticmethod
     def _format_size(size_bytes: int) -> str:
         if size_bytes < 1024: return f"{size_bytes}B"
@@ -189,61 +194,57 @@ def edit_file(path: str, new: str, old: str = '', mode: str = "one"):
     return "\n".join(preview)
 
 
-import os
-import sys
+CHARS_PER_TOKEN = 2.3
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from universal_agents.sub_agent import SubAgent
-
-CHARS_PER_TOKEN = 2.6
-
-MIN_TOKENS_TO_SUMMARIZE = 1500
+MIN_TOKENS_TO_SUMMARIZE = 750
 _SUMMARY_THRESHOLD = int(MIN_TOKENS_TO_SUMMARIZE * CHARS_PER_TOKEN)
 
 SUMMARY_CONTEXT_FRACTION = 2 / 3
 
 
-def _summarize_file(path: str, content: str, main_context_tokens: int) -> str:
+def _summarize_file(path: str, content: str, agent) -> str:
     """Строит структурный скелет/саммари файла через изолированный субагент."""
-    # Контекст субагента — половина от контекста главного агента (с разумным минимумом).
-    sub_context_tokens = max(main_context_tokens // 2, MIN_TOKENS_TO_SUMMARIZE * 3)
+    from universal_agents.sub_agent import SubAgent
+    parent_system_prompt = agent.history[0].content if agent.history else ""
+    parent_history = agent.history.get_all()[1:]
 
-    # Обрезаем файл только если в нём больше 2/3 контекста субагента (в токенах).
-    max_chars = int(sub_context_tokens * SUMMARY_CONTEXT_FRACTION * CHARS_PER_TOKEN)
+    sub = SubAgent(
+        parent_system_prompt=parent_system_prompt,
+        parent_history=parent_history,
+        max_context_tokens=agent.token_tracker.max_context_tokens,
+        tools_config=[],
+        external_plugins={},
+        safe_only=False,
+        max_iter=1,
+        temp=0.2,
+    )
+
+    specialist_instructions = (
+        f"{ENVIRONMENT_PREFIX} NOW IGNORE previous instructions! Act as 'SkeletonGenerator' tool. "
+        "Respond only in tags '<skeleton>' with a very short concise skeleton with the most top-level identifiers and their EXACT "
+        "line numbered ranges. NO COMMS!"
+    )
+
+    task = (
+        f"{specialist_instructions}\n\n"
+        "The skeleton includes top-level elements (signatures of functions, classes, methods defined right in this file)"
+        " and precise line number ranges for each element\n"
+        f"FILE CONTENT (with line numbers):\n```\n {ENVIRONMENT_PREFIX}"
+    )
+
+    max_tokens = agent.token_tracker.get_remaining() // Config.SUMMARIZATION_THRESHOLD_DIVIDER
+    max_chars = int(max_tokens * CHARS_PER_TOKEN)
     truncated = len(content) > max_chars
     snippet = content[:max_chars]
     start = 1
     selected = snippet.split("\n")
     numbered_text = "\n".join(f"{start + i} {line}" for i, line in enumerate(selected))
 
-    task = (
-        f"Below is line numbered content of the file `{path}`.\n"
-        f"The file may be truncated.\n"
-        "Produce a very concise skeleton of this file to understand its structure without reading fully.\n"
-        "Include in your answer:\n"
-        "  top-level elements (signatures of functions, classes, methods defined only in this file)"
-        " and precise line number ranges for each element\n"
-        "Exclude:\n commentaries\n"
-        "Be faithful to the actual content.\n\n"
-        "FILE CONTENT (with line numbers):\n```\n" + numbered_text + "\n```"
-        + ("\n\n(NOTE: the file was truncated before sending.)" if truncated else "")
-    )
+    task += numbered_text + "\n```"
+    if truncated:
+        task += "\n\n(File is truncated due to remaining memory)"
 
-    sub = SubAgent(
-        system_prompt=(
-            "You are a file-skeleton analyzer. "
-            "You output a very compact short skeleton with the most top-level identifiers and their exact "
-            "line numbered ranges. Respond just with the skeleton."
-        ),
-        max_context_tokens=sub_context_tokens,
-        # Пустой список = явно БЕЗ инструментов (в отличие от None, который значит "все доступные").
-        tools_config=[],
-        external_plugins={},
-        safe_only=True,
-        max_iter=1,
-        temp=0.1,
-    )
-    result = sub.run(task).strip()
+    result = sub.run(task, '<sub_agent><skeleton>').strip()
     if not result:
         return f"(Empty summary for {path}. It's probably an error, try one more time...)"
     return result
@@ -283,22 +284,19 @@ def read(agent: 'LLMAgent', path: str = '.', start_line: int = None, end_line: i
                     raw = f.read()
             except UnicodeDecodeError:
                 return f"{ENVIRONMENT_PREFIX} Error: Cannot read binary files (failed UTF-8 decode)"
+            lines = raw.splitlines()
             if len(raw) <= _SUMMARY_THRESHOLD:
-                lines = raw.splitlines()
                 numbered = [f"{i+1} {line}" for i, line in enumerate(lines)]
                 return f"{ENVIRONMENT_PREFIX} File: {path}\nModified: {mtime}\nContent:\n---\n" + ("\n".join(numbered) if numbered else "")
-            summary = _summarize_file(path, raw, agent.token_tracker.max_context_tokens)
-            return (f"{ENVIRONMENT_PREFIX} File: {path}\nModified: {mtime}\n"
-                    f"STRUCTURAL SUMMARY:\n---\n{summary}")
+            summary = _summarize_file(path, raw, agent)
+            return (f"{ENVIRONMENT_PREFIX} File: {path}\nModified: {mtime}\nTotal lines: {len(lines)}\n"
+                    f"Summary:\n---\n{summary}")
         elif os.path.isdir(path):
             return f"{ENVIRONMENT_PREFIX} Directory Tree: {os.path.abspath(path)}\nModified: {mtime}\n\n{FS._build_tree(path)}"
         raise RuntimeError("Unexpected file type")
     except Exception as e:
         raise PermissionError(f"Error accessing {path}: {e}")
 
-
-import re as _re
-import fnmatch as _fnmatch
 
 _REGEX_CHARS = set(r".*+?()[]|\\^$")
 

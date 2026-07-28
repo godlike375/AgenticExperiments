@@ -20,8 +20,8 @@ class ConsoleUI:
                 print(f"🛠️ [Tool Call: {tc.name}({tc.arguments})]")
         elif isinstance(msg, ToolResult):
             display = str(msg.content)
-            if len(display) > 300:
-                display = display[:300] + "\n... [TRUNCATED]"
+            #if len(display) > 300:
+            #    display = display[:300] + "\n... [TRUNCATED]"
             print(f"✅ [Result '{msg.name}']: {display}")
 
     @staticmethod
@@ -96,8 +96,9 @@ class CLI:
     def cmd_save(self, parts: list[str]):
         filename = parts[1] if len(parts) > 1 else "default_history.json"
         try:
-            self.agent.history.save(filename)
-            ConsoleUI.system_msg(f"History saved to '{filename}'")
+            tool_names = list(self.agent._all_tools.keys())
+            self.agent.history.save(filename, loaded_tools=tool_names)
+            ConsoleUI.system_msg(f"History saved to '{filename}' (tools: {tool_names})")
         except Exception as e:
             ConsoleUI.system_msg(f"Error saving history: {e}")
 
@@ -107,9 +108,12 @@ class CLI:
             ConsoleUI.system_msg(f"File '{filename}' not found")
             return
         try:
-            self.agent.history.load(filename)
+            loaded_tools = self.agent.history.load(filename)
             self.agent.rebuild_tool_usage()
-            ConsoleUI.system_msg(f"History loaded. Total messages: {len(self.agent.history)}")
+            for name in loaded_tools:
+                if name not in self.agent._all_tools:
+                    self.agent.load_tools(name)
+            ConsoleUI.system_msg(f"History loaded. Total messages: {len(self.agent.history)}. Tools restored: {loaded_tools}")
             print("\n" + "="*40 + "\n🔄 LOADED HISTORY:\n" + "="*40)
             for msg in self.agent.history.get_all():
                 ConsoleUI.render_message(msg)

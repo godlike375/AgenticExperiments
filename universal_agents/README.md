@@ -155,7 +155,7 @@ class Config:
     TOP_P = 1.0              # Top-p (nucleus sampling)
     FREQUENCY_PENALTY = 0.0  # Штраф за частоту повторения токенов
     PRESENCE_PENALTY = 0.0   # Штраф за присутствие токенов
-    MAX_TOKENS = 12000       # Максимальная длина ответа
+    MAX_OUTPUT_TOKENS = 12000       # Максимальная длина ответа
     TIMEOUT = 1800           # Таймаут запроса (секунды)
 ```
 
@@ -177,7 +177,7 @@ LLMAgent(
     top_p: float = None,         # → Config.TOP_P
     frequency_penalty: float = None,  # → Config.FREQUENCY_PENALTY
     presence_penalty: float = None,   # → Config.PRESENCE_PENALTY
-    max_tokens: int = None,      # → Config.MAX_TOKENS
+    max_tokens: int = None,      # → Config.MAX_OUTPUT_TOKENS
     tools_config: list | dict | None = None,
     max_context_tokens: int = 16384,
     ...
@@ -194,7 +194,7 @@ SubAgent(
     top_p: float = None,         # → Config.TOP_P
     frequency_penalty: float = None,  # → Config.FREQUENCY_PENALTY
     presence_penalty: float = None,   # → Config.PRESENCE_PENALTY
-    max_tokens: int = None,      # → Config.MAX_TOKENS
+    max_tokens: int = None,      # → Config.MAX_OUTPUT_TOKENS
     max_context_tokens: int = 8192,
     max_iter: int = 5,
     safe_only: bool = True,

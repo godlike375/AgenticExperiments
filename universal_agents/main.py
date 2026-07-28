@@ -16,6 +16,7 @@ if __name__ == "__main__":
         "* Use 'load_tools' without args only 1 time.\n"
         "* Do NOT repeat identical tool calls with same arguments twice. You can call only 1 tool at 1 turn (message). "
         "So you must wait for tool results before making any next call."
+        " If system says you are a sub-agent then start messages with '<sub_agent>'"
     )
 
     agent = LLMAgent(

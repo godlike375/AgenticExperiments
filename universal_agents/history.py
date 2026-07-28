@@ -127,17 +127,32 @@ class ChatHistory:
 
         self._messages = valid
 
-    def save(self, path: str):
+    def save(self, path: str, loaded_tools: list[str] = None):
+        payload = {
+            "messages": self.get_all_api(),
+            "loaded_tools": loaded_tools or [],
+        }
         with open(path, 'w', encoding='utf-8') as f:
-            json.dump(self.get_all_api(), f, ensure_ascii=False, indent=2)
+            json.dump(payload, f, ensure_ascii=False, indent=2)
 
-    def load(self, path: str):
+    def load(self, path: str) -> list[str]:
         with open(path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-        if not isinstance(data, list) or not data:
+            raw = json.load(f)
+
+        if isinstance(raw, list):
+            data_list = raw
+            loaded_tools = []
+        elif isinstance(raw, dict) and "messages" in raw:
+            data_list = raw["messages"]
+            loaded_tools = raw.get("loaded_tools", [])
+        else:
             raise ValueError(f"⚠️ {ENVIRONMENT_PREFIX} Invalid history format")
+
+        if not isinstance(data_list, list) or not data_list:
+            raise ValueError(f"⚠️ {ENVIRONMENT_PREFIX} Invalid history format")
+
         self._messages = []
-        for d in data:
+        for d in data_list:
             role = d.get("role")
             if role == "system":
                 self._messages.append(SystemMessage(d["content"]))
@@ -163,6 +178,7 @@ class ChatHistory:
                 ))
             else:
                 raise ValueError(f"Unknown role: {role}")
+        return loaded_tools
 
     def find_last_tool_result(self, tool_name: str) -> Optional[ToolResult]:
         for msg in reversed(self._messages):

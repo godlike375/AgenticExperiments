@@ -3,18 +3,20 @@ from universal_agents.models import AssistantMessage, ToolResult
 from universal_agents.llm_client import TokenUsageTracker
 from universal_agents.config import Config
 
+MAX_SUB_AGENT_DEPTH = 1
+
 
 class SubAgent:
     """
-    Универсальный субагент на базе LLMAgent.
-    - Изолированная история и изолированный трекер токенов.
-    - В safe-режиме не получает инструментов, требующих подтверждения.
-    - Контекст передаётся явно в задаче, а не через общую историю.
+    Субагент на базе LLMAgent.
+    - Наследует системный промпт, историю и набор инструментов родителя для KV-cache reuse.
+    - Изолированный трекер токенов.
+    - Рекурсия предотвращается через depth check.
     """
 
     def __init__(
             self,
-            system_prompt: str,
+            system_prompt: str = 'You are a sub-agent. Always respond in "<sub-agent>" tags.',
             max_context_tokens: int = None,
             tools_config: Union[list[str], dict, None] = None,
             external_plugins: Optional[dict] = None,
@@ -27,12 +29,20 @@ class SubAgent:
             presence_penalty: float = None,
             max_tokens: int = None,
             timeout: int = None,
+            # KV-cache: наследование от родителя
+            parent_history: Optional[list] = None,
+            parent_system_prompt: Optional[str] = None,
+            # Recursion prevention
+            depth: int = 0,
     ):
-        # Отложенный импорт для разрыва цикла agent ↔ sub_agent
         from agent import LLMAgent
 
         self._max_iter = max_iter if max_iter is not None else Config.MAX_ITER
         self._on_log = on_log
+        self._depth = depth
+
+        # Если указан системный промпт родителя — используем его для разделения KV-кеша
+        effective_system_prompt = parent_system_prompt if parent_system_prompt is not None else system_prompt
 
         # Фильтрация опасных инструментов
         safe_plugins = external_plugins
@@ -42,9 +52,9 @@ class SubAgent:
                 if not getattr(func, '_requires_confirmation', False)
             }
 
-        # Изолированный трекер: траты субагента НЕ влияют на бюджет основного агента
+        # Полный контекст: без деления бюджета — сервер сам управляет limits
         effective_max_context_tokens = max_context_tokens if max_context_tokens is not None else Config.MAX_CONTEXT_TOKENS
-        self._own_tracker = TokenUsageTracker(system_prompt, effective_max_context_tokens)
+        self._own_tracker = TokenUsageTracker(effective_system_prompt, effective_max_context_tokens)
 
         def _render_subagent(msg):
             if isinstance(msg, AssistantMessage):
@@ -56,7 +66,7 @@ class SubAgent:
                 on_log(f"[sub] result: {preview}")
 
         self._agent = LLMAgent(
-            system_prompt=system_prompt,
+            system_prompt=effective_system_prompt,
             temp=temp if temp is not None else Config.TEMP,
             timeout=timeout if timeout is not None else 60,
             tools_config=tools_config,
@@ -65,18 +75,22 @@ class SubAgent:
             on_confirm=lambda n, a: True,
             on_system_msg=on_log,
             max_context_tokens=effective_max_context_tokens,
-            _create_judge=False,  # <-- предотвращает рекурсию
             top_p=top_p if top_p is not None else Config.TOP_P,
             frequency_penalty=frequency_penalty if frequency_penalty is not None else Config.FREQUENCY_PENALTY,
             presence_penalty=presence_penalty if presence_penalty is not None else Config.PRESENCE_PENALTY,
-            max_tokens=max_tokens if max_tokens is not None else Config.MAX_TOKENS,
+            max_tokens=max_tokens if max_tokens is not None else Config.MAX_OUTPUT_TOKENS,
             max_generation_attempts=1,
         )
         self._agent.token_tracker = self._own_tracker
+        self._agent._depth = depth
 
-    def run(self, task: str) -> str:
+        # Клонируем историю родителя как префикс для KV-cache reuse
+        if parent_history:
+            self._agent.history.extend(parent_history)
+
+    def run(self, task: str, prefill: str = None) -> str:
         """Выполняет задачу и возвращает финальный текстовый ответ."""
-        self._agent.chat(task, max_iter=self._max_iter)
+        self._agent.chat(task, max_iter=self._max_iter, prefill=prefill)
         last_msg = self._agent.history.get_last_message()
         if isinstance(last_msg, AssistantMessage):
             return last_msg.content or ""

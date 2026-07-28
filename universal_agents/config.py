@@ -5,15 +5,16 @@ class Config:
     BOOST_TEMP = 2
 
     # Параметры генерации
-    TEMP = 0.575
+    TEMP = 0.48
     TOP_P = 0.962
     FREQUENCY_PENALTY = 0
     PRESENCE_PENALTY = 0
-    MAX_TOKENS = 32000
+    MAX_CONTEXT_TOKENS = 16000
+    MAX_OUTPUT_TOKENS = min(32000, MAX_CONTEXT_TOKENS)
     TIMEOUT = 1800
     MAX_ITER = 20
-    MAX_CONTEXT_TOKENS = 66000
-    
-    # Streaming
-    STREAM_ENABLED = True  # Включить streaming по умолчанию
-    STREAM_CHUNK_DELAY = 0.0  # Задержка между чанками (для демонстрации)
+    SUMMARIZATION_THRESHOLD_DIVIDER = 2
+
+    STREAM_ENABLED = True
+
+    USE_RESPONSES_API = True

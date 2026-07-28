@@ -100,8 +100,8 @@ class ToolResult(Message):
     def render(self) -> str:
         prefix = "❌" if self.is_error else "✅"
         display = str(self.content)
-        if len(display) > 300:
-            display = display[:300] + "\n... [TRUNCATED]"
+        #if len(display) > 300:
+        #    display = display[:300] + "\n... [TRUNCATED]"
         return f"{prefix} [Result '{self.name}']: {display}"
 
     @classmethod

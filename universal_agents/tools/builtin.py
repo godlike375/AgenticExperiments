@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING
 from universal_agents.tool import tool, ENVIRONMENT_PREFIX
 from universal_agents.config import Config
 from universal_agents.models import UserMessage, AssistantMessage, ToolResult, SystemMessage
-from universal_agents.sub_agent import SubAgent
+from universal_agents.sub_agent import SubAgent, MAX_SUB_AGENT_DEPTH
 
 if TYPE_CHECKING:
     from universal_agents.agent import LLMAgent
@@ -119,42 +119,47 @@ def summarize_messages(agent: LLMAgent, start_id: int, end_id: int = -1) -> str:
 
 
 @tool(
-    description="Delegates a task to a limited sub-agent that has its own dialog history and just read-only tools unlike you. "
-                "You can delegate to it, for example, 1 step of a multi-step task. "
-                "Include necessary context for execution in task description. "
-                "The tool returns only the final result of a task.",
+    description="Delegates a task to a sub-agent that has access to the same tools and system prompt as you. "
+                "The sub-agent inherits your conversation history for KV-cache reuse. "
+                "It returns only its final result.",
     short_description="run task in sub-agent",
     task=("str", "Clear task description with all necessary context"),
     max_iter=("int", "Optional max tool calls for sub-agent"),
 )
 def delegate_to_subagent(agent: LLMAgent, task: str, max_iter: int = None) -> str:
+    depth = getattr(agent, '_depth', 0)
+    if depth >= MAX_SUB_AGENT_DEPTH:
+        return f"{ENVIRONMENT_PREFIX} Sub-agent depth limit ({MAX_SUB_AGENT_DEPTH}) reached. You can't delegate to sub-agent. Do it yourself."
+
     sub_plugins = {}
     for name, tool_info in agent._all_tools.items():
-        if name == "delegate_to_subagent":
-            continue
         sub_plugins[name] = tool_info["handler"]
 
+    parent_system_prompt = agent.history[0].content if agent.history else ""
+    parent_history = agent.history.get_all()[1:]
+
+    task_with_context = (
+        "You are a sub-agent working on a specific subtask. "
+        "Complete the task using tools if needed and provide a final answer. "
+        "Do NOT ever ask clarifying questions — work with what you have.\n\n"
+        f"Task:\n{task}"
+    )
+
     sub = SubAgent(
-        system_prompt=(
-            "You are a sub-agent working on a specific subtask. "
-            "You have access to read-only tools. "
-            "Complete the task using tools if needed and provide a final answer. "
-            "Do NOT ever ask clarifying questions — work with what you have."
-        ),
-        max_context_tokens=agent.token_tracker.max_context_tokens // 3,
-        tools_config={"exclude": [
-            "edit_message", "delete_messages", "summarize_messages",
-            "delegate_to_subagent", "run_bash"
-        ]},
+        parent_system_prompt=parent_system_prompt,
+        parent_history=parent_history,
+        max_context_tokens=agent.token_tracker.max_context_tokens,
+        tools_config=agent._tools_config,
         external_plugins=sub_plugins,
-        safe_only=True,
+        safe_only=False,
         max_iter=max_iter,
-        temp=0.1,
+        temp=0.2,
         on_log=agent.on_system_msg,
+        depth=depth + 1,
     )
 
     agent.on_system_msg(f"[DELEGATE] Starting sub-agent for: {task[:100]}...")
-    result = sub.run(task)
+    result = sub.run(task_with_context)
     agent.on_system_msg(f"[DELEGATE] Completed. Tokens spent by sub-agent: {sub.tokens_spent}")
 
     if not result.strip():

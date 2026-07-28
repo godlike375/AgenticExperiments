@@ -5,6 +5,8 @@ from typing import Optional
 from openai import OpenAI
 from universal_agents.tool import ENVIRONMENT_PREFIX
 from universal_agents.config import Config
+from universal_agents.tools.fs import CHARS_PER_TOKEN
+
 
 class TokenUsageTracker:
     def __init__(self, system_prompt: str, max_context_tokens: int = 8192):
@@ -17,8 +19,8 @@ class TokenUsageTracker:
 
     @staticmethod
     def estimate_tokens(text: str) -> int:
-        """Грубая оценка токенов: символы / 2.6"""
-        return int(len(text) / 2.6)
+        """Грубая оценка токенов: символы / CHARS_PER_TOKEN"""
+        return int(len(text) / CHARS_PER_TOKEN)
 
     def get_total_context_tokens(self, first_system_message: str = "", last_user_content: str = "") -> int:
         known = self.estimate_tokens(first_system_message)
@@ -112,16 +114,41 @@ class LLMClient:
         frequency_penalty: float = None,
         presence_penalty: float = None,
         max_tokens: int = None,
+        previous_response_id: str = None,
     ):
         messages_to_send = list(messages)
         if prefill:
             messages_to_send.append({"role": "assistant", "content": prefill})
+
+        if Config.USE_RESPONSES_API:
+            if previous_response_id is not None:
+                msg, err, usage = LLMClient._call_responses_api(
+                    messages_to_send, temp, timeout, tools, top_p,
+                    frequency_penalty, presence_penalty, max_tokens, previous_response_id
+                )
+                if not err and msg and (msg.content or msg.tool_calls):
+                    return msg, err, usage
+            msg, err, usage = LLMClient._call_responses_api_full(
+                messages_to_send, temp, timeout, tools, top_p,
+                frequency_penalty, presence_penalty, max_tokens
+            )
+            if not err and msg and (msg.content or msg.tool_calls):
+                return msg, err, usage
+
+        return LLMClient._call_chat_completions(
+            messages_to_send, temp, timeout, tools, prefill, top_p,
+            frequency_penalty, presence_penalty, max_tokens
+        )
+
+    @staticmethod
+    def _call_chat_completions(messages_to_send, temp, timeout, tools, prefill, top_p,
+                               frequency_penalty, presence_penalty, max_tokens):
         try:
             response = LLMClient.get_client().chat.completions.create(
                 model=Config.MODEL_NAME,
                 messages=messages_to_send,
                 temperature=temp if temp is not None else Config.TEMP,
-                max_tokens=max_tokens if max_tokens is not None else Config.MAX_TOKENS,
+                max_tokens=max_tokens if max_tokens is not None else Config.MAX_OUTPUT_TOKENS,
                 tools=tools,
                 parallel_tool_calls=False,
                 timeout=timeout if timeout is not None else Config.TIMEOUT,
@@ -145,6 +172,91 @@ class LLMClient:
         except Exception as e:
             return None, str(e), None
 
+    @staticmethod
+    def _call_responses_api_full(messages_to_send, temp, timeout, tools, top_p,
+                                 frequency_penalty, presence_penalty, max_tokens):
+        try:
+            kwargs = {
+                "model": Config.MODEL_NAME,
+                "input": messages_to_send,
+                "temperature": temp if temp is not None else Config.TEMP,
+                "max_output_tokens": max_tokens if max_tokens is not None else Config.MAX_OUTPUT_TOKENS,
+                "timeout": timeout if timeout is not None else Config.TIMEOUT,
+            }
+            if tools:
+                kwargs["tools"] = tools
+            if top_p is not None:
+                kwargs["top_p"] = top_p
+
+            response = LLMClient.get_client().responses.create(**kwargs)
+            return LLMClient._parse_responses_output(response), None, LLMClient._extract_responses_usage(response)
+        except Exception as e:
+            return None, str(e), None
+
+    @staticmethod
+    def _call_responses_api(messages_to_send, temp, timeout, tools, top_p,
+                            frequency_penalty, presence_penalty, max_tokens, previous_response_id):
+        try:
+            kwargs = {
+                "model": Config.MODEL_NAME,
+                "input": messages_to_send,
+                "previous_response_id": previous_response_id,
+                "temperature": temp if temp is not None else Config.TEMP,
+                "max_output_tokens": max_tokens if max_tokens is not None else Config.MAX_OUTPUT_TOKENS,
+                "timeout": timeout if timeout is not None else Config.TIMEOUT,
+            }
+            if tools:
+                kwargs["tools"] = tools
+            if top_p is not None:
+                kwargs["top_p"] = top_p
+
+            response = LLMClient.get_client().responses.create(**kwargs)
+            return LLMClient._parse_responses_output(response), None, LLMClient._extract_responses_usage(response)
+        except Exception as e:
+            return None, str(e), None
+
+    @staticmethod
+    def _parse_responses_output(response):
+        from types import SimpleNamespace
+        text_content = ""
+        tool_calls = []
+        for item in response.output:
+            if item.type == "message":
+                if hasattr(item, 'content') and item.content:
+                    if isinstance(item.content, list):
+                        for part in item.content:
+                            if hasattr(part, 'type') and part.type == "output_text":
+                                text_content += part.text
+                            elif hasattr(part, 'text'):
+                                text_content += part.text
+                    elif isinstance(item.content, str):
+                        text_content += item.content
+            elif item.type == "function_call":
+                tool_calls.append(SimpleNamespace(
+                    id=item.call_id,
+                    name=item.name,
+                    arguments=item.arguments,
+                    function=SimpleNamespace(name=item.name, arguments=item.arguments)
+                ))
+
+        msg = SimpleNamespace(
+            content=text_content,
+            tool_calls=tool_calls if tool_calls else None,
+        )
+        msg._response_id = response.id
+        return msg
+
+    @staticmethod
+    def _extract_responses_usage(response):
+        if not hasattr(response, 'usage') or not response.usage:
+            return None
+        usage = response.usage
+        return {
+            "prompt_tokens": getattr(usage, 'input_tokens', 0),
+            "completion_tokens": getattr(usage, 'output_tokens', 0),
+            "total_tokens": getattr(usage, 'input_tokens', 0) + getattr(usage, 'output_tokens', 0),
+        }
+
 
     @staticmethod
     def stream(
@@ -157,8 +269,11 @@ class LLMClient:
         frequency_penalty: float = None,
         presence_penalty: float = None,
         max_tokens: int = None,
+        previous_response_id: str = None,
     ):
-        """Streaming version of call() - returns generator of chunks"""
+        """Streaming version of call() - returns generator of chunks.
+        Note: previous_response_id is ignored for streaming (Responses API streaming not yet supported).
+        """
         messages_to_send = list(messages)
         if prefill:
             messages_to_send.append({"role": "assistant", "content": prefill})
@@ -168,7 +283,7 @@ class LLMClient:
                 model=Config.MODEL_NAME,
                 messages=messages_to_send,
                 temperature=temp if temp is not None else Config.TEMP,
-                max_tokens=max_tokens if max_tokens is not None else Config.MAX_TOKENS,
+                max_tokens=max_tokens if max_tokens is not None else Config.MAX_OUTPUT_TOKENS,
                 tools=tools,
                 parallel_tool_calls=False,
                 timeout=timeout if timeout is not None else Config.TIMEOUT,

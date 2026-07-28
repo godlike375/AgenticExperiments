@@ -1,9 +1,11 @@
 from __future__ import annotations
 from typing import Optional, TYPE_CHECKING
 
-from universal_agents.tool import tool, ENVIRONMENT_PREFIX
+from universal_agents.config import Config
+from universal_agents.tool import ENVIRONMENT_PREFIX
 from universal_agents.models import UserMessage, ToolResult
 from universal_agents.llm_client import LLMClient, TokenUsageTracker
+from universal_agents.tools.fs import CHARS_PER_TOKEN
 
 if TYPE_CHECKING:
     from universal_agents.agent import LLMAgent
@@ -44,12 +46,10 @@ def synthesize_task_goal(agent: LLMAgent, tool_name: str) -> str:
 
     synthesis_prompt = (
         f"{ENVIRONMENT_PREFIX}\n"
-        f"Based on the current conversation context above create a tip for a sub-agent who will parse the output "
-        f"of tool '{tool_name}' and summarize it for you because tool output is too long for your memory. "
-        f"You only will read the summarization of the sub-agent so you need to note specific things that sub-agent "
-        f"must pay attention to.\n"
-        f"It must be a clear relatively concise instruction.\n"
-        f"Output ONLY the formulated instruction for sub-agent."
+        f"Based on the dialog create a very concise goal for a sub-agent who will summarize the output "
+        f"of '{tool_name}' tool for you because it's too large to fit in your memory. "
+        f"After that you will only read the summary so you need to list concrete things sub-agent "
+        f"must pay attention to. Output ONLY very short instruction for sub-agent."
     )
 
     synthesis_messages = messages_base + [{"role": "user", "content": synthesis_prompt}]
@@ -67,9 +67,9 @@ def synthesize_task_goal(agent: LLMAgent, tool_name: str) -> str:
     if err or not msg_obj or not msg_obj.content:
         agent.on_system_msg("[GOAL SYNTHESIS] Failed to synthesize goal via LLM. Falling back to last user message.")
         for msg in reversed(agent.history.get_all()):
-            if isinstance(msg, UserMessage) and not msg.content.startswith(ENVIRONMENT_PREFIX):
+            if isinstance(msg, UserMessage):
                 return msg.content
-        return "Extract any useful facts and errors relevant to the general task."
+        return "Extract any useful info relevant to the general task."
 
     synthesized_goal = msg_obj.content.strip()
     agent.on_system_msg(f"[GOAL SYNTHESIS] Synthesized objective: \"{synthesized_goal}\"")
@@ -89,23 +89,31 @@ def auto_compress_tool_result(agent: LLMAgent, tool_result: ToolResult) -> None:
         return
     remaining = agent.token_tracker.get_remaining(last_user.content)
 
-    if TokenUsageTracker.estimate_tokens(tool_result.content) < remaining / 2 and remaining > 6000:
+    if TokenUsageTracker.estimate_tokens(tool_result.content) < remaining // Config.SUMMARIZATION_THRESHOLD_DIVIDER and remaining > Config.MAX_CONTEXT_TOKENS // Config.SUMMARIZATION_THRESHOLD_DIVIDER:
         return
 
     task_goal = synthesize_task_goal(agent, tool_result.name)
     compressed_output = chunk_and_summarize_large_text(agent, tool_result.content, tool_result.name, task_goal)
 
     original_len = len(tool_result.content)
-    tool_result.content = (
-        f"{ENVIRONMENT_PREFIX} Tool result content is too large so it was summarized automatically. "
-        f"Don't repeat reading the file, it will lead to the same result and won't help to change anything. "
-        f"Summarization: \n{compressed_output}"
+
+    new_tool_result_content = (
+        f"{ENVIRONMENT_PREFIX}\nTool result content was auto-summarized because of size. "
+        f"Don't repeat call this tool with same args - you'll get same result.\n"
+        f"Summary: \n{compressed_output}"
     )
 
-    agent.on_system_msg(
-        f"[AUTO-COMPRESS] Summarized '{tool_result.name}' output: "
-        f"{original_len} → {len(tool_result.content)} chars"
-    )
+    if len(new_tool_result_content) < original_len * 0.95:
+        tool_result.content = new_tool_result_content
+        agent.on_system_msg(
+            f"[AUTO-COMPRESS] Summarized '{tool_result.name}' output: "
+            f"{original_len} → {len(tool_result.content)} chars"
+        )
+    else:
+        agent.on_system_msg(
+            f"[AUTO-COMPRESS] Summarization failed '{tool_result.name}' output: "
+            f"{original_len} → {len(new_tool_result_content)} chars. Fallback to original output."
+        )
 
 
 def chunk_and_summarize_large_text(agent: LLMAgent, text: str, tool_name: str, task_goal: str) -> str:
@@ -114,9 +122,9 @@ def chunk_and_summarize_large_text(agent: LLMAgent, text: str, tool_name: str, t
     """
     agent.on_system_msg(f"[CHUNK ANALYZER] Starting chunked analysis of {len(text)} chars for tool '{tool_name}'...")
 
-    token_limit = agent.token_tracker.max_context_tokens
-    token_chunk_size = max(int(token_limit / 3.5), 3000)
-    chunk_size = int(token_chunk_size * 2.6)
+    token_limit = agent.token_tracker.get_remaining()
+    token_chunk_size = token_limit // Config.SUMMARIZATION_THRESHOLD_DIVIDER
+    chunk_size = int(token_chunk_size * CHARS_PER_TOKEN)
 
     chunks = []
     pos = 0
@@ -132,21 +140,8 @@ def chunk_and_summarize_large_text(agent: LLMAgent, text: str, tool_name: str, t
 
     total_chunks = len(chunks)
     findings_by_portion: list[str] = []
-    decision_data = {"chunk_findings": "", "decision": "continue", "reason": ""}
 
     from universal_agents.sub_agent import SubAgent
-
-    @tool(
-        description="Report findings from the current chunk and decide about the next step.",
-        chunk_findings=("str", "Key facts... Write 'None' if nothing useful found."),
-        reason=("str", "Very brief explanation for your decision"),
-        decision=("str", "One of: 'continue', 'stop_found', 'stop_useless'"),
-    )
-    def report_step(chunk_findings: str, decision: str, reason: str = "") -> str:
-        decision_data["chunk_findings"] = chunk_findings
-        decision_data["decision"] = decision.strip().lower()
-        decision_data["reason"] = reason
-        return "Step recorded."
 
     for idx, chunk in enumerate(chunks):
         current_num = idx + 1
@@ -154,26 +149,37 @@ def chunk_and_summarize_large_text(agent: LLMAgent, text: str, tool_name: str, t
 
         history_str = "\n".join(findings_by_portion) if findings_by_portion else "No findings yet."
 
+        parent_system_prompt = agent.history[0].content if agent.history else ""
+        parent_history = agent.history.get_all()[1:]
+
         step_agent = SubAgent(
-            system_prompt=(
-                "You're a info extractor sub-agent. Your main job is to extract and preserve most useful highly relevant to "
-                "the goal info from portions of text. Try to separate the useful signal from the noise, keeping only the signal. "
-                "You basically need to intelligently summarize what you read. YOU MUST CITE PORTION TEXT. "
-                "Do NOT duplicate what has already been found in previous portions.\n"
-            ),
-            max_context_tokens=token_chunk_size * 2,
-            tools_config=["report_step"],
-            external_plugins={"report_step": report_step},
-            safe_only=True,
+            parent_system_prompt=parent_system_prompt,
+            parent_history=parent_history,
+            max_context_tokens=agent.token_tracker.max_context_tokens,
+            tools_config=[],
+            external_plugins={},
+            safe_only=False,
             max_iter=1,
-            temp=0.0,
+            temp=0.35,
             on_log=agent.on_system_msg,
         )
 
+        specialist_instructions = (
+            "You're an info extractor sub-agent. "
+            "Your main job is to extract and preserve the most useful relevant "
+            "to the goal info from portions of original text. "
+            "Intelligently summarize what you read and CITE PORTION TEXT. "
+            "Do NOT duplicate findings from previous portions."
+        )
+
         prompt = (
+            f"{specialist_instructions}\n\n"
             f"MAIN GOAL: {task_goal}\n"
             f"Instructions:\n"
-            f"Just call `report_step` with only fresh new very detailed findings and citations from {current_num} portion, very brief reasoning and final decision.\n"
+            f"Return only a structured response in EXACTLY this format (no extra text):\n"
+            f"FINDINGS: <your fresh new very detailed findings and citations from portion {current_num}>\n"
+            f"DECISION: <one of: continue, stop_found, stop_useless>\n"
+            f"REASON: <very brief explanation for your decision>\n\n"
             f"YOUR FINDINGS FROM PREVIOUS PORTIONS:\n{history_str}\n\n"
             f"--- PORTION ({current_num} / {total_chunks}) ---\n"
             f"{chunk}\n---\n\n"
@@ -183,17 +189,24 @@ def chunk_and_summarize_large_text(agent: LLMAgent, text: str, tool_name: str, t
 
         step_agent.run(prompt)
 
-        tc = step_agent.get_last_tool_call()
-        if not tc or tc.name != "report_step":
-            agent.on_system_msg(f"[CHUNK ANALYZER] Warning: Subagent missed tool call at portion {current_num}. Skipping.")
-            last_msg = step_agent._agent.history.get_last_message()
-            if last_msg and last_msg.content:
-                findings_by_portion.append(f"\n[Portion {current_num}]: {last_msg.content}")
+        last_msg = step_agent._agent.history.get_last_message()
+        if not last_msg or not hasattr(last_msg, 'content') or not last_msg.content:
+            agent.on_system_msg(f"[CHUNK ANALYZER] Warning: Subagent returned empty at portion {current_num}. Skipping.")
             continue
 
-        findings = decision_data["chunk_findings"].strip()
-        decision = decision_data["decision"]
-        reason = decision_data["reason"]
+        response_text = last_msg.content.strip()
+        findings = ""
+        decision = "continue"
+        reason = ""
+
+        for line in response_text.split("\n"):
+            line_s = line.strip()
+            if line_s.upper().startswith("FINDINGS:"):
+                findings = line_s[len("FINDINGS:"):].strip()
+            elif line_s.upper().startswith("DECISION:"):
+                decision = line_s[len("DECISION:"):].strip().lower()
+            elif line_s.upper().startswith("REASON:"):
+                reason = line_s[len("REASON:"):].strip()
 
         if findings and findings.lower() != "none":
             findings_by_portion.append(f"- [Portion {current_num}]: {findings}")

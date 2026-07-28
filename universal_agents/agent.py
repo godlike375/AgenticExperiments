@@ -27,7 +27,6 @@ class LLMAgent:
         on_system_msg: Callable[[str], None] = lambda x: None,
         external_plugins: dict[str, Callable] = None,
         max_context_tokens: int = None,
-        _create_judge: bool = True,
         top_p: float = None,
         frequency_penalty: float = None,
         presence_penalty: float = None,
@@ -44,7 +43,7 @@ class LLMAgent:
         self.top_p = top_p if top_p is not None else Config.TOP_P
         self.frequency_penalty = frequency_penalty if frequency_penalty is not None else Config.FREQUENCY_PENALTY
         self.presence_penalty = presence_penalty if presence_penalty is not None else Config.PRESENCE_PENALTY
-        self.max_tokens = max_tokens if max_tokens is not None else Config.MAX_TOKENS
+        self.max_tokens = max_tokens if max_tokens is not None else Config.MAX_OUTPUT_TOKENS
         self.on_render = on_render
         self.on_confirm = on_confirm
         self.on_system_msg = on_system_msg
@@ -67,6 +66,8 @@ class LLMAgent:
         self._tool_usage: dict[str, int] = {}
         self._max_generation_attempts = max_generation_attempts
         self.trusted_dirs: set[str] = set()
+        self._last_response_id: Optional[str] = None
+        self._last_sent_msg_count: int = 0
 
     def trust_dir(self, path: str) -> str:
         """Add a directory to trusted dirs (edit_file skips confirmation)."""
@@ -198,7 +199,7 @@ class LLMAgent:
             func = external_tools[name]
             desc = getattr(func, '_short_description', '')
             lines.append(f'"{name}" ({desc});' if desc else name)
-        lines.append(f'\nTo load a specific tool call use load_tools with "tool_name" arg')
+        lines.append(f'\nTo load a concrete tool use "load_tools" + "name" arg')
         return "\n".join(lines)
 
     # --------------------------------------------------------
@@ -311,6 +312,7 @@ class LLMAgent:
         frequency_penalty: float = None,
         presence_penalty: float = None,
         max_tokens: int = None,
+        previous_response_id: str = None,
     ) -> tuple:
         """
         Вызов LLM с streaming для текста.
@@ -327,12 +329,12 @@ class LLMAgent:
                 frequency_penalty=frequency_penalty,
                 presence_penalty=presence_penalty,
                 max_tokens=max_tokens,
+                previous_response_id=previous_response_id,
             )
             
             full_content = ""
             tool_calls_data = {}
             usage = None
-            finish_reason = None
             
             # Проверяем, не вернулся ли генератор ошибки
             first_chunk = next(stream)
@@ -351,7 +353,6 @@ class LLMAgent:
                     "total_tokens": first_chunk.usage.total_tokens
                 }
             if first_chunk.choices:
-                finish_reason = first_chunk.choices[0].finish_reason
                 if first_chunk.choices[0].delta.content:
                     full_content += first_chunk.choices[0].delta.content
                     if self.on_stream_chunk:
@@ -367,7 +368,6 @@ class LLMAgent:
                         "total_tokens": chunk.usage.total_tokens
                     }
                 if chunk.choices:
-                    finish_reason = chunk.choices[0].finish_reason
                     if chunk.choices[0].delta.content:
                         full_content += chunk.choices[0].delta.content
                         if self.on_stream_chunk:
@@ -597,13 +597,22 @@ class LLMAgent:
         user_msg = UserMessage(content=message)
         self.history.add(user_msg)
         current_prefill = self._get_effective_prefill(prefill)
+        self._last_response_id = None
+        self._last_sent_msg_count = 0
 
         consecutive_errors = 0
         MAX_CONSECUTIVE_ERRORS = 5
 
         for i in range(max_iter):
             step_prefill = current_prefill if i == 0 else None
-            messages_to_send = self._prepare_messages_for_api()
+            all_messages = self._prepare_messages_for_api()
+
+            if i == 0 or self._last_response_id is None:
+                messages_to_send = all_messages
+                prev_response_id = None
+            else:
+                messages_to_send = all_messages[self._last_sent_msg_count:]
+                prev_response_id = self._last_response_id
 
             max_generation_attempts = self._max_generation_attempts if self._max_generation_attempts is not None else 2
             message_obj = None
@@ -639,6 +648,7 @@ class LLMAgent:
                         frequency_penalty=self.frequency_penalty,
                         presence_penalty=self.presence_penalty,
                         max_tokens=self.max_tokens,
+                        previous_response_id=prev_response_id,
                     )
                 else:
                     message_obj, err, usage = LLMClient.call(
@@ -649,6 +659,7 @@ class LLMAgent:
                         frequency_penalty=self.frequency_penalty,
                         presence_penalty=self.presence_penalty,
                         max_tokens=self.max_tokens,
+                        previous_response_id=prev_response_id,
                     )
                 
                 if usage:
@@ -661,6 +672,10 @@ class LLMAgent:
                 if not message_obj:
                     api_error_occurred = True
                     break
+
+                if hasattr(message_obj, '_response_id'):
+                    self._last_response_id = message_obj._response_id
+                self._last_sent_msg_count = len(all_messages)
 
                 if message_obj.tool_calls:
                     has_duplicate = False
