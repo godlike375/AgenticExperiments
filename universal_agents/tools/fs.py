@@ -218,8 +218,8 @@ def _summarize_file(path: str, content: str, agent) -> str:
     )
 
     specialist_instructions = (
-        f"{ENVIRONMENT_PREFIX} NOW IGNORE previous instructions! Act as 'SkeletonGenerator' tool. "
-        "Respond only in tags '<skeleton>' with a very short concise skeleton with the most top-level identifiers and their EXACT "
+        f"{ENVIRONMENT_PREFIX} NOW IGNORE previous instructions! Act as SkeletonGenerator agent. "
+        "Respond only in tags '<skeleton>' with a very short compact and concise skeleton with the most top-level identifiers and their EXACT "
         "line numbered ranges. NO COMMS!"
     )
 
@@ -227,7 +227,7 @@ def _summarize_file(path: str, content: str, agent) -> str:
         f"{specialist_instructions}\n\n"
         "The skeleton includes top-level elements (signatures of functions, classes, methods defined right in this file)"
         " and precise line number ranges for each element\n"
-        f"FILE CONTENT (with line numbers):\n```\n {ENVIRONMENT_PREFIX}"
+        f"Now skeletonize it!"
     )
 
     max_tokens = agent.token_tracker.get_remaining() // Config.SUMMARIZATION_THRESHOLD_DIVIDER
@@ -238,7 +238,7 @@ def _summarize_file(path: str, content: str, agent) -> str:
     selected = snippet.split("\n")
     numbered_text = "\n".join(f"{start + i} {line}" for i, line in enumerate(selected))
 
-    task += numbered_text + "\n```"
+    task = '```\n' + numbered_text + "\n```" + task
     if truncated:
         task += "\n\n(File is truncated due to remaining memory)"
 
