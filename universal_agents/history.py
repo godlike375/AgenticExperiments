@@ -194,3 +194,18 @@ class ChatHistory:
 
     def get_messages_by_type(self, msg_type) -> list[Message]:
         return [msg for msg in self._messages if isinstance(msg, msg_type)]
+
+    def compress_old_messages(self, summary: str, preserve_last: int = 2) -> None:
+        """Заменяет старые сообщения summary-сообщением (UserMessage),
+        сохраняя system prompt и последние preserve_last сообщений."""
+        safe_end = len(self._messages) - preserve_last
+
+        if Config.AFTER_SYSTEM_PROMPT > safe_end:
+            return
+
+        summary_msg = UserMessage(
+            content=f"{ENVIRONMENT_PREFIX} Previous dialogue summary:\n{summary}"
+        )
+
+        preserved = self._messages[safe_end:]
+        self._messages = [self._messages[0], summary_msg] + preserved

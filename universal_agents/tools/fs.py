@@ -194,12 +194,10 @@ def edit_file(path: str, new: str, old: str = '', mode: str = "one"):
     return "\n".join(preview)
 
 
-CHARS_PER_TOKEN = 2.3
+CHARS_PER_TOKEN = Config.CHARS_PER_TOKEN
 
-MIN_TOKENS_TO_SUMMARIZE = 750
+MIN_TOKENS_TO_SUMMARIZE = Config.MIN_TOKENS_TO_SUMMARIZE
 _SUMMARY_THRESHOLD = int(MIN_TOKENS_TO_SUMMARIZE * CHARS_PER_TOKEN)
-
-SUMMARY_CONTEXT_FRACTION = 2 / 3
 
 
 def _summarize_file(path: str, content: str, agent) -> str:
@@ -233,7 +231,7 @@ def _summarize_file(path: str, content: str, agent) -> str:
     )
 
     max_tokens = agent.token_tracker.get_remaining() // Config.SUMMARIZATION_THRESHOLD_DIVIDER
-    max_chars = int(max_tokens * CHARS_PER_TOKEN)
+    max_chars = int(max_tokens * Config.CHARS_PER_TOKEN)
     truncated = len(content) > max_chars
     snippet = content[:max_chars]
     start = 1

@@ -10,7 +10,7 @@ from universal_agents.models import UserMessage, AssistantMessage, ToolCall, Too
 from universal_agents.llm_client import LLMClient, TokenUsageTracker, LoopDetector
 from universal_agents.history import ChatHistory
 
-from universal_agents.compressors import auto_compress_tool_result
+from universal_agents.compressors import auto_compress_tool_result, summarize_dialogue
 from universal_agents.context_builder import prepare_messages_for_api, get_effective_prefill
 from universal_agents.history_repair import prune_all_failed_tool_calls_except_last
 
@@ -126,6 +126,45 @@ class LLMAgent:
         total = sum(self._tool_usage.values())
         items = " · ".join(f"{name} ×{count}" for name, count in sorted(self._tool_usage.items(), key=lambda x: -x[1]))
         return f"Tools: {items} ({total} total)"
+
+    def _get_context_usage_percent(self) -> float:
+        """Оценка процента заполнения контекста на основе текущих сообщений."""
+        total = 0
+        for msg in self.history.get_all():
+            content = getattr(msg, 'content', '') or ''
+            total += TokenUsageTracker.estimate_tokens(content)
+        return (total / self.token_tracker.max_context_tokens) * 100
+
+    def _auto_summarize_dialogue(self) -> None:
+        """Автоматическая суммаризация диалога при превышении порога контекста."""
+        preserve_last = Config.AUTO_SUMMARY_PRESERVE_LAST
+        total = len(self.history)
+
+        if total <= Config.AFTER_SYSTEM_PROMPT + preserve_last:
+            return
+
+        end_id = total - 1 - preserve_last
+        start_id = Config.AFTER_SYSTEM_PROMPT
+
+        if start_id >= end_id:
+            return
+
+        original_len = sum(
+            len(getattr(m, 'content', '') or '')
+            for m in self.history.get_all()[start_id:end_id + 1]
+        )
+
+        summary = summarize_dialogue(
+            self, mode='batch', start_id=start_id, end_id=end_id,
+        )
+
+        if not summary or len(summary) >= original_len:
+            return
+
+        self.history.compress_old_messages(summary, preserve_last=preserve_last)
+        self.on_system_msg(
+            f"[AUTO-SUMMARY] Context compressed ({int(original_len / Config.CHARS_PER_TOKEN)} -> {int(len(summary) / Config.CHARS_PER_TOKEN)} tokens)"
+        )
 
     def rebuild_tool_usage(self):
         self._tool_usage.clear()
@@ -713,6 +752,9 @@ class LLMAgent:
                 return
 
             result_text, tool_error_occurred = self._process_llm_response(message_obj)
+
+            if self._get_context_usage_percent() >= Config.AUTO_SUMMARY_THRESHOLD:
+                self._auto_summarize_dialogue()
 
             if tool_error_occurred:
                 consecutive_errors += 1

@@ -15,7 +15,7 @@ class Message(ABC):
         pass
 
     @abstractmethod
-    def render(self) -> str:
+    def render(self, label: str = "Agent") -> str:
         pass
 
 @dataclass
@@ -25,8 +25,8 @@ class SystemMessage(Message):
     def to_api_dict(self) -> dict[str, Any]:
         return {"role": "system", "content": self.content}
 
-    def render(self) -> str:
-        return f"[SYSTEM]: {self.content[:100]}..."
+    def render(self, label: str = "Agent") -> str:
+        return ""
 
 @dataclass
 class UserMessage(Message):
@@ -35,7 +35,7 @@ class UserMessage(Message):
     def to_api_dict(self) -> dict[str, Any]:
         return {"role": "user", "content": self.content}
 
-    def render(self) -> str:
+    def render(self, label: str = "Agent") -> str:
         return f"👤 User: {self.content}"
 
 @dataclass
@@ -71,12 +71,12 @@ class AssistantMessage(Message):
             d["tool_calls"] = [tc.to_api_dict() for tc in self.tool_calls]
         return d
 
-    def render(self) -> str:
+    def render(self, label: str = "Agent") -> str:
         parts = []
-        if self.content.strip():
-            parts.append(f"🤖 Agent: {self.content}")
+        if self.content.strip() and not getattr(self, '_streamed', False):
+            parts.append(f"🤖 {label}: {self.content}")
         for tc in self.tool_calls:
-            parts.append(f"🛠️ [Tool Call: {tc.name}({tc.arguments})]")
+            parts.append(f"🛠️ [{label} Tool Call: {tc.name}({tc.arguments})]")
         return "\n".join(parts)
 
 @dataclass
@@ -97,12 +97,12 @@ class ToolResult(Message):
             "content": self.content
         }
 
-    def render(self) -> str:
+    def render(self, label: str = "Agent") -> str:
         prefix = "❌" if self.is_error else "✅"
         display = str(self.content)
         #if len(display) > 300:
         #    display = display[:300] + "\n... [TRUNCATED]"
-        return f"{prefix} [Result '{self.name}']: {display}"
+        return f"{prefix} [{label} Result '{self.name}']: {display}"
 
     @classmethod
     def success(cls, tool_call_id: str, name: str, content: str = "Tool executed successfully"):

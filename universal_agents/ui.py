@@ -6,23 +6,12 @@ from universal_agents.agent import LLMAgent
 
 class ConsoleUI:
     @staticmethod
-    def render_message(msg: Message):
+    def render_message(msg: Message, label: str = "Agent"):
         if isinstance(msg, SystemMessage):
             return
-        elif isinstance(msg, UserMessage):
-            print(f"\n👤 User: {msg.content}")
-        elif isinstance(msg, AssistantMessage):
-            if msg.content and msg.content.strip() and not getattr(msg, '_streamed', False):
-                print('\n' + '=' * 15)
-                print(f"🤖 Agent: {msg.content}")
-                print('=' * 15)
-            for tc in msg.tool_calls:
-                print(f"🛠️ [Tool Call: {tc.name}({tc.arguments})]")
-        elif isinstance(msg, ToolResult):
-            display = str(msg.content)
-            #if len(display) > 300:
-            #    display = display[:300] + "\n... [TRUNCATED]"
-            print(f"✅ [Result '{msg.name}']: {display}")
+        output = msg.render(label=label)
+        if output:
+            print(output)
 
     @staticmethod
     def system_msg(text: str):

@@ -5,6 +5,7 @@ from universal_agents.tool import tool, ENVIRONMENT_PREFIX
 from universal_agents.config import Config
 from universal_agents.models import UserMessage, AssistantMessage, ToolResult, SystemMessage
 from universal_agents.sub_agent import SubAgent, MAX_SUB_AGENT_DEPTH
+from universal_agents.compressors import summarize_dialogue
 
 if TYPE_CHECKING:
     from universal_agents.agent import LLMAgent
@@ -78,8 +79,6 @@ def delete_messages(agent: LLMAgent, start_id: int, end_id: int = -1) -> str:
     end_id=("int", "End index (inclusive). Use -1 for last message"),
 )
 def summarize_messages(agent: LLMAgent, start_id: int, end_id: int = -1) -> str:
-    from universal_agents.compressors import summarize_text
-
     history = agent.history
     if end_id == -1 or end_id >= len(history):
         end_id = len(history) - 3
@@ -89,34 +88,34 @@ def summarize_messages(agent: LLMAgent, start_id: int, end_id: int = -1) -> str:
 
     if safe_start > safe_end:
         return (
-            f"{ENVIRONMENT_PREFIX} Cannot summarize: range [{start_id}:{end_id}] "
+            f"{ENVIRONMENT_PREFIX} Cannot summarize: range [{start_id}:{safe_end}] "
             f"is invalid or overlaps with protected last 2 messages."
         )
 
-    lines = []
-    for i in range(safe_start, safe_end + 1):
-        msg = history[i]
-        role = type(msg).__name__.replace("Message", "").upper()
-        role = role if role != 'ASSISTANT' else 'AI'
-        content = getattr(msg, 'content', str(msg))
-        lines.append(f"{role}: {content}")
-
-    raw_text = "\n".join(lines)
-    summary = summarize_text(agent, raw_text)
+    summary = summarize_dialogue(agent, mode='single', start_id=safe_start, end_id=safe_end)
     if not summary:
         return f"{ENVIRONMENT_PREFIX} Summarization failed (empty response or error)."
+
+    original_len = sum(
+        len(getattr(m, 'content', '') or '')
+        for m in history.get_all()[safe_start:safe_end + 1]
+    )
+    if len(summary) >= original_len:
+        return (
+            f"{ENVIRONMENT_PREFIX} Summarization produced text longer than original "
+            f"({len(summary)} >= {original_len}). Nothing to compress."
+        )
 
     summary_content = f"{ENVIRONMENT_PREFIX} [SUMMARY of messages {safe_start}-{safe_end}]: {summary}"
     del history._messages[safe_start:safe_end + 1]
     history._messages.insert(safe_start, UserMessage(content=summary_content))
     history.normalize()
 
-    freed = len(raw_text) - len(summary_content)
+    freed = original_len - len(summary_content)
     return (
         f"{ENVIRONMENT_PREFIX} Successfully summarized "
         f"{safe_end - safe_start + 1} messages into 1. Freed ~{freed} chars."
     )
-
 
 @tool(
     description="Delegates a task to a sub-agent that has access to the same tools and system prompt as you. "
@@ -158,7 +157,7 @@ def delegate_to_subagent(agent: LLMAgent, task: str, max_iter: int = None) -> st
         depth=depth + 1,
     )
 
-    agent.on_system_msg(f"[DELEGATE] Starting sub-agent for: {task[:100]}...")
+    agent.on_system_msg(f"[DELEGATE] Starting sub-agent for: {task}...")
     result = sub.run(task_with_context)
     agent.on_system_msg(f"[DELEGATE] Completed. Tokens spent by sub-agent: {sub.tokens_spent}")
 

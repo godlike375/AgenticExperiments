@@ -2,6 +2,7 @@ from typing import Optional, Callable, Union
 from universal_agents.models import AssistantMessage, ToolResult
 from universal_agents.llm_client import TokenUsageTracker
 from universal_agents.config import Config
+import sys
 
 MAX_SUB_AGENT_DEPTH = 1
 
@@ -34,6 +35,10 @@ class SubAgent:
             parent_system_prompt: Optional[str] = None,
             # Recursion prevention
             depth: int = 0,
+            # Streaming
+            on_stream_chunk: Optional[Callable[[str], None]] = None,
+            on_stream_start: Optional[Callable[[], None]] = None,
+            on_stream_end: Optional[Callable[[], None]] = None,
     ):
         from agent import LLMAgent
 
@@ -57,13 +62,24 @@ class SubAgent:
         self._own_tracker = TokenUsageTracker(effective_system_prompt, effective_max_context_tokens)
 
         def _render_subagent(msg):
-            if isinstance(msg, AssistantMessage):
-                if msg.has_tool_calls():
-                    tc_names = [tc.name for tc in msg.tool_calls]
-                    on_log(f"[sub] calling: {', '.join(tc_names)}")
-            elif isinstance(msg, ToolResult):
-                preview = str(msg.content)[:80]
-                on_log(f"[sub] result: {preview}")
+            output = msg.render(label="[sub]")
+            if output:
+                on_log(output)
+
+        # Streaming для субагента (по умолчанию — вывод в stdout)
+        if on_stream_chunk is None:
+            def _sub_stream_start():
+                sys.stdout.write("[sub] ")
+                sys.stdout.flush()
+            def _sub_stream_chunk(chunk):
+                sys.stdout.write(chunk)
+                sys.stdout.flush()
+            def _sub_stream_end():
+                sys.stdout.write("\n")
+                sys.stdout.flush()
+            on_stream_start = _sub_stream_start
+            on_stream_chunk = _sub_stream_chunk
+            on_stream_end = _sub_stream_end
 
         self._agent = LLMAgent(
             system_prompt=effective_system_prompt,
@@ -80,6 +96,10 @@ class SubAgent:
             presence_penalty=presence_penalty if presence_penalty is not None else Config.PRESENCE_PENALTY,
             max_tokens=max_tokens if max_tokens is not None else Config.MAX_OUTPUT_TOKENS,
             max_generation_attempts=1,
+            streaming_enabled=True,
+            on_stream_chunk=on_stream_chunk,
+            on_stream_start=on_stream_start,
+            on_stream_end=on_stream_end,
         )
         self._agent.token_tracker = self._own_tracker
         self._agent._depth = depth

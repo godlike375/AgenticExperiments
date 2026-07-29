@@ -18,3 +18,11 @@ class Config:
     STREAM_ENABLED = True
 
     USE_RESPONSES_API = True
+
+    # Автоматическая суммаризация диалога
+    AUTO_SUMMARY_THRESHOLD = 33  # процент контекста (60%)
+    AUTO_SUMMARY_PRESERVE_LAST = 1  # сколько последних сообщений не трогать
+
+    # Константы токенизации и суммаризации
+    CHARS_PER_TOKEN = 2.3
+    MIN_TOKENS_TO_SUMMARIZE = 500
