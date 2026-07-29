@@ -17,7 +17,6 @@ if TYPE_CHECKING:
 
 def summarize_dialogue(
     agent: LLMAgent,
-    mode: str = "single",
     start_id: Optional[int] = None,
     end_id: Optional[int] = None,
 ) -> Optional[str]:
@@ -34,7 +33,7 @@ def summarize_dialogue(
     if end_id is None:
         end_id = len(messages) - 1
 
-    if start_id >= end_id:
+    if start_id > end_id:
         return None
 
     # Структурированные сообщения истории для KV-cache reuse
@@ -47,10 +46,10 @@ def summarize_dialogue(
             last_user_content = messages[i].content
             break
 
-    if mode == "batch":
-        summary = _batch_summarize(agent, history_msgs, last_user_content)
-    else:
-        summary = _single_phase_summarize(agent, history_msgs, last_user_content)
+    # Вся история как prefix для KV-cache reuse
+    full_history_msgs = [msg.to_api_dict() for msg in messages]
+
+    summary = _batch_summarize(agent, history_msgs, full_history_msgs) or _single_phase_summarize(agent, history_msgs, last_user_content)
 
     return summary
 
@@ -63,15 +62,15 @@ def _single_phase_summarize(
     Промпт суммаризации добавляется в конец structured истории.
     """
     prompt = (
-        f"{ENVIRONMENT_PREFIX} Based on the conversation above (your own history), "
-        f"write more concise summarized dialog using roles 'User', 'AI', 'tool' if presented.\n"
+        f"{ENVIRONMENT_PREFIX} Based on the conversation above "
+        f"write more dense and concise summarized dialog also using roles User, AI, tool.\n"
         f"Ensure preserving:"
         f"1. The last user message and the original user task.\n"
-        f"2. All key decisions made\n"
-        f"3. Critical things\n"
+        f"2. Key decisions made\n"
+        f"3. Critical details for further conversation/work\n"
         f"4. Current task state (what's done, what's pending)\n"
         f"Remove reasoning chains and redundant info. "
-        f"Output ONLY the summary text in dialog format (like AI: ...\\n User: ... and so on)."
+        f"Output ONLY the dense summary in dialog format (like 'AI: ...\\n User: ...' and so on)."
     )
     msgs = history_msgs + [{"role": "user", "content": prompt}]
     msg_obj, err, usage = LLMClient.call(msgs, temp=0.1, timeout=60, tools=None)
@@ -82,23 +81,25 @@ def _single_phase_summarize(
     return msg_obj.content.strip()
 
 
-def _summarize_batch(agent: LLMAgent, batch_msgs: list[dict], last_user_content: str = "") -> Optional[str]:
+def _summarize_batch(agent: LLMAgent, full_history_msgs: list[dict], target_content: str) -> Optional[str]:
     """
-    Суммаризация одной пачки сообщений (до 2 попыток).
-    structured batch_msgs + prompt → summary.
+    Суммаризация одного длинного сообщения (до 2 попыток).
+    full_history_msgs + prompt(с кусочком target) → summary.
     Если summary не короче оригинала после 2 попыток — возвращает None.
     """
-    original_chars = sum(len(m.get('content', '') or '') for m in batch_msgs)
+    original_chars = len(target_content)
 
     for attempt in range(2):
+        snippet = target_content[:100]
         prompt = (
-            f"{ENVIRONMENT_PREFIX} Summarize the dialog above. Write roles (AI, User, tool if presented)."
-            f"Preserve: decisions and critical info for further dialog/work. "
-            f"Remove reasoning chains and redundant things. "
-            f"Output ONLY the concise dialog format (like AI: ...\\n User: ... and so on)"
+            f"{ENVIRONMENT_PREFIX} Summarize that 1 message above in a very dense way."
+            f"Preserve critical details for further dialog/work. "
+            f"Remove: reasoning chains / redundant info. "
+            f"Output ONLY the dense concise variant of the message above."
+            f"\n\nTarget message begins with:\n{snippet}"
         )
 
-        msgs = batch_msgs + [{"role": "user", "content": prompt}]
+        msgs = full_history_msgs + [{"role": "user", "content": prompt}]
         msg_obj, err, usage = LLMClient.call(
             msgs, temp=0.2 if attempt == 0 else 0.45,
         )
@@ -118,55 +119,37 @@ def _summarize_batch(agent: LLMAgent, batch_msgs: list[dict], last_user_content:
 
 
 def _batch_summarize(
-    agent: LLMAgent, history_msgs: list[dict], last_user_content: str = ""
+    agent: LLMAgent, history_msgs: list[dict], full_history_msgs: list[dict]
 ) -> Optional[str]:
     """
-    Разбивает историю на пачки по порогу MIN_TOKENS_TO_SUMMARIZE,
-    каждую пачку суммаризирует через _summarize_batch.
-    Если пачка не сжалась — фоллбэк до оригинальных текстов.
+    Проходит по сообщениям, каждое длинное (> MIN_TOKENS_TO_SUMMARIZE)
+    суммаризирует отдельно через _summarize_batch.
+    Короткие сообщения оставляет как есть.
     Результаты склеиваются в один текст через разделитель.
     """
     MIN_CHARS = int(Config.MIN_TOKENS_TO_SUMMARIZE * Config.CHARS_PER_TOKEN)
 
-    batches: list[list[dict]] = []
-    current_batch: list[dict] = []
-    current_chars = 0
-
-    for msg_dict in history_msgs:
-        content = msg_dict.get('content', '') or ''
-        msg_len = len(content)
-
-        current_batch.append(msg_dict)
-        current_chars += msg_len
-
-        if current_chars >= MIN_CHARS:
-            batches.append(current_batch)
-            current_batch = []
-            current_chars = 0
-
-    if current_batch:
-        batches.append(current_batch)
+    summarized = 0
 
     parts: list[str] = []
-    for batch in batches:
-        batch_chars = sum(len((m.get('content', '') or '')) for m in batch)
-        if batch_chars < MIN_CHARS:
-            for m in batch:
-                c = m.get('content', '') or ''
-                if c.strip():
-                    parts.append(c)
+    for msg_dict in history_msgs:
+        content = msg_dict.get('content', '') or ''
+        if not content.strip():
             continue
 
-        summary = _summarize_batch(agent, batch, last_user_content)
-        if summary:
-            parts.append(summary)
-        else:
-            for m in batch:
-                c = m.get('content', '') or ''
-                if c.strip():
-                    parts.append(c)
+        role = msg_dict.get('role', 'user')
+        role = role if role != 'assistant' else 'AI'
 
-    return "\n\n".join(parts) if parts else None
+        if len(content) >= MIN_CHARS:
+            summary = role + ': ' + _summarize_batch(agent, full_history_msgs, content)
+            if summary:
+                parts.append(summary)
+                summarized += 1
+                continue
+
+        parts.append(role + ': ' + content)
+
+    return "\n\n".join(parts) if summarized > 0 and parts else None
 
 
 def summarize_text(agent: LLMAgent, text: str) -> Optional[str]:

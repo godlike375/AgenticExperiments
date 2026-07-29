@@ -182,6 +182,7 @@ class LLMClient:
                 "temperature": temp if temp is not None else Config.TEMP,
                 "max_output_tokens": max_tokens if max_tokens is not None else Config.MAX_OUTPUT_TOKENS,
                 "timeout": timeout if timeout is not None else Config.TIMEOUT,
+                "reasoning_effort": "none",
             }
             if tools:
                 kwargs["tools"] = tools
@@ -204,6 +205,7 @@ class LLMClient:
                 "temperature": temp if temp is not None else Config.TEMP,
                 "max_output_tokens": max_tokens if max_tokens is not None else Config.MAX_OUTPUT_TOKENS,
                 "timeout": timeout if timeout is not None else Config.TIMEOUT,
+                "reasoning_effort": "none",
             }
             if tools:
                 kwargs["tools"] = tools

@@ -92,7 +92,7 @@ def summarize_messages(agent: LLMAgent, start_id: int, end_id: int = -1) -> str:
             f"is invalid or overlaps with protected last 2 messages."
         )
 
-    summary = summarize_dialogue(agent, mode='single', start_id=safe_start, end_id=safe_end)
+    summary = summarize_dialogue(agent, start_id=safe_start, end_id=safe_end)
     if not summary:
         return f"{ENVIRONMENT_PREFIX} Summarization failed (empty response or error)."
 

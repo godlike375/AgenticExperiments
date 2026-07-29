@@ -62,14 +62,14 @@ class SubAgent:
         self._own_tracker = TokenUsageTracker(effective_system_prompt, effective_max_context_tokens)
 
         def _render_subagent(msg):
-            output = msg.render(label="[sub]")
+            output = msg.render(label="[🤖sub-agent]")
             if output:
                 on_log(output)
 
         # Streaming для субагента (по умолчанию — вывод в stdout)
         if on_stream_chunk is None:
             def _sub_stream_start():
-                sys.stdout.write("[sub] ")
+                sys.stdout.write("[🤖sub-agent] ")
                 sys.stdout.flush()
             def _sub_stream_chunk(chunk):
                 sys.stdout.write(chunk)

@@ -146,7 +146,7 @@ class LLMAgent:
         end_id = total - 1 - preserve_last
         start_id = Config.AFTER_SYSTEM_PROMPT
 
-        if start_id >= end_id:
+        if start_id > end_id:
             return
 
         original_len = sum(
@@ -155,7 +155,7 @@ class LLMAgent:
         )
 
         summary = summarize_dialogue(
-            self, mode='batch', start_id=start_id, end_id=end_id,
+            self, start_id=start_id, end_id=end_id,
         )
 
         if not summary or len(summary) >= original_len:
