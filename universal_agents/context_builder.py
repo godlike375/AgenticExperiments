@@ -24,15 +24,17 @@ def prepare_messages_for_api(agent: LLMAgent) -> list[dict]:
         if isinstance(msg, SystemMessage):
             api_messages.append(msg.to_api_dict())
         elif isinstance(msg, UserMessage):
-            header = agent.token_tracker.format_timestamp_header(msg)
-            if i == last_user_idx and last_user_msg:
-                header += agent.token_tracker.format_token_header(
-                    agent.history[0].content, last_user_msg.content
-                )
-            header += agent.token_tracker.format_closing_header()
+            if msg._cached_header is None:
+                header = agent.token_tracker.format_timestamp_header(msg)
+                if i == last_user_idx and last_user_msg:
+                    header += agent.token_tracker.format_token_header(
+                        agent.history[0].content, last_user_msg.content
+                    )
+                header += agent.token_tracker.format_closing_header()
+                msg._cached_header = header
             api_messages.append({
                 "role": "user",
-                "content": header + msg.content,
+                "content": msg._cached_header + msg.content,
             })
         elif isinstance(msg, AssistantMessage):
             api_messages.append(msg.to_api_dict())

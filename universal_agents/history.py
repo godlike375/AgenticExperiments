@@ -53,6 +53,9 @@ class ChatHistory:
         safe_end = end_id
         if safe_start > safe_end:
             return f"{ENVIRONMENT_PREFIX} Nothing to delete"
+        for msg in self._messages[safe_start:]:
+            if isinstance(msg, UserMessage):
+                msg._cached_header = None
         del self._messages[safe_start:safe_end + 1]
         
         has_user_message = any(isinstance(m, UserMessage) for m in self._messages)
@@ -75,6 +78,8 @@ class ChatHistory:
             if old_text not in msg.content:
                 return f"Error: Substr '{old_text}' not found in message {idx}"
             msg.content = msg.content.replace(old_text, new_text, 1)
+        if isinstance(msg, UserMessage):
+            msg._cached_header = None
         if not msg.content.strip() and idx >= Config.AFTER_SYSTEM_PROMPT:
             self.delete_range(idx, idx)
             return 'Replacing to empty text led to deleting the message block.'
@@ -113,6 +118,8 @@ class ChatHistory:
 
             if type(msg) == type(last) and isinstance(msg, (UserMessage, AssistantMessage)):
                 last.content = (last.content or "") + "\n\n" + (msg.content or "")
+                if isinstance(last, UserMessage):
+                    last._cached_header = None
                 if isinstance(msg, AssistantMessage) and msg.has_tool_calls():
                     last.tool_calls = last.tool_calls + msg.tool_calls
                 continue
@@ -208,4 +215,7 @@ class ChatHistory:
         )
 
         preserved = self._messages[safe_end:]
+        for msg in preserved:
+            if isinstance(msg, UserMessage):
+                msg._cached_header = None
         self._messages = [self._messages[0], summary_msg] + preserved

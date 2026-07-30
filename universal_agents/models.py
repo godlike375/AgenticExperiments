@@ -31,6 +31,7 @@ class SystemMessage(Message):
 @dataclass
 class UserMessage(Message):
     content: str
+    _cached_header: Optional[str] = field(default=None, init=False, repr=False)
 
     def to_api_dict(self) -> dict[str, Any]:
         return {"role": "user", "content": self.content}
