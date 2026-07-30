@@ -59,6 +59,7 @@ class ToolCall:
 class AssistantMessage(Message):
     content: str = ""
     tool_calls: list[ToolCall] = field(default_factory=list)
+    reasoning_content: str = ""
 
     def has_tool_calls(self) -> bool:
         return len(self.tool_calls) > 0
@@ -68,12 +69,16 @@ class AssistantMessage(Message):
 
     def to_api_dict(self) -> dict[str, Any]:
         d = {"role": "assistant", "content": self.content}
+        if self.reasoning_content:
+            d["reasoning_content"] = self.reasoning_content
         if self.tool_calls:
             d["tool_calls"] = [tc.to_api_dict() for tc in self.tool_calls]
         return d
 
     def render(self, label: str = "Agent") -> str:
         parts = []
+        if self.reasoning_content and not getattr(self, '_streamed', False):
+            parts.append(f"📝 {label} [reasoning]: {self.reasoning_content}")
         if self.content.strip() and not getattr(self, '_streamed', False):
             parts.append(f"🤖 {label}: {self.content}")
         for tc in self.tool_calls:

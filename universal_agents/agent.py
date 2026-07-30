@@ -34,6 +34,9 @@ class LLMAgent:
         on_stream_chunk: Callable[[str], None] = None,
         on_stream_start: Callable[[], None] = None,
         on_stream_end: Callable[[], None] = None,
+        on_reasoning_chunk: Callable[[str], None] = None,
+        on_reasoning_start: Callable[[], None] = None,
+        on_reasoning_end: Callable[[], None] = None,
         streaming_enabled: bool = None,
         max_generation_attempts: int = None,
     ):
@@ -62,6 +65,9 @@ class LLMAgent:
         self.on_stream_chunk = on_stream_chunk
         self.on_stream_start = on_stream_start
         self.on_stream_end = on_stream_end
+        self.on_reasoning_chunk = on_reasoning_chunk
+        self.on_reasoning_start = on_reasoning_start
+        self.on_reasoning_end = on_reasoning_end
         self.streaming_enabled = streaming_enabled if streaming_enabled is not None else Config.STREAM_ENABLED
         self._tool_usage: dict[str, int] = {}
         self._max_generation_attempts = max_generation_attempts
@@ -337,7 +343,7 @@ class LLMAgent:
                     name=name,
                     arguments=arguments,
                 ))
-        result = AssistantMessage(content=clean_content, tool_calls=tool_calls)
+        result = AssistantMessage(content=clean_content, tool_calls=tool_calls, reasoning_content=getattr(msg_obj, 'reasoning_content', ''))
         result._streamed = getattr(msg_obj, '_streamed', False)
         return result
 
@@ -372,10 +378,11 @@ class LLMAgent:
             )
             
             full_content = ""
+            full_reasoning = ""
             tool_calls_data = {}
             usage = None
+            reasoning_started = False
             
-            # Проверяем, не вернулся ли генератор ошибки
             first_chunk = next(stream)
             if isinstance(first_chunk, dict) and "error" in first_chunk:
                 return None, first_chunk["error"], None
@@ -383,7 +390,6 @@ class LLMAgent:
             if self.on_stream_start:
                 self.on_stream_start()
             
-            # Обрабатываем первый чанк
             self._process_stream_chunk(first_chunk, tool_calls_data)
             if first_chunk.usage:
                 usage = {
@@ -392,12 +398,21 @@ class LLMAgent:
                     "total_tokens": first_chunk.usage.total_tokens
                 }
             if first_chunk.choices:
-                if first_chunk.choices[0].delta.content:
-                    full_content += first_chunk.choices[0].delta.content
+                delta = first_chunk.choices[0].delta
+                rc = getattr(delta, 'reasoning_content', None)
+                if rc:
+                    full_reasoning += rc
+                    if not reasoning_started:
+                        reasoning_started = True
+                        if self.on_reasoning_start:
+                            self.on_reasoning_start()
+                    if self.on_reasoning_chunk:
+                        self.on_reasoning_chunk(rc)
+                if delta.content:
+                    full_content += delta.content
                     if self.on_stream_chunk:
-                        self.on_stream_chunk(first_chunk.choices[0].delta.content)
+                        self.on_stream_chunk(delta.content)
             
-            # Обрабатываем остальные чанки
             for chunk in stream:
                 self._process_stream_chunk(chunk, tool_calls_data)
                 if chunk.usage:
@@ -407,15 +422,26 @@ class LLMAgent:
                         "total_tokens": chunk.usage.total_tokens
                     }
                 if chunk.choices:
-                    if chunk.choices[0].delta.content:
-                        full_content += chunk.choices[0].delta.content
+                    delta = chunk.choices[0].delta
+                    rc = getattr(delta, 'reasoning_content', None)
+                    if rc:
+                        full_reasoning += rc
+                        if not reasoning_started:
+                            reasoning_started = True
+                            if self.on_reasoning_start:
+                                self.on_reasoning_start()
+                        if self.on_reasoning_chunk:
+                            self.on_reasoning_chunk(rc)
+                    if delta.content:
+                        full_content += delta.content
                         if self.on_stream_chunk:
-                            self.on_stream_chunk(chunk.choices[0].delta.content)
+                            self.on_stream_chunk(delta.content)
             
             if self.on_stream_end:
                 self.on_stream_end()
+            if reasoning_started and self.on_reasoning_end:
+                self.on_reasoning_end()
             
-            # Формируем message_obj
             tool_calls = []
             if tool_calls_data:
                 for tc_data in tool_calls_data.values():
@@ -428,6 +454,7 @@ class LLMAgent:
             message_obj = AssistantMessage(
                 content=full_content,
                 tool_calls=tool_calls,
+                reasoning_content=full_reasoning,
             )
             message_obj._streamed = True
             

@@ -30,15 +30,15 @@ class SubAgent:
             presence_penalty: float = None,
             max_tokens: int = None,
             timeout: int = None,
-            # KV-cache: наследование от родителя
             parent_history: Optional[list] = None,
             parent_system_prompt: Optional[str] = None,
-            # Recursion prevention
             depth: int = 0,
-            # Streaming
             on_stream_chunk: Optional[Callable[[str], None]] = None,
             on_stream_start: Optional[Callable[[], None]] = None,
             on_stream_end: Optional[Callable[[], None]] = None,
+            on_reasoning_chunk: Optional[Callable[[str], None]] = None,
+            on_reasoning_start: Optional[Callable[[], None]] = None,
+            on_reasoning_end: Optional[Callable[[], None]] = None,
     ):
         from agent import LLMAgent
 
@@ -81,6 +81,20 @@ class SubAgent:
             on_stream_chunk = _sub_stream_chunk
             on_stream_end = _sub_stream_end
 
+        if on_reasoning_chunk is None:
+            def _sub_reasoning_start():
+                sys.stdout.write("[🤖sub-agent] 📝[reasoning] ")
+                sys.stdout.flush()
+            def _sub_reasoning_chunk(chunk):
+                sys.stdout.write(chunk)
+                sys.stdout.flush()
+            def _sub_reasoning_end():
+                sys.stdout.write("\n")
+                sys.stdout.flush()
+            on_reasoning_start = _sub_reasoning_start
+            on_reasoning_chunk = _sub_reasoning_chunk
+            on_reasoning_end = _sub_reasoning_end
+
         self._agent = LLMAgent(
             system_prompt=effective_system_prompt,
             temp=temp if temp is not None else Config.TEMP,
@@ -100,6 +114,9 @@ class SubAgent:
             on_stream_chunk=on_stream_chunk,
             on_stream_start=on_stream_start,
             on_stream_end=on_stream_end,
+            on_reasoning_chunk=on_reasoning_chunk,
+            on_reasoning_start=on_reasoning_start,
+            on_reasoning_end=on_reasoning_end,
         )
         self._agent.token_tracker = self._own_tracker
         self._agent._depth = depth

@@ -5,6 +5,9 @@ from universal_agents.models import Message, SystemMessage, UserMessage, Assista
 from universal_agents.agent import LLMAgent
 
 class ConsoleUI:
+    _reasoning_started = False
+    _answer_header_shown = False
+
     @staticmethod
     def render_message(msg: Message, label: str = "Agent"):
         if isinstance(msg, SystemMessage):
@@ -36,16 +39,39 @@ class ConsoleUI:
         """Начало streaming вывода"""
         print('\n' + '=' * 15)
         print("🤖 Agent: ", end="", flush=True)
-    
+        ConsoleUI._reasoning_started = False
+        ConsoleUI._answer_header_shown = False
+
     @staticmethod
     def stream_chunk(chunk: str):
         """Вывод чанка streaming"""
+        if not ConsoleUI._answer_header_shown:
+            if ConsoleUI._reasoning_started:
+                print()
+            print("💬 Answer: ", end="", flush=True)
+            ConsoleUI._answer_header_shown = True
         print(chunk, end="", flush=True)
-    
+
     @staticmethod
     def end_stream():
         """Завершение streaming вывода"""
         print('\n' + '=' * 15)
+
+    @staticmethod
+    def start_reasoning():
+        """Начало streaming вывода reasoning"""
+        print("\n📝 Reasoning: ", end="", flush=True)
+        ConsoleUI._reasoning_started = True
+
+    @staticmethod
+    def stream_reasoning_chunk(chunk: str):
+        """Вывод чанка reasoning"""
+        print(chunk, end="", flush=True)
+
+    @staticmethod
+    def end_reasoning():
+        """Завершение streaming вывода reasoning"""
+        ConsoleUI._reasoning_started = False
 
 class CLI:
     def __init__(self, agent: LLMAgent):

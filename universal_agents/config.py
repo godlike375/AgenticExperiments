@@ -17,7 +17,7 @@ class Config:
 
     STREAM_ENABLED = True
 
-    USE_RESPONSES_API = True
+    USE_RESPONSES_API = False
 
     # Автоматическая суммаризация диалога
     AUTO_SUMMARY_THRESHOLD = 55  # процент контекста (55%)

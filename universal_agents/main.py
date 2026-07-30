@@ -28,6 +28,9 @@ if __name__ == "__main__":
         on_stream_chunk=ConsoleUI.stream_chunk,
         on_stream_start=ConsoleUI.start_stream,
         on_stream_end=ConsoleUI.end_stream,
+        on_reasoning_chunk=ConsoleUI.stream_reasoning_chunk,
+        on_reasoning_start=ConsoleUI.start_reasoning,
+        on_reasoning_end=ConsoleUI.end_reasoning,
     )
 
     cli = CLI(agent)
