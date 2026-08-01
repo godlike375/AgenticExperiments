@@ -1,11 +1,26 @@
 import json
-from collections import deque
-from datetime import datetime
 from typing import Optional
 from openai import OpenAI
-from universal_agents.tool import ENVIRONMENT_PREFIX
-from universal_agents.config import Config
-from universal_agents.tools.fs import CHARS_PER_TOKEN
+from universal_agents.config import Config, CHARS_PER_TOKEN
+from universal_agents.generation import GenerationParams
+
+
+def build_usage_dict(prompt_tokens: int, completion_tokens: int, total_tokens: Optional[int] = None) -> dict:
+    """Собирает usage-словарь в едином формате для агента."""
+    if total_tokens is None:
+        total_tokens = prompt_tokens + completion_tokens
+    return {
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": total_tokens,
+    }
+
+
+def apply_prefill(content: str, prefill: Optional[str]) -> str:
+    """Добавляет prefill в начало содержимого, если его там ещё нет."""
+    if prefill and content and not content.startswith(prefill):
+        return prefill + content
+    return content
 
 
 class TokenUsageTracker:
@@ -34,21 +49,6 @@ class TokenUsageTracker:
         total = self.get_total_context_tokens(self.system_prompt, last_user_content)
         remaining = self.max_context_tokens - total
         return remaining
-
-    def format_timestamp_header(self, msg) -> str:
-        """Метка времени из timestamp сообщения."""
-        ts = msg.timestamp.strftime("%Y-%m-%d %H:%M:%S")
-        return '{'+f"{ENVIRONMENT_PREFIX}:\n{ts} \n"
-
-    def format_token_header(self, first_system_message: str = "", last_user_content: str = "") -> str:
-        """Только информация о токенах (с учётом последнего сообщения)."""
-        total = self.get_total_context_tokens(first_system_message, last_user_content)
-        remaining = self.max_context_tokens - total
-        return f"Memory remaining: {remaining} tokens"
-
-    def format_closing_header(self) -> str:
-        """Закрывающая часть заголовка."""
-        return " }\n\n"
 
     def format_user_token_info(self) -> str:
         """Информация о токенах для отображения пользователю."""
@@ -115,7 +115,12 @@ class LLMClient:
         presence_penalty: float = None,
         max_tokens: int = None,
         previous_response_id: str = None,
+        params: GenerationParams = None,
     ):
+        temp, timeout, top_p, frequency_penalty, presence_penalty, max_tokens = LLMClient._resolve_params(
+            params, temp, timeout, top_p, frequency_penalty, presence_penalty, max_tokens
+        )
+
         messages_to_send = list(messages)
         if prefill:
             messages_to_send.append({"role": "assistant", "content": prefill})
@@ -141,6 +146,18 @@ class LLMClient:
         )
 
     @staticmethod
+    def _resolve_params(params, temp, timeout, top_p, frequency_penalty, presence_penalty, max_tokens):
+        if params is not None:
+            p = params.resolved()
+            temp = p.temp if temp is None else temp
+            timeout = p.timeout if timeout is None else timeout
+            top_p = p.top_p if top_p is None else top_p
+            frequency_penalty = p.frequency_penalty if frequency_penalty is None else frequency_penalty
+            presence_penalty = p.presence_penalty if presence_penalty is None else presence_penalty
+            max_tokens = p.max_tokens if max_tokens is None else max_tokens
+        return temp, timeout, top_p, frequency_penalty, presence_penalty, max_tokens
+
+    @staticmethod
     def _call_chat_completions(messages_to_send, temp, timeout, tools, prefill, top_p,
                                frequency_penalty, presence_penalty, max_tokens):
         try:
@@ -158,16 +175,15 @@ class LLMClient:
                 top_p=top_p if top_p is not None else Config.TOP_P,
             )
             msg = response.choices[0].message
-            if prefill and msg.content and not msg.content.startswith(prefill):
-                msg.content = prefill + msg.content
+            msg.content = apply_prefill(msg.content, prefill)
 
             usage = None
             if hasattr(response, 'usage') and response.usage:
-                usage = {
-                    "prompt_tokens": response.usage.prompt_tokens,
-                    "completion_tokens": response.usage.completion_tokens,
-                    "total_tokens": response.usage.total_tokens
-                }
+                usage = build_usage_dict(
+                    response.usage.prompt_tokens,
+                    response.usage.completion_tokens,
+                    response.usage.total_tokens,
+                )
             return msg, None, usage
         except Exception as e:
             return None, str(e), None
@@ -253,11 +269,10 @@ class LLMClient:
         if not hasattr(response, 'usage') or not response.usage:
             return None
         usage = response.usage
-        return {
-            "prompt_tokens": getattr(usage, 'input_tokens', 0),
-            "completion_tokens": getattr(usage, 'output_tokens', 0),
-            "total_tokens": getattr(usage, 'input_tokens', 0) + getattr(usage, 'output_tokens', 0),
-        }
+        return build_usage_dict(
+            getattr(usage, 'input_tokens', 0),
+            getattr(usage, 'output_tokens', 0),
+        )
 
 
     @staticmethod
@@ -272,10 +287,15 @@ class LLMClient:
         presence_penalty: float = None,
         max_tokens: int = None,
         previous_response_id: str = None,
+        params: GenerationParams = None,
     ):
         """Streaming version of call() - returns generator of chunks.
         Note: previous_response_id is ignored for streaming (Responses API streaming not yet supported).
         """
+        temp, timeout, top_p, frequency_penalty, presence_penalty, max_tokens = LLMClient._resolve_params(
+            params, temp, timeout, top_p, frequency_penalty, presence_penalty, max_tokens
+        )
+
         messages_to_send = list(messages)
         if prefill:
             messages_to_send.append({"role": "assistant", "content": prefill})
@@ -299,6 +319,6 @@ class LLMClient:
             return stream
         except Exception as e:
             # Для streaming ошибки возвращаем генератор с ошибкой
-            def error_generator():
-                yield {"error": str(e)}
+            def error_generator(err=str(e)):
+                yield {"error": err}
             return error_generator()

@@ -1,11 +1,10 @@
 from __future__ import annotations
 from typing import Optional, TYPE_CHECKING
 
-from universal_agents.config import Config
-from universal_agents.tool import ENVIRONMENT_PREFIX
+from universal_agents.config import Config, CHARS_PER_TOKEN, MIN_TOKENS_TO_SUMMARIZE
+from universal_agents.constants import ENVIRONMENT_PREFIX
 from universal_agents.models import UserMessage, ToolResult
 from universal_agents.llm_client import LLMClient, TokenUsageTracker
-from universal_agents.tools.fs import CHARS_PER_TOKEN
 
 if TYPE_CHECKING:
     from universal_agents.agent import LLMAgent
@@ -63,7 +62,7 @@ def _single_phase_summarize(
     """
     prompt = (
         f"{ENVIRONMENT_PREFIX} Based on the conversation above "
-        f"write more dense and concise summarized dialog also using roles User, AI, tool.\n"
+        f"write very dense and detailed summarized dialog using roles User, AI, tool.\n"
         f"Ensure preserving:"
         f"1. The last user message and the original user task.\n"
         f"2. Key decisions made\n"
@@ -92,10 +91,10 @@ def _summarize_batch(agent: LLMAgent, full_history_msgs: list[dict], target_cont
     for attempt in range(2):
         snippet = target_content[:100]
         prompt = (
-            f"{ENVIRONMENT_PREFIX} Summarize that 1 message above in a very dense way."
+            f"{ENVIRONMENT_PREFIX} Summarize that 1 message above in a very dense detailed way."
             f"Preserve critical details for further dialog/work. "
             f"Remove: reasoning chains / redundant info. "
-            f"Output ONLY the dense concise variant of the message above."
+            f"Output ONLY the dense detailed version of the message above."
             f"\n\nTarget message begins with:\n{snippet}"
         )
 
@@ -127,7 +126,7 @@ def _batch_summarize(
     Короткие сообщения оставляет как есть.
     Результаты склеиваются в один текст через разделитель.
     """
-    MIN_CHARS = int(Config.MIN_TOKENS_TO_SUMMARIZE * Config.CHARS_PER_TOKEN)
+    MIN_CHARS = int(MIN_TOKENS_TO_SUMMARIZE * CHARS_PER_TOKEN)
 
     summarized = 0
 
@@ -141,36 +140,15 @@ def _batch_summarize(
         role = role if role != 'assistant' else 'AI'
 
         if len(content) >= MIN_CHARS:
-            summary = role + ': ' + _summarize_batch(agent, full_history_msgs, content)
-            if summary:
-                parts.append(summary)
+            batch = _summarize_batch(agent, full_history_msgs, content)
+            if batch:
+                parts.append(role + ': ' + batch)
                 summarized += 1
                 continue
 
         parts.append(role + ': ' + content)
 
     return "\n\n".join(parts) if summarized > 0 and parts else None
-
-
-def summarize_text(agent: LLMAgent, text: str) -> Optional[str]:
-    """Универсальная LLM-суммаризация произвольного текста.
-    DEPRECATED: use summarize_dialogue() for dialogue-level compression."""
-    prompt = (
-        f"{ENVIRONMENT_PREFIX} Summarize the following text. "
-        f"Preserve all key facts, specific data, decisions, etc. "
-        f"Remove temporal reasoning and other things that aren't important anymore. "
-        f"Output ONLY the concise summary text.\n\n"
-        f"The original text:\n```\n{text}\n```\n "
-        f"*Use the following text's language!* "
-        f"If you see the dialog of AI and User, treat it as your own dialog with User!"
-    )
-    msgs = [{"role": "user", "content": prompt}]
-    msg_obj, err, usage = LLMClient.call(msgs, temp=0.1, timeout=60, tools=None)
-    if usage:
-        agent.token_tracker.update_from_usage(usage)
-    if err or not msg_obj or not msg_obj.content:
-        return None
-    return msg_obj.content.strip()
 
 
 def synthesize_task_goal(agent: LLMAgent, tool_name: str) -> str:
@@ -220,6 +198,9 @@ def auto_compress_tool_result(agent: LLMAgent, tool_result: ToolResult) -> None:
     если он длинный, используя порционный анализ и динамический синтез цели.
     """
     if tool_result.is_error or tool_result.is_user_denied:
+        return
+
+    if Config.DISABLE_TOOL_AUTO_SUMMARIZATION:
         return
 
     last_user = agent.history.get_last_user_message()
@@ -279,21 +260,13 @@ def chunk_and_summarize_large_text(agent: LLMAgent, text: str, tool_name: str, t
     total_chunks = len(chunks)
     findings_by_portion: list[str] = []
 
-    from universal_agents.sub_agent import SubAgent
-
     for idx, chunk in enumerate(chunks):
         current_num = idx + 1
         agent.on_system_msg(f"[CHUNK ANALYZER] Processing portion {current_num}/{total_chunks}...")
 
         history_str = "\n".join(findings_by_portion) if findings_by_portion else "No findings yet."
 
-        parent_system_prompt = agent.history[0].content if agent.history else ""
-        parent_history = agent.history.get_all()[1:]
-
-        step_agent = SubAgent(
-            parent_system_prompt=parent_system_prompt,
-            parent_history=parent_history,
-            max_context_tokens=agent.token_tracker.max_context_tokens,
+        step_agent = agent.make_sub_agent(
             tools_config=[],
             external_plugins={},
             safe_only=False,

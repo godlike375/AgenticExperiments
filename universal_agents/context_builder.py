@@ -1,10 +1,29 @@
 from __future__ import annotations
 from typing import Optional, TYPE_CHECKING
 
+from universal_agents.constants import ENVIRONMENT_PREFIX
 from universal_agents.models import SystemMessage, UserMessage, AssistantMessage, ToolResult
 
 if TYPE_CHECKING:
     from universal_agents.agent import LLMAgent
+
+
+def _format_timestamp_header(msg) -> str:
+    """Метка времени из timestamp сообщения."""
+    ts = msg.timestamp.strftime("%Y-%m-%d %H:%M:%S")
+    return '{' + f"{ENVIRONMENT_PREFIX}:\n{ts} \n"
+
+
+def _format_token_header(tracker, first_system_message: str = "", last_user_content: str = "") -> str:
+    """Только информация о токенах (с учётом последнего сообщения)."""
+    total = tracker.get_total_context_tokens(first_system_message, last_user_content)
+    remaining = tracker.max_context_tokens - total
+    return f"Memory remaining: {remaining} tokens"
+
+
+def _format_closing_header() -> str:
+    """Закрывающая часть заголовка."""
+    return " }\n\n"
 
 
 def prepare_messages_for_api(agent: LLMAgent) -> list[dict]:
@@ -25,12 +44,12 @@ def prepare_messages_for_api(agent: LLMAgent) -> list[dict]:
             api_messages.append(msg.to_api_dict())
         elif isinstance(msg, UserMessage):
             if msg._cached_header is None:
-                header = agent.token_tracker.format_timestamp_header(msg)
+                header = _format_timestamp_header(msg)
                 if i == last_user_idx and last_user_msg:
-                    header += agent.token_tracker.format_token_header(
-                        agent.history[0].content, last_user_msg.content
+                    header += _format_token_header(
+                        agent.token_tracker, agent.history[0].content, last_user_msg.content
                     )
-                header += agent.token_tracker.format_closing_header()
+                header += _format_closing_header()
                 msg._cached_header = header
             api_messages.append({
                 "role": "user",

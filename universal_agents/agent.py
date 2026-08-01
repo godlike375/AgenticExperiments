@@ -1,18 +1,36 @@
 from __future__ import annotations
 
 import json
-import os
 from typing import Union, Callable, Optional
 
-from universal_agents.tool import ENVIRONMENT_PREFIX
+from universal_agents.constants import ENVIRONMENT_PREFIX
 from universal_agents.config import Config
 from universal_agents.models import UserMessage, AssistantMessage, ToolCall, ToolResult
-from universal_agents.llm_client import LLMClient, TokenUsageTracker, LoopDetector
+from universal_agents.llm_client import LLMClient, TokenUsageTracker, LoopDetector, apply_prefill, build_usage_dict
 from universal_agents.history import ChatHistory
+from universal_agents.generation import GenerationParams
+from universal_agents.tool_manager import ToolManager
+from universal_agents.sub_agent import SubAgent
 
 from universal_agents.compressors import auto_compress_tool_result, summarize_dialogue
 from universal_agents.context_builder import prepare_messages_for_api, get_effective_prefill
 from universal_agents.history_repair import prune_all_failed_tool_calls_except_last
+
+
+def _tc_name(tc) -> str:
+    """Имя tool call независимо от формата (OpenAI/Responses-парсинг)."""
+    func = getattr(tc, 'function', None)
+    if func is not None:
+        return getattr(func, 'name', None) or ""
+    return getattr(tc, 'name', None) or ""
+
+
+def _tc_args(tc) -> str:
+    """Аргументы tool call независимо от формата (OpenAI/Responses-парсинг)."""
+    func = getattr(tc, 'function', None)
+    if func is not None:
+        return getattr(func, 'arguments', None) or ""
+    return getattr(tc, 'arguments', None) or ""
 
 
 class LLMAgent:
@@ -41,24 +59,27 @@ class LLMAgent:
         max_generation_attempts: int = None,
     ):
         self.history = ChatHistory(system_prompt)
-        self.temp = temp if temp is not None else Config.TEMP
-        self.timeout = timeout if timeout is not None else Config.TIMEOUT
-        self.top_p = top_p if top_p is not None else Config.TOP_P
-        self.frequency_penalty = frequency_penalty if frequency_penalty is not None else Config.FREQUENCY_PENALTY
-        self.presence_penalty = presence_penalty if presence_penalty is not None else Config.PRESENCE_PENALTY
-        self.max_tokens = max_tokens if max_tokens is not None else Config.MAX_OUTPUT_TOKENS
+        self._gen_params = GenerationParams.from_overrides(
+            temp=temp,
+            timeout=timeout,
+            top_p=top_p,
+            frequency_penalty=frequency_penalty,
+            presence_penalty=presence_penalty,
+            max_tokens=max_tokens,
+        )
+        self.temp = self._gen_params.temp
+        self.timeout = self._gen_params.timeout
+        self.top_p = self._gen_params.top_p
+        self.frequency_penalty = self._gen_params.frequency_penalty
+        self.presence_penalty = self._gen_params.presence_penalty
+        self.max_tokens = self._gen_params.max_tokens
         self.on_render = on_render
         self.on_confirm = on_confirm
         self.on_system_msg = on_system_msg
         self.self_consistency_mode = False
         self.sc_samples = 3
         self.token_tracker = TokenUsageTracker(system_prompt, max_context_tokens if max_context_tokens is not None else Config.MAX_CONTEXT_TOKENS)
-        self._all_tools = {}
-        if external_plugins:
-            for name, func in external_plugins.items():
-                self._all_tools[name] = self._build_tool_dict(func, is_instance_method=False)
-        self._tools_config = tools_config
-        self._filter_tools(tools_config)
+        self.tools_manager = ToolManager(tools_config, external_plugins)
         self.loop_detector = LoopDetector()
         self._temp_boost_active = False
         self._original_temp = temp
@@ -71,53 +92,81 @@ class LLMAgent:
         self.streaming_enabled = streaming_enabled if streaming_enabled is not None else Config.STREAM_ENABLED
         self._tool_usage: dict[str, int] = {}
         self._max_generation_attempts = max_generation_attempts
-        self.trusted_dirs: set[str] = set()
         self._last_response_id: Optional[str] = None
         self._last_sent_msg_count: int = 0
+        self._depth: int = 0
+
+    # --------------------------------------------------------
+    # Делегирование управления инструментами в ToolManager
+    # --------------------------------------------------------
+    @property
+    def _all_tools(self) -> dict:
+        """Карта активных инструментов (схемы + обработчики)."""
+        return self.tools_manager.tools_map
+
+    @property
+    def tools(self) -> list[dict]:
+        """JSON-схемы активных инструментов для API."""
+        return self.tools_manager.schemas
+
+    @property
+    def _tools_config(self):
+        return self.tools_manager.config
+
+    @property
+    def trusted_dirs(self) -> set[str]:
+        return self.tools_manager.trusted_dirs
+
+    def load_tools(self, name: str) -> str:
+        """Enable a previously disabled tool by name."""
+        return self.tools_manager.load(name)
+
+    def unload_tool(self, name: str) -> str:
+        """Disable a tool by name, removing it from available tools."""
+        return self.tools_manager.unload(name)
+
+    def list_available_tools(self) -> str:
+        """List all available (loadable) tools from plugins directory."""
+        return self.tools_manager.list_available()
 
     def trust_dir(self, path: str) -> str:
         """Add a directory to trusted dirs (edit_file skips confirmation)."""
-        abs_path = os.path.abspath(path)
-        if not os.path.isdir(abs_path):
-            return f"'{path}' is not a directory"
-        self.trusted_dirs.add(abs_path)
-        return f"Trusted: {abs_path}"
+        return self.tools_manager.trust_dir(path)
 
     def untrust_dir(self, path: str) -> str:
         """Remove a directory from trusted dirs."""
-        abs_path = os.path.abspath(path)
-        if abs_path in self.trusted_dirs:
-            self.trusted_dirs.discard(abs_path)
-            return f"Untrusted: {abs_path}"
-        return f"'{path}' was not trusted"
+        return self.tools_manager.untrust_dir(path)
 
     def is_path_trusted(self, path: str) -> bool:
         """Check if path is inside a trusted directory."""
-        abs_path = os.path.abspath(path)
-        for trusted in self.trusted_dirs:
-            if abs_path.startswith(trusted + os.sep) or abs_path == trusted:
-                return True
-        return False
+        return self.tools_manager.is_path_trusted(path)
 
-    # --------------------------------------------------------
-    # Фильтрация инструментов
-    # --------------------------------------------------------
-    def _filter_tools(self, config):
-        all_names = set(self._all_tools.keys())
-        if config is None:
-            active = all_names
-        elif isinstance(config, list):
-            active = set(config) & all_names
-        elif isinstance(config, dict) and "exclude" in config:
-            active = all_names - set(config["exclude"])
-        else:
-            raise ValueError("Invalid tools_config")
-        self._all_tools = {k: v for k, v in self._all_tools.items() if k in active}
-        self.tools = [v['schema'] for v in self._all_tools.values()]
-
-    def _refresh_tools_list(self):
-        """Refresh the tools list sent to the API from _all_tools."""
-        self.tools = [v['schema'] for v in self._all_tools.values()]
+    def make_sub_agent(
+        self,
+        *,
+        tools_config=None,
+        external_plugins=None,
+        safe_only: bool = True,
+        max_iter: int = None,
+        temp: float = None,
+        on_log: Callable = None,
+        depth: int = 0,
+    ) -> SubAgent:
+        """Создаёт SubAgent, наследуя историю и бюджет токенов родителя."""
+        parent_system_prompt = self.history[0].content if len(self.history) else ""
+        parent_history = self.history.get_all()[1:]
+        return SubAgent(
+            parent_system_prompt=parent_system_prompt,
+            parent_history=parent_history,
+            max_context_tokens=self.token_tracker.max_context_tokens,
+            tools_config=tools_config,
+            external_plugins=external_plugins,
+            safe_only=safe_only,
+            max_iter=max_iter,
+            temp=temp,
+            on_log=on_log if on_log is not None else (lambda x: None),
+            depth=depth,
+        )
 
     def _emit_token_info(self):
         parts = []
@@ -127,6 +176,19 @@ class LLMAgent:
             parts.append(self._format_tool_stats())
         if parts:
             self.on_system_msg(" | ".join(parts))
+
+    def _append_assistant(self, msg: AssistantMessage) -> None:
+        """Добавляет сообщение ассистента в историю и рендерит его."""
+        self.history.add(msg)
+        self.on_render(msg)
+        self._emit_token_info()
+
+    def _append_tool_results(self, results: list[ToolResult]) -> None:
+        """Добавляет результаты инструментов в историю и рендерит их."""
+        self.history.extend(results)
+        for tr in results:
+            self.on_render(tr)
+            self._emit_token_info()
 
     def _format_tool_stats(self) -> str:
         total = sum(self._tool_usage.values())
@@ -155,10 +217,7 @@ class LLMAgent:
         if start_id > end_id:
             return
 
-        original_len = sum(
-            len(getattr(m, 'content', '') or '')
-            for m in self.history.get_all()[start_id:end_id + 1]
-        )
+        original_len = self.history.content_len(start_id, end_id)
 
         summary = summarize_dialogue(
             self, start_id=start_id, end_id=end_id,
@@ -178,87 +237,9 @@ class LLMAgent:
             if isinstance(msg, ToolResult) and not msg.is_error and not msg.is_user_denied:
                 self._tool_usage[msg.name] = self._tool_usage.get(msg.name, 0) + 1
 
-    def load_tools(self, name: str) -> str:
-        """Enable a previously disabled tool by name."""
-        from universal_agents.tool_registry import load_external_plugins
-        if name in self._all_tools:
-            return f"'{name}' is already loaded."
-
-        if not self._is_tool_allowed(name):
-            return f"'{name}' is not allowed by tools_config."
-
-        import os
-        tools_dir = os.path.join(os.path.dirname(__file__), "tools")
-        external_tools = load_external_plugins(tools_dir)
-        if name in external_tools:
-            self._all_tools[name] = self._build_tool_dict(external_tools[name], is_instance_method=False)
-
-            non_core = [n for n in self._all_tools if n not in ("load_tools", "unload_tool")]
-            if len(non_core) >= 1 and "unload_tool" not in self._all_tools and "unload_tool" in external_tools:
-                self._all_tools["unload_tool"] = self._build_tool_dict(external_tools["unload_tool"], is_instance_method=False)
-
-            self._refresh_tools_list()
-            return f"'{name}' loaded."
-
-        return f"'{name}' not found in loadable tools"
-
-    def unload_tool(self, name: str) -> str:
-        """Disable a tool by name, removing it from available tools."""
-        if name not in self._all_tools:
-            return f"Tool '{name}' is not loaded yet."
-
-        if name in ("load_tools", "unload_tool"):
-            return f"Cannot disable built-in tool '{name}'."
-
-        del self._all_tools[name]
-
-        non_core = [n for n in self._all_tools if n not in ("load_tools", "unload_tool")]
-        if len(non_core) == 0 and "unload_tool" in self._all_tools:
-            del self._all_tools["unload_tool"]
-
-        self._refresh_tools_list()
-        return f"'{name}' disabled successfully."
-
-    def _is_tool_allowed(self, name: str) -> bool:
-        """Check if tool is allowed by tools_config."""
-        if self._tools_config is None:
-            return True
-        if isinstance(self._tools_config, list):
-            return name in self._tools_config
-        if isinstance(self._tools_config, dict) and "exclude" in self._tools_config:
-            return name not in self._tools_config["exclude"]
-        return True
-
-    def list_available_tools(self) -> str:
-        """List all available (loadable) tools from plugins directory."""
-        from universal_agents.tool_registry import load_external_plugins
-        import os
-        tools_dir = os.path.join(os.path.dirname(__file__), "tools")
-        external_tools = load_external_plugins(tools_dir)
-        enabled = set(self._all_tools.keys())
-        available = set(external_tools.keys()) - enabled
-        lines = ["LOADABLE TOOLS:\n"]
-        for name in sorted(available):
-            if not self._is_tool_allowed(name):
-                continue
-            func = external_tools[name]
-            desc = getattr(func, '_short_description', '')
-            lines.append(f'"{name}" ({desc});' if desc else name)
-        lines.append(f'\nTo load a concrete tool use "load_tools" + "name" arg')
-        return "\n".join(lines)
-
     # --------------------------------------------------------
     # Подготовка сообщений (делегаты)
     # --------------------------------------------------------
-
-    @staticmethod
-    def _build_tool_dict(func: Callable, is_instance_method: bool) -> dict:
-        return {
-            "schema": func._tool_schema,
-            "handler": func,
-            "is_instance_method": is_instance_method,
-            "requires_confirmation": getattr(func, '_requires_confirmation', False)
-        }
 
     def _prepare_messages_for_api(self) -> list[dict]:
         return prepare_messages_for_api(self)
@@ -309,10 +290,10 @@ class LLMAgent:
 
             try:
                 handler = tool_info['handler']
-                if tool_info['is_instance_method']:
+                if tool_info.get('has_agent_param') or tool_info.get('is_instance_method'):
                     full_result = handler(self, **args_dict)
                 else:
-                    full_result = handler(**args_dict) if 'agent' not in handler.__code__.co_varnames[:1] else handler(self, **args_dict)
+                    full_result = handler(**args_dict)
                 content = str(full_result) if full_result is not None else "Tool executed successfully"
                 tr = ToolResult.success(tc.id, name, content)
 
@@ -332,32 +313,26 @@ class LLMAgent:
         tool_calls = []
         if msg_obj.tool_calls:
             for tc in msg_obj.tool_calls:
-                if hasattr(tc, 'function'):
-                    name = tc.function.name
-                    arguments = tc.function.arguments
-                else:
-                    name = tc.name
-                    arguments = tc.arguments
                 tool_calls.append(ToolCall(
                     id=tc.id,
-                    name=name,
-                    arguments=arguments,
+                    name=_tc_name(tc),
+                    arguments=_tc_args(tc),
                 ))
-        result = AssistantMessage(content=clean_content, tool_calls=tool_calls, reasoning_content=getattr(msg_obj, 'reasoning_content', ''))
-        result._streamed = getattr(msg_obj, '_streamed', False)
+        result = AssistantMessage(
+            content=clean_content,
+            tool_calls=tool_calls,
+            reasoning_content=getattr(msg_obj, 'reasoning_content', ''),
+            streamed=bool(getattr(msg_obj, 'streamed', False) or getattr(msg_obj, '_streamed', False)),
+        )
         return result
 
     def _call_with_streaming(
         self,
         messages: list[dict],
-        temp: float,
         prefill: str = None,
         tools: list[dict] = None,
-        top_p: float = None,
-        frequency_penalty: float = None,
-        presence_penalty: float = None,
-        max_tokens: int = None,
         previous_response_id: str = None,
+        params: GenerationParams = None,
     ) -> tuple:
         """
         Вызов LLM с streaming для текста.
@@ -366,82 +341,40 @@ class LLMAgent:
         try:
             stream = LLMClient.stream(
                 messages,
-                temp=temp,
-                timeout=self.timeout,
                 tools=tools,
                 prefill=prefill,
-                top_p=top_p,
-                frequency_penalty=frequency_penalty,
-                presence_penalty=presence_penalty,
-                max_tokens=max_tokens,
                 previous_response_id=previous_response_id,
+                params=params,
             )
             
-            full_content = ""
-            full_reasoning = ""
-            tool_calls_data = {}
-            usage = None
-            reasoning_started = False
-            
+            tool_calls_data: dict = {}
+
+            stream_state = {
+                "full_content": "",
+                "full_reasoning": "",
+                "usage": None,
+                "reasoning_started": False,
+            }
+
             first_chunk = next(stream)
             if isinstance(first_chunk, dict) and "error" in first_chunk:
                 return None, first_chunk["error"], None
-            
+
             if self.on_stream_start:
                 self.on_stream_start()
-            
+
             self._process_stream_chunk(first_chunk, tool_calls_data)
-            if first_chunk.usage:
-                usage = {
-                    "prompt_tokens": first_chunk.usage.prompt_tokens,
-                    "completion_tokens": first_chunk.usage.completion_tokens,
-                    "total_tokens": first_chunk.usage.total_tokens
-                }
-            if first_chunk.choices:
-                delta = first_chunk.choices[0].delta
-                rc = getattr(delta, 'reasoning_content', None)
-                if rc:
-                    full_reasoning += rc
-                    if not reasoning_started:
-                        reasoning_started = True
-                        if self.on_reasoning_start:
-                            self.on_reasoning_start()
-                    if self.on_reasoning_chunk:
-                        self.on_reasoning_chunk(rc)
-                if delta.content:
-                    full_content += delta.content
-                    if self.on_stream_chunk:
-                        self.on_stream_chunk(delta.content)
-            
+            self._apply_stream_chunk(first_chunk, stream_state)
+
             for chunk in stream:
                 self._process_stream_chunk(chunk, tool_calls_data)
-                if chunk.usage:
-                    usage = {
-                        "prompt_tokens": chunk.usage.prompt_tokens,
-                        "completion_tokens": chunk.usage.completion_tokens,
-                        "total_tokens": chunk.usage.total_tokens
-                    }
-                if chunk.choices:
-                    delta = chunk.choices[0].delta
-                    rc = getattr(delta, 'reasoning_content', None)
-                    if rc:
-                        full_reasoning += rc
-                        if not reasoning_started:
-                            reasoning_started = True
-                            if self.on_reasoning_start:
-                                self.on_reasoning_start()
-                        if self.on_reasoning_chunk:
-                            self.on_reasoning_chunk(rc)
-                    if delta.content:
-                        full_content += delta.content
-                        if self.on_stream_chunk:
-                            self.on_stream_chunk(delta.content)
-            
+                self._apply_stream_chunk(chunk, stream_state)
+
             if self.on_stream_end:
                 self.on_stream_end()
-            if reasoning_started and self.on_reasoning_end:
+            if stream_state["reasoning_started"] and self.on_reasoning_end:
                 self.on_reasoning_end()
-            
+
             tool_calls = []
             if tool_calls_data:
                 for tc_data in tool_calls_data.values():
@@ -450,23 +383,47 @@ class LLMAgent:
                         name=tc_data["function"]["name"],
                         arguments=tc_data["function"]["arguments"]
                     ))
-            
+
             message_obj = AssistantMessage(
-                content=full_content,
+                content=stream_state["full_content"],
                 tool_calls=tool_calls,
-                reasoning_content=full_reasoning,
+                reasoning_content=stream_state["full_reasoning"],
+                streamed=True,
             )
-            message_obj._streamed = True
-            
-            # Обработка prefill (как в обычном режиме)
-            if prefill and message_obj.content and not message_obj.content.startswith(prefill):
-                message_obj.content = prefill + message_obj.content
-            
-            return message_obj, None, usage
+
+            message_obj.content = apply_prefill(message_obj.content, prefill)
+
+            return message_obj, None, stream_state["usage"]
             
         except Exception as e:
             return None, str(e), None
     
+    def _apply_stream_chunk(self, chunk, state: dict) -> None:
+        """Применяет чанк стрима: usage, reasoning и текстовый контент."""
+        usage = getattr(chunk, 'usage', None)
+        if usage:
+            state["usage"] = build_usage_dict(
+                usage.prompt_tokens,
+                usage.completion_tokens,
+                usage.total_tokens,
+            )
+        if not getattr(chunk, 'choices', None):
+            return
+        delta = chunk.choices[0].delta
+        rc = getattr(delta, 'reasoning_content', None)
+        if rc:
+            state["full_reasoning"] += rc
+            if not state["reasoning_started"]:
+                state["reasoning_started"] = True
+                if self.on_reasoning_start:
+                    self.on_reasoning_start()
+            if self.on_reasoning_chunk:
+                self.on_reasoning_chunk(rc)
+        if delta.content:
+            state["full_content"] += delta.content
+            if self.on_stream_chunk:
+                self.on_stream_chunk(delta.content)
+
     def _process_stream_chunk(self, chunk, tool_calls_data: dict):
         """Обработка чанка для сбора tool calls"""
         if not chunk.choices:
@@ -524,25 +481,20 @@ class LLMAgent:
             if len(assistant_msg.tool_calls) > 1:
                 self.on_system_msg(f"[MULTIPLE TOOLS DETECTED] Kept only '{chosen_tc.name}', removed others.")
                 assistant_msg.tool_calls = [chosen_tc]
-                if hasattr(message_obj, 'tool_calls') and message_obj.tool_calls:
+                if message_obj.tool_calls:
                     message_obj.tool_calls = [tc for tc in message_obj.tool_calls if tc.id == chosen_tc.id]
 
         if not clean_content and not assistant_msg.has_tool_calls():
             self.on_system_msg("[EMPTY RESPONSE] Model returned no content. Discarding and retrying...")
             return clean_content, True
 
-        self.history.add(assistant_msg)
-        self.on_render(assistant_msg)
-        self._emit_token_info()
+        self._append_assistant(assistant_msg)
 
         if not assistant_msg.has_tool_calls():
             return clean_content, False
 
         tool_results = self._execute_tools(assistant_msg.tool_calls)
-        self.history.extend(tool_results)
-        for tr in tool_results:
-            self.on_render(tr)
-            self._emit_token_info()
+        self._append_tool_results(tool_results)
         prune_all_failed_tool_calls_except_last(self)
 
         tool_error_occurred = any(tr.is_error and not tr.is_user_denied for tr in tool_results)
@@ -551,17 +503,15 @@ class LLMAgent:
     # --------------------------------------------------------
     # Self-consistency
     # --------------------------------------------------------
-    def _generate_draft_with_tool_suggestions(self, draft_messages, prefill, draft_temp, draft_timeout):
+    def _generate_draft_with_tool_suggestions(self, draft_messages, prefill, draft_temp):
         prefill_val = self._get_effective_prefill(prefill)
+        params = self._gen_params.with_temp(draft_temp)
         for _ in range(3):
             msg_obj, err, _ = LLMClient.call(
-                draft_messages, draft_temp, draft_timeout,
+                draft_messages,
                 tools=self.tools if self.tools else None,
                 prefill=prefill_val,
-                top_p=self.top_p,
-                frequency_penalty=self.frequency_penalty,
-                presence_penalty=self.presence_penalty,
-                max_tokens=self.max_tokens,
+                params=params,
             )
             if msg_obj and not err:
                 return msg_obj
@@ -575,7 +525,7 @@ class LLMAgent:
         self.on_system_msg(f"Generating {self.sc_samples} drafts...")
         drafts = []
         for _ in range(self.sc_samples):
-            draft = self._generate_draft_with_tool_suggestions(messages_base, prefill, 0.7, self.timeout)
+            draft = self._generate_draft_with_tool_suggestions(messages_base, prefill, 0.7)
             if draft:
                 drafts.append(draft)
         if not drafts:
@@ -585,7 +535,7 @@ class LLMAgent:
         for i, draft in enumerate(drafts, 1):
             content = draft.content or "(no text)"
             if draft.tool_calls:
-                tc_names = [f"{tc.function.name}(...)" for tc in draft.tool_calls]
+                tc_names = [f"{_tc_name(tc)}(...)" for tc in draft.tool_calls]
                 content += f"\n[Suggested tools: {', '.join(tc_names)}]"
             draft_texts.append(f"--- Draft {i} ---\n{content}")
 
@@ -597,13 +547,10 @@ class LLMAgent:
         synthesis_messages = messages_base + [{"role": "user", "content": synthesis_prompt}]
         current_prefill = self._get_effective_prefill(prefill)
         msg_obj, err, usage = LLMClient.call(
-            synthesis_messages, temp=0.2, timeout=self.timeout,
+            synthesis_messages,
             tools=self.tools if self.tools else None,
             prefill=current_prefill,
-            top_p=self.top_p,
-            frequency_penalty=self.frequency_penalty,
-            presence_penalty=self.presence_penalty,
-            max_tokens=self.max_tokens,
+            params=self._gen_params.with_temp(0.2),
         )
         if usage:
             self.token_tracker.update_from_usage(usage)
@@ -614,19 +561,12 @@ class LLMAgent:
 
         assistant_msg = self._build_assistant_msg(msg_obj, msg_obj.content)
         if not msg_obj.tool_calls:
-            self.history.add(assistant_msg)
-            self.on_render(assistant_msg)
-            self._emit_token_info()
+            self._append_assistant(assistant_msg)
             return msg_obj.content
 
         tool_results = self._execute_tools(assistant_msg.tool_calls)
-        self.history.add(assistant_msg)
-        self.on_render(assistant_msg)
-        self._emit_token_info()
-        self.history.extend(tool_results)
-        for tr in tool_results:
-            self.on_render(tr)
-            self._emit_token_info()
+        self._append_assistant(assistant_msg)
+        self._append_tool_results(tool_results)
 
         followup_dicts = (
             synthesis_messages
@@ -634,11 +574,9 @@ class LLMAgent:
             + [tr.to_api_dict() for tr in tool_results]
         )
         final_obj, final_err, final_usage = LLMClient.call(
-            followup_dicts, temp=0.1, timeout=self.timeout, tools=None,
-            top_p=self.top_p,
-            frequency_penalty=self.frequency_penalty,
-            presence_penalty=self.presence_penalty,
-            max_tokens=self.max_tokens,
+            followup_dicts,
+            tools=None,
+            params=self._gen_params.with_temp(0.1),
         )
         if final_usage:
             self.token_tracker.update_from_usage(final_usage)
@@ -647,9 +585,7 @@ class LLMAgent:
 
         final_content = final_obj.content.strip()
         final_assistant_msg = self._build_assistant_msg(final_obj, final_content)
-        self.history.add(final_assistant_msg)
-        self.on_render(final_assistant_msg)
-        self._emit_token_info()
+        self._append_assistant(final_assistant_msg)
         return final_content
 
     # --------------------------------------------------------
@@ -686,9 +622,9 @@ class LLMAgent:
             api_error_occurred = False
 
             for attempt in range(max_generation_attempts):
-                current_temp = self.temp
+                attempt_params = self._gen_params
                 if self._temp_boost_active:
-                    current_temp = Config.BOOST_TEMP
+                    attempt_params = self._gen_params.with_temp(Config.BOOST_TEMP)
                     self._temp_boost_active = False
 
                 active_messages = [dict(msg) for msg in messages_to_send]
@@ -708,24 +644,19 @@ class LLMAgent:
                 # Streaming или обычный режим
                 if self.streaming_enabled and self.on_stream_chunk:
                     message_obj, err, usage = self._call_with_streaming(
-                        active_messages, current_temp, step_prefill,
+                        active_messages,
+                        step_prefill,
                         tools=self.tools if self.tools else None,
-                        top_p=self.top_p,
-                        frequency_penalty=self.frequency_penalty,
-                        presence_penalty=self.presence_penalty,
-                        max_tokens=self.max_tokens,
                         previous_response_id=prev_response_id,
+                        params=attempt_params,
                     )
                 else:
                     message_obj, err, usage = LLMClient.call(
-                        active_messages, current_temp, self.timeout,
+                        active_messages,
                         tools=self.tools if self.tools else None,
                         prefill=step_prefill,
-                        top_p=self.top_p,
-                        frequency_penalty=self.frequency_penalty,
-                        presence_penalty=self.presence_penalty,
-                        max_tokens=self.max_tokens,
                         previous_response_id=prev_response_id,
+                        params=attempt_params,
                     )
                 
                 if usage:
@@ -747,15 +678,9 @@ class LLMAgent:
                     has_duplicate = False
                     current_history = self.history.get_all()
                     for tc in message_obj.tool_calls:
-                        if hasattr(tc, 'function'):
-                            tc_name = tc.function.name
-                            tc_args = tc.function.arguments
-                        else:
-                            tc_name = tc.name
-                            tc_args = tc.arguments
-                        if self.loop_detector.check_duplicate_in_turn(tc_name, tc_args, current_history):
+                        if self.loop_detector.check_duplicate_in_turn(_tc_name(tc), _tc_args(tc), current_history):
                             has_duplicate = True
-                            last_duplicate_info = (tc_name, tc_args)
+                            last_duplicate_info = (_tc_name(tc), _tc_args(tc))
                             self.on_system_msg(
                                 f"[PROACTIVE LOOP DETECTED] Intercepted duplicate call to '{tc_name}'. "
                                 f"Discarding response. Activating temperature boost ({Config.BOOST_TEMP}) "
@@ -776,7 +701,7 @@ class LLMAgent:
             if api_error_occurred or not message_obj:
                 self.history.normalize(is_error_recovery=True)
                 self.on_system_msg("⚠️ [RECOVERY] API error occurred. Role sequence restored. Handing control to user.")
-                return
+                return ""
 
             result_text, tool_error_occurred = self._process_llm_response(message_obj)
 
@@ -793,7 +718,7 @@ class LLMAgent:
                 self.on_system_msg(
                     f"⚠️ [LIMIT REACHED] {MAX_CONSECUTIVE_ERRORS} consecutive tool errors. Handing control to user."
                 )
-                return
+                return ""
 
             if not message_obj.tool_calls and not tool_error_occurred:
-                return
+                return result_text

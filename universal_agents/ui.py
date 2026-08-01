@@ -2,6 +2,7 @@ import json
 import os
 import shlex
 from universal_agents.models import Message, SystemMessage, UserMessage, AssistantMessage, ToolResult
+from universal_agents.rendering import render_message
 from universal_agents.agent import LLMAgent
 
 class ConsoleUI:
@@ -12,7 +13,7 @@ class ConsoleUI:
     def render_message(msg: Message, label: str = "Agent"):
         if isinstance(msg, SystemMessage):
             return
-        output = msg.render(label=label)
+        output = render_message(msg, label=label)
         if output:
             print(output)
 

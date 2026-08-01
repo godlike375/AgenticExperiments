@@ -7,7 +7,8 @@ import re as _re
 import fnmatch as _fnmatch
 
 from universal_agents.config import Config
-from universal_agents.tool import tool, ENVIRONMENT_PREFIX
+from universal_agents.constants import ENVIRONMENT_PREFIX
+from universal_agents.tool import tool
 
 
 class FS:
@@ -200,16 +201,18 @@ MIN_TOKENS_TO_SUMMARIZE = Config.MIN_TOKENS_TO_SUMMARIZE
 _SUMMARY_THRESHOLD = int(MIN_TOKENS_TO_SUMMARIZE * CHARS_PER_TOKEN)
 
 
+def _read_text(path: str) -> tuple:
+    """Читает файл как UTF-8 текст. Возвращает (content, None) или (None, error_msg)."""
+    try:
+        with open(path, 'r', encoding='utf-8', errors='strict') as f:
+            return f.read(), None
+    except UnicodeDecodeError:
+        return None, f"{ENVIRONMENT_PREFIX} Error: Cannot read binary files (failed UTF-8 decode)"
+
+
 def _summarize_file(path: str, content: str, agent) -> str:
     """Строит структурный скелет/саммари файла через изолированный субагент."""
-    from universal_agents.sub_agent import SubAgent
-    parent_system_prompt = agent.history[0].content if agent.history else ""
-    parent_history = agent.history.get_all()[1:]
-
-    sub = SubAgent(
-        parent_system_prompt=parent_system_prompt,
-        parent_history=parent_history,
-        max_context_tokens=agent.token_tracker.max_context_tokens,
+    sub = agent.make_sub_agent(
         tools_config=[],
         external_plugins={},
         safe_only=False,
@@ -260,11 +263,9 @@ def read(agent: 'LLMAgent', path: str = '.', start_line: int = None, end_line: i
         mtime = datetime.datetime.fromtimestamp(os.stat(path).st_mtime).strftime("%Y-%m-%d %H:%M:%S")
         if os.path.isfile(path):
             if start_line is not None or end_line is not None:
-                try:
-                    with open(path, 'r', encoding='utf-8', errors='strict') as f:
-                        raw = f.read()
-                except UnicodeDecodeError:
-                    return f"{ENVIRONMENT_PREFIX} Error: Cannot read binary files (failed UTF-8 decode)"
+                raw, read_err = _read_text(path)
+                if read_err:
+                    return read_err
                 lines = raw.splitlines()
                 start = max(1, start_line if start_line is not None else 1)
                 end = end_line if end_line is not None else len(lines)
@@ -277,13 +278,11 @@ def read(agent: 'LLMAgent', path: str = '.', start_line: int = None, end_line: i
                         f"Lines {start}-{end} of {len(lines)}:\n---\n"
                         + ("\n".join(numbered) if numbered else ""))
             # Без диапазона: маленькие файлы — целиком, крупные — саммари от субагента
-            try:
-                with open(path, 'r', encoding='utf-8', errors='strict') as f:
-                    raw = f.read()
-            except UnicodeDecodeError:
-                return f"{ENVIRONMENT_PREFIX} Error: Cannot read binary files (failed UTF-8 decode)"
+            raw, read_err = _read_text(path)
+            if read_err:
+                return read_err
             lines = raw.splitlines()
-            if len(raw) <= _SUMMARY_THRESHOLD:
+            if len(raw) <= _SUMMARY_THRESHOLD or Config.DISABLE_FILE_SKELETONIZATION:
                 numbered = [f"{i+1} {line}" for i, line in enumerate(lines)]
                 return f"{ENVIRONMENT_PREFIX} File: {path}\nModified: {mtime}\nContent:\n---\n" + ("\n".join(numbered) if numbered else "")
             summary = _summarize_file(path, raw, agent)

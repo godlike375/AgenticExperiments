@@ -1,10 +1,11 @@
 from __future__ import annotations
 from typing import TYPE_CHECKING
 
-from universal_agents.tool import tool, ENVIRONMENT_PREFIX
+from universal_agents.tool import tool
+from universal_agents.constants import ENVIRONMENT_PREFIX
 from universal_agents.config import Config
 from universal_agents.models import UserMessage, AssistantMessage, ToolResult, SystemMessage
-from universal_agents.sub_agent import SubAgent, MAX_SUB_AGENT_DEPTH
+from universal_agents.sub_agent import MAX_SUB_AGENT_DEPTH
 from universal_agents.compressors import summarize_dialogue
 
 if TYPE_CHECKING:
@@ -96,10 +97,7 @@ def summarize_messages(agent: LLMAgent, start_id: int, end_id: int = -1) -> str:
     if not summary:
         return f"{ENVIRONMENT_PREFIX} Summarization failed (empty response or error)."
 
-    original_len = sum(
-        len(getattr(m, 'content', '') or '')
-        for m in history.get_all()[safe_start:safe_end + 1]
-    )
+    original_len = history.content_len(safe_start, safe_end)
     if len(summary) >= original_len:
         return (
             f"{ENVIRONMENT_PREFIX} Summarization produced text longer than original "
@@ -107,8 +105,7 @@ def summarize_messages(agent: LLMAgent, start_id: int, end_id: int = -1) -> str:
         )
 
     summary_content = f"{ENVIRONMENT_PREFIX} [SUMMARY of messages {safe_start}-{safe_end}]: {summary}"
-    del history._messages[safe_start:safe_end + 1]
-    history._messages.insert(safe_start, UserMessage(content=summary_content))
+    history.replace_range(safe_start, safe_end, [UserMessage(content=summary_content)])
     history.normalize()
 
     freed = original_len - len(summary_content)
@@ -134,9 +131,6 @@ def delegate_to_subagent(agent: LLMAgent, task: str, max_iter: int = None) -> st
     for name, tool_info in agent._all_tools.items():
         sub_plugins[name] = tool_info["handler"]
 
-    parent_system_prompt = agent.history[0].content if agent.history else ""
-    parent_history = agent.history.get_all()[1:]
-
     task_with_context = (
         "You are a sub-agent working on a specific subtask. "
         "Complete the task using tools if needed and provide a final answer. "
@@ -144,10 +138,7 @@ def delegate_to_subagent(agent: LLMAgent, task: str, max_iter: int = None) -> st
         f"Task:\n{task}"
     )
 
-    sub = SubAgent(
-        parent_system_prompt=parent_system_prompt,
-        parent_history=parent_history,
-        max_context_tokens=agent.token_tracker.max_context_tokens,
+    sub = agent.make_sub_agent(
         tools_config=agent._tools_config,
         external_plugins=sub_plugins,
         safe_only=False,

@@ -44,5 +44,6 @@ def build_tool_dict(func: Callable, is_instance_method: bool) -> dict:
         "schema": func._tool_schema,
         "handler": func,
         "is_instance_method": is_instance_method,
+        "has_agent_param": getattr(func, '_has_agent_param', False),
         "requires_confirmation": getattr(func, '_requires_confirmation', False),
     }

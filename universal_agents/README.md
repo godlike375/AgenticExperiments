@@ -45,14 +45,19 @@ Python. Запускает одного основного `LLMAgent` (и при
 
 ```
 universal_agents/
+├── __init__.py          # Маркер пакета
 ├── main.py              # Точка входа: сборка агента, загрузка плагинов, запуск CLI
-├── agent.py             # LLMAgent: основной цикл диалога и выполнение инструментов
+├── agent.py             # LLMAgent (фасад): основной цикл диалога и выполнение инструментов
 ├── sub_agent.py         # SubAgent: изолированный, опционально безопасный делегат
+├── tool_manager.py      # ToolManager: владение и управление инструментами (load/unload/trust)
 ├── config.py            # URL API, имя модели, пороги
+├── constants.py         # Общие константы (ENVIRONMENT_PREFIX, CORE_TOOLS)
+├── generation.py        # GenerationParams: пакет параметров генерации LLM
 ├── llm_client.py        # Обёртка над OpenAI + TokenUsageTracker + LoopDetector
 ├── tool.py              # Декоратор @tool и генерация JSON-схемы
 ├── tool_registry.py     # Загрузка функций с @tool из директории tools/
 ├── models.py            # Датаклассы сообщений (System/User/Assistant/ToolResult)
+├── rendering.py         # render_message: рендеринг сообщений для UI
 ├── history.py           # ChatHistory: добавление/редактирование/удаление/суммаризация/сохранение/загрузка
 ├── context_builder.py   # Подготовка истории для API (заголовки токенов, таймстемпов, prefill)
 ├── history_repair.py    # Разрыв циклов и очистка неудачных вызовов
@@ -60,16 +65,22 @@ universal_agents/
 ├── code_extractor.py    # Слепок структуры проекта для контекста LLM (dump_project)
 ├── ui.py                # Консольный рендерер и интерактивный CLI
 └── tools/
+    ├── __init__.py      # Маркер подпакета
     ├── builtin.py       # get_messages, edit_message, delete_messages,
     │                     #   summarize_messages, delegate_to_subagent
     ├── fs.py            # cwd, read, edit_file (работа с файловой системой)
     └── sandbox.py       # start_sandbox, run_bash, run_python, stop_sandbox
 ```
 
+`LLMAgent` разделён на фасад и делегируемые компоненты: управление
+инструментами вынесено в `ToolManager` (`tool_manager.py`); параметры
+генерации собираются в `GenerationParams` (`generation.py`); рендеринг —
+в `rendering.py`; общие константы — в `constants.py`.
+
 ### Основной поток данных
 
-1. `main.py` загружает внешние инструменты через
-   `load_external_plugins("tools")` (`tool_registry.py`) и создаёт `LLMAgent`.
+1. `main.py` загружает внешние инструменты из каталога `tools/` через
+   `load_external_plugins` (`tool_registry.py`) и создаёт `LLMAgent`.
    В систему загружается **только** `load_tools`; после первого его вызова
    автоматически подгружаются `unload_tool`;
    остальные инструменты агент подгружает динамически.
@@ -122,11 +133,22 @@ pip install openai
 ## Запуск
 
 ```bash
-cd universal_agents
-python main.py
+python -m universal_agents.main
 ```
 
+Команду нужно запускать из корня репозитория (пакет использует импорты
+`universal_agents.*`).
+
 Затем введите сообщение и нажмите Enter. Для выхода введите `exit` или `quit`.
+
+## Тесты
+
+Тесты находятся в `universal_agents/tests/` (unittest, без pytest).
+Запуск из корня репозитория:
+
+```bash
+python -m unittest discover -s universal_agents/tests
+```
 
 ### Команды CLI
 

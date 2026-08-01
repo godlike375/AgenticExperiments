@@ -1,10 +1,13 @@
+import os
+
 from universal_agents.agent import LLMAgent
 from universal_agents.tool_registry import load_external_plugins
 from universal_agents.ui import ConsoleUI, CLI
-from universal_agents.tool import ENVIRONMENT_PREFIX
+from universal_agents.constants import ENVIRONMENT_PREFIX
 
 if __name__ == "__main__":
-    all_tools = load_external_plugins("tools")
+    tools_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tools")
+    all_tools = load_external_plugins(tools_dir)
     startup_tools = {n: f for n, f in all_tools.items() if n == "load_tools"}
     print(f"Loaded startup tools: {list(startup_tools.keys())}")
     print("Use load_tools to load tools dynamically.")
@@ -20,7 +23,7 @@ if __name__ == "__main__":
 
     agent = LLMAgent(
         system_prompt=sys_prompt,
-        tools_config=None,
+        tools_config=['load_tools', 'read', 'edit_file', 'cwd', 'search', 'get_messages'],
         external_plugins=startup_tools,
         on_render=ConsoleUI.render_message,
         on_confirm=ConsoleUI.confirm_action,

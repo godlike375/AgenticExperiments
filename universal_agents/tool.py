@@ -1,4 +1,10 @@
-ENVIRONMENT_PREFIX = '[[SYS ENV]]'
+from __future__ import annotations
+
+import inspect
+
+from universal_agents.constants import ENVIRONMENT_PREFIX
+
+__all__ = ["tool", "ENVIRONMENT_PREFIX"]
 
 
 def tool(description="", short_description="", requires_confirmation=False, **params):
@@ -7,6 +13,9 @@ def tool(description="", short_description="", requires_confirmation=False, **pa
         func._tool_name = func.__name__
         func._requires_confirmation = requires_confirmation
         func._short_description = short_description
+
+        signature_params = list(inspect.signature(func).parameters)
+        func._has_agent_param = bool(signature_params) and signature_params[0] == 'agent'
 
         # Маппинг имён типов Python в стандартные JSON Schema-типы,
         _PY_TO_JSON_TYPE = {

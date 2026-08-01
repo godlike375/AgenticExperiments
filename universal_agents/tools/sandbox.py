@@ -117,14 +117,6 @@ class UnifiedDockerAgent:
         except Exception as e:
             raise RuntimeError(f"Unexpected error during command execution: {e}")
 
-        except subprocess.TimeoutExpired:
-            raise TimeoutError(f"Command timed out after {timeout}s")
-        except RuntimeError:
-            # Пробрасываем наши ошибки дальше
-            raise
-        except Exception as e:
-            raise RuntimeError(f"Unexpected error during command execution: {e}")
-
     @classmethod
     def stop(cls) -> str:
         subprocess.run(["docker", "rm", "-f", cls.CONTAINER_NAME], capture_output=True)

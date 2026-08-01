@@ -1,6 +1,6 @@
 import json
-from typing import Optional, Any
-from universal_agents.tool import ENVIRONMENT_PREFIX
+from typing import Optional, Any, Iterable
+from universal_agents.constants import ENVIRONMENT_PREFIX
 from universal_agents.config import Config
 from universal_agents.models import SystemMessage, UserMessage, AssistantMessage, ToolResult, ToolCall, Message
 
@@ -187,20 +187,25 @@ class ChatHistory:
                 raise ValueError(f"Unknown role: {role}")
         return loaded_tools
 
-    def find_last_tool_result(self, tool_name: str) -> Optional[ToolResult]:
-        for msg in reversed(self._messages):
-            if isinstance(msg, ToolResult) and msg.name == tool_name:
-                return msg
-        return None
-
     def get_last_user_message(self) -> Optional[UserMessage]:
         for msg in reversed(self._messages):
             if isinstance(msg, UserMessage):
                 return msg
         return None
 
-    def get_messages_by_type(self, msg_type) -> list[Message]:
-        return [msg for msg in self._messages if isinstance(msg, msg_type)]
+    def remove_at(self, indices: Iterable[int]) -> None:
+        """Удаляет сообщения по индексам (порядок не важен)."""
+        for idx in sorted(indices, reverse=True):
+            if 0 <= idx < len(self._messages):
+                del self._messages[idx]
+
+    def content_len(self, start: int, end: int) -> int:
+        """Суммарная длина содержимого сообщений в диапазоне [start..end]."""
+        return sum(len(getattr(m, 'content', '') or '') for m in self._messages[start:end + 1])
+
+    def replace_range(self, start: int, end: int, replacement: list[Message]) -> None:
+        """Заменяет сообщения [start..end] на replacement."""
+        self._messages[start:end + 1] = replacement
 
     def compress_old_messages(self, summary: str, preserve_last: int = 2) -> None:
         """Заменяет старые сообщения summary-сообщением (UserMessage),

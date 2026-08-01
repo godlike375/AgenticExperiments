@@ -14,19 +14,12 @@ class Message(ABC):
     def to_api_dict(self) -> dict[str, Any]:
         pass
 
-    @abstractmethod
-    def render(self, label: str = "Agent") -> str:
-        pass
-
 @dataclass
 class SystemMessage(Message):
     content: str
 
     def to_api_dict(self) -> dict[str, Any]:
         return {"role": "system", "content": self.content}
-
-    def render(self, label: str = "Agent") -> str:
-        return ""
 
 @dataclass
 class UserMessage(Message):
@@ -35,9 +28,6 @@ class UserMessage(Message):
 
     def to_api_dict(self) -> dict[str, Any]:
         return {"role": "user", "content": self.content}
-
-    def render(self, label: str = "Agent") -> str:
-        return f"👤 User: {self.content}"
 
 @dataclass
 class ToolCall:
@@ -60,12 +50,10 @@ class AssistantMessage(Message):
     content: str = ""
     tool_calls: list[ToolCall] = field(default_factory=list)
     reasoning_content: str = ""
+    streamed: bool = False
 
     def has_tool_calls(self) -> bool:
         return len(self.tool_calls) > 0
-
-    def is_empty_text(self) -> bool:
-        return not self.content.strip()
 
     def to_api_dict(self) -> dict[str, Any]:
         d = {"role": "assistant", "content": self.content}
@@ -74,16 +62,6 @@ class AssistantMessage(Message):
         if self.tool_calls:
             d["tool_calls"] = [tc.to_api_dict() for tc in self.tool_calls]
         return d
-
-    def render(self, label: str = "Agent") -> str:
-        parts = []
-        if self.reasoning_content and not getattr(self, '_streamed', False):
-            parts.append(f"📝 {label} [reasoning]: {self.reasoning_content}")
-        if self.content.strip() and not getattr(self, '_streamed', False):
-            parts.append(f"🤖 {label}: {self.content}")
-        for tc in self.tool_calls:
-            parts.append(f"🛠️ [{label} Tool Call: {tc.name}({tc.arguments})]")
-        return "\n".join(parts)
 
 @dataclass
 class ToolResult(Message):
@@ -102,13 +80,6 @@ class ToolResult(Message):
             "name": self.name,
             "content": self.content
         }
-
-    def render(self, label: str = "Agent") -> str:
-        prefix = "❌" if self.is_error else "✅"
-        display = str(self.content)
-        #if len(display) > 300:
-        #    display = display[:300] + "\n... [TRUNCATED]"
-        return f"{prefix} [{label} Result '{self.name}']: {display}"
 
     @classmethod
     def success(cls, tool_call_id: str, name: str, content: str = "Tool executed successfully"):

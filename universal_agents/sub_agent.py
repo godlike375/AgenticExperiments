@@ -1,8 +1,11 @@
+import sys
+from dataclasses import asdict
 from typing import Optional, Callable, Union
-from universal_agents.models import AssistantMessage, ToolResult
+from universal_agents.models import AssistantMessage
+from universal_agents.rendering import render_message
 from universal_agents.llm_client import TokenUsageTracker
 from universal_agents.config import Config
-import sys
+from universal_agents.generation import GenerationParams
 
 MAX_SUB_AGENT_DEPTH = 1
 
@@ -40,7 +43,7 @@ class SubAgent:
             on_reasoning_start: Optional[Callable[[], None]] = None,
             on_reasoning_end: Optional[Callable[[], None]] = None,
     ):
-        from agent import LLMAgent
+        from universal_agents.agent import LLMAgent
 
         self._max_iter = max_iter if max_iter is not None else Config.MAX_ITER
         self._on_log = on_log
@@ -62,7 +65,7 @@ class SubAgent:
         self._own_tracker = TokenUsageTracker(effective_system_prompt, effective_max_context_tokens)
 
         def _render_subagent(msg):
-            output = msg.render(label="[🤖sub-agent]")
+            output = render_message(msg, label="[🤖sub-agent]")
             if output:
                 on_log(output)
 
@@ -95,20 +98,24 @@ class SubAgent:
             on_reasoning_chunk = _sub_reasoning_chunk
             on_reasoning_end = _sub_reasoning_end
 
+        params = GenerationParams.from_overrides(
+            temp=temp,
+            timeout=timeout if timeout is not None else 60,
+            top_p=top_p,
+            frequency_penalty=frequency_penalty,
+            presence_penalty=presence_penalty,
+            max_tokens=max_tokens,
+        )
+
         self._agent = LLMAgent(
             system_prompt=effective_system_prompt,
-            temp=temp if temp is not None else Config.TEMP,
-            timeout=timeout if timeout is not None else 60,
+            **asdict(params),
             tools_config=tools_config,
             external_plugins=safe_plugins,
             on_render=_render_subagent,
             on_confirm=lambda n, a: True,
             on_system_msg=on_log,
             max_context_tokens=effective_max_context_tokens,
-            top_p=top_p if top_p is not None else Config.TOP_P,
-            frequency_penalty=frequency_penalty if frequency_penalty is not None else Config.FREQUENCY_PENALTY,
-            presence_penalty=presence_penalty if presence_penalty is not None else Config.PRESENCE_PENALTY,
-            max_tokens=max_tokens if max_tokens is not None else Config.MAX_OUTPUT_TOKENS,
             max_generation_attempts=1,
             streaming_enabled=True,
             on_stream_chunk=on_stream_chunk,
@@ -132,13 +139,6 @@ class SubAgent:
         if isinstance(last_msg, AssistantMessage):
             return last_msg.content or ""
         return ""
-
-    def get_last_tool_call(self):
-        """Возвращает последний tool_call (для structured output)."""
-        for msg in reversed(self._agent.history.get_all()):
-            if isinstance(msg, AssistantMessage) and msg.has_tool_calls():
-                return msg.tool_calls[-1]
-        return None
 
     @property
     def tokens_spent(self) -> int:
