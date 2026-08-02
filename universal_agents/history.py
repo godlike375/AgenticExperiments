@@ -216,7 +216,7 @@ class ChatHistory:
             return
 
         summary_msg = UserMessage(
-            content=f"{ENVIRONMENT_PREFIX} It's an automatically generated system message. Your previous dialog summary with user:\n{summary}"
+            content=f"{ENVIRONMENT_PREFIX} It's an auto-generated text. Your past dialog summary with user:\n{summary}"
         )
 
         preserved = self._messages[safe_end:]

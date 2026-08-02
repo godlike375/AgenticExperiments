@@ -48,7 +48,11 @@ def summarize_dialogue(
     # Вся история как prefix для KV-cache reuse
     full_history_msgs = [msg.to_api_dict() for msg in messages]
 
-    summary = _batch_summarize(agent, history_msgs, full_history_msgs) or _single_phase_summarize(agent, history_msgs, last_user_content)
+    if Config.DISABLE_PER_MESSAGE_SUMMARIZATION:
+        # Сразу суммаризируем весь диалог целиком, не трогая отдельные сообщения
+        summary = _single_phase_summarize(agent, history_msgs, last_user_content)
+    else:
+        summary = _batch_summarize(agent, history_msgs, full_history_msgs) or _single_phase_summarize(agent, history_msgs, last_user_content)
 
     return summary
 

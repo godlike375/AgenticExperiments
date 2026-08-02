@@ -196,11 +196,9 @@ class LLMAgent:
         return f"Tools: {items} ({total} total)"
 
     def _get_context_usage_percent(self) -> float:
-        """Оценка процента заполнения контекста на основе текущих сообщений."""
-        total = 0
-        for msg in self.history.get_all():
-            content = getattr(msg, 'content', '') or ''
-            total += TokenUsageTracker.estimate_tokens(content)
+        """Процент заполнения контекста по фактическому расходу из API (тот же
+        источник, что и заголовок \"Tokens spent / Remaining\")."""
+        total = self.token_tracker.get_total_context_tokens()
         return (total / self.token_tracker.max_context_tokens) * 100
 
     def _auto_summarize_dialogue(self) -> None:

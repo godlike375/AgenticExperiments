@@ -9,7 +9,7 @@ class Config:
     TOP_P = 0.962
     FREQUENCY_PENALTY = 0
     PRESENCE_PENALTY = 0
-    MAX_CONTEXT_TOKENS = 140000
+    MAX_CONTEXT_TOKENS = 1000
     MAX_OUTPUT_TOKENS = min(32000, int(MAX_CONTEXT_TOKENS / 1.5))
     TIMEOUT = 1800
     MAX_ITER = 35
@@ -32,6 +32,8 @@ class Config:
 
     # Отключает автоматическую суммаризацию большого вывода любых инструментов
     DISABLE_TOOL_AUTO_SUMMARIZATION = True
+
+    DISABLE_PER_MESSAGE_SUMMARIZATION = True
 
 
 # Модульные алиасы часто используемых констант (атрибуты Config как имена модуля)
