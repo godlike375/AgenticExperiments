@@ -680,7 +680,7 @@ class LLMAgent:
                             has_duplicate = True
                             last_duplicate_info = (_tc_name(tc), _tc_args(tc))
                             self.on_system_msg(
-                                f"[PROACTIVE LOOP DETECTED] Intercepted duplicate call to '{tc_name}'. "
+                                f"[PROACTIVE LOOP DETECTED] Intercepted duplicate call to '{_tc_name(tc)}'. "
                                 f"Discarding response. Activating temperature boost ({Config.BOOST_TEMP}) "
                                 f"and injecting temporary warning. Attempt {attempt + 1}/{max_generation_attempts}."
                             )
