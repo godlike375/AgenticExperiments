@@ -13,12 +13,13 @@ if __name__ == "__main__":
     print("Use load_tools to load tools dynamically.")
 
     sys_prompt = (
-        "* You are Russian speaking tool-calling assistant.\n"
+        "* You are tool-calling LLM-assistant.\n"
         "* You are in a special program environment to use tools.\n"
         f"* '{ENVIRONMENT_PREFIX}' prefix means system says something.\n"
         "* Use 'load_tools' without args only 1 time.\n"
         "* Do NOT repeat identical tool calls with same arguments twice. You can call only 1 tool at 1 turn (message). "
-        "So you must wait for tool results before making any next call."
+        "So you must wait for tool results before making any next call. "
+        "Говори только на русском."
     )
 
     agent = LLMAgent(

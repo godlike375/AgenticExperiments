@@ -5,10 +5,10 @@ class Config:
     BOOST_TEMP = 2
 
     # Параметры генерации
-    TEMP = 0.44
-    TOP_P = 0.962
+    TEMP = 0.33
+    TOP_P = 0.94
     FREQUENCY_PENALTY = 0
-    PRESENCE_PENALTY = 0
+    PRESENCE_PENALTY = 0.725
     MAX_CONTEXT_TOKENS = 50000
     MAX_OUTPUT_TOKENS = min(32000, int(MAX_CONTEXT_TOKENS / 1.5))
     TIMEOUT = 1800
