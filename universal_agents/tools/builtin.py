@@ -160,7 +160,7 @@ def delegate_to_subagent(agent: LLMAgent, task: str, max_iter: int = None) -> st
 @tool(
     description="load tool by its name / list loadable tools if no args.",
     short_description="load/list tools",
-    name=("str", "Optional tool name to load"),
+    name=("str", "Optional specific tool name to load"),
 )
 def load_tools(agent: LLMAgent, name: str = "") -> str:
     if not name:
