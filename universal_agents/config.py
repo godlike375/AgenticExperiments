@@ -5,11 +5,11 @@ class Config:
     BOOST_TEMP = 2
 
     # Параметры генерации
-    TEMP = 0.33
+    TEMP = 0.1
     TOP_P = 0.94
     FREQUENCY_PENALTY = 0
-    PRESENCE_PENALTY = 0.725
-    MAX_CONTEXT_TOKENS = 50000
+    PRESENCE_PENALTY = 0.0
+    MAX_CONTEXT_TOKENS = 3500
     MAX_OUTPUT_TOKENS = min(32000, int(MAX_CONTEXT_TOKENS / 1.5))
     TIMEOUT = 1800
     MAX_ITER = 35
@@ -20,8 +20,9 @@ class Config:
     USE_RESPONSES_API = False
 
     # Автоматическая суммаризация диалога
-    AUTO_SUMMARY_THRESHOLD = 90  # процент контекста (55%)
+    AUTO_SUMMARY_THRESHOLD = 60  # процент контекста (55%)
     AUTO_SUMMARY_PRESERVE_LAST = 1  # сколько последних сообщений не трогать
+    AUTO_SUMMARY_REVIEW_PASS = True  # отревьювить черновик саммари: подчистить устаревшее + добавить пропущенное
 
     # Константы токенизации и суммаризации
     CHARS_PER_TOKEN = 2.3

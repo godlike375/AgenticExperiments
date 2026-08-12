@@ -1,6 +1,6 @@
 import json
 from typing import Optional, Any, Iterable
-from universal_agents.constants import ENVIRONMENT_PREFIX
+from universal_agents.constants import ENVIRONMENT_PREFIX, SUMMARY_MARKER
 from universal_agents.config import Config
 from universal_agents.models import SystemMessage, UserMessage, AssistantMessage, ToolResult, ToolCall, Message
 
@@ -216,7 +216,7 @@ class ChatHistory:
             return
 
         summary_msg = UserMessage(
-            content=f"{ENVIRONMENT_PREFIX} It's an auto-generated text. Your past dialog summary with user:\n{summary}"
+            content=f"{SUMMARY_MARKER}: Your past dialog summary with user:\n{summary}"
         )
 
         preserved = self._messages[safe_end:]

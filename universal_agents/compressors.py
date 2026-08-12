@@ -2,17 +2,42 @@ from __future__ import annotations
 from typing import Optional, TYPE_CHECKING
 
 from universal_agents.config import Config, CHARS_PER_TOKEN, MIN_TOKENS_TO_SUMMARIZE
-from universal_agents.constants import ENVIRONMENT_PREFIX
+from universal_agents.constants import ENVIRONMENT_PREFIX, SUMMARY_MARKER
 from universal_agents.models import UserMessage, ToolResult
 from universal_agents.llm_client import LLMClient, TokenUsageTracker
 
 if TYPE_CHECKING:
     from universal_agents.agent import LLMAgent
+    from universal_agents.models import Message
 
 
 # ============================================================
 # Автокомпрессия длинных результатов инструментов
 # ============================================================
+
+
+def is_summary_message(content: str) -> bool:
+    """Проверяет, является ли контент ранее сгенерированным авто-саммари."""
+    return bool(content) and (
+        SUMMARY_MARKER in content
+        or "[SUMMARY" in content
+        or "auto-generated text" in content
+    )
+
+
+def _find_existing_summary(messages: list, end_id: int) -> Optional[dict]:
+    """
+    Ищет в обрезаемом диапазоне ранее сгенерированное авто-саммари.
+    Возвращает {"index": int, "full_content": str, "body": str} или None.
+    """
+    for i in range(0, end_id):
+        msg = messages[i]
+        if isinstance(msg, UserMessage) and is_summary_message(msg.content):
+            lines = msg.content.split("\n", 1)
+            header, body = lines[0], lines[1] if len(lines) > 1 else ""
+            return {"index": i, "full_content": msg.content, "body": body}
+    return None
+
 
 def summarize_dialogue(
     agent: LLMAgent,
@@ -20,61 +45,71 @@ def summarize_dialogue(
     end_id: Optional[int] = None,
 ) -> Optional[str]:
     """
-    Суммаризация диалога через LLM.
-    mode='single' — один вызов LLM со всей историей как structured prefix.
+    Суммаризация диалога через LLM: черновик + отревьюенная версия.
+    mode='single' — один вызов LLM со всей историей.
     mode='batch' — разбивка на пачки по MIN_TOKENS_TO_SUMMARIZE, каждая
                    суммаризируется отдельно, результаты склеиваются.
+    После черновика саммари отдаётся на review: модель подчищает устаревшие/
+    лишние детали и добавляет пропущенные важные факты. История заменяется
+    отревьюенным саммари.
     """
     messages = agent.history.get_all()
 
-    if start_id is None:
-        start_id = Config.AFTER_SYSTEM_PROMPT
-    if end_id is None:
-        end_id = len(messages) - 1
-
-    if start_id > end_id:
-        return None
+    end_id = len(messages)
 
     # Структурированные сообщения истории для KV-cache reuse
-    history_msgs = [msg.to_api_dict() for msg in messages[start_id:end_id + 1]]
+    history_msgs = [msg.to_api_dict() for msg in messages]
 
-    # Последнее user-сообщение в диапазоне для акцента
-    last_user_content = ""
-    for i in range(end_id, start_id - 1, -1):
-        if isinstance(messages[i], UserMessage):
-            last_user_content = messages[i].content
-            break
+    # Оригинальный системный промпт — должен быть 0-м сообщением в вызовах LLM,
+    # чтобы префикс совпадал с реальным диалогом и переиспользовался KV-cache.
+    system_msg = messages[0].to_api_dict() if messages else None
+
+    # Ранее сгенерированное авто-саммари в обрезаемом диапазоне
+    existing = _find_existing_summary(messages, end_id)
 
     # Вся история как prefix для KV-cache reuse
     full_history_msgs = [msg.to_api_dict() for msg in messages]
 
     if Config.DISABLE_PER_MESSAGE_SUMMARIZATION:
         # Сразу суммаризируем весь диалог целиком, не трогая отдельные сообщения
-        summary = _single_phase_summarize(agent, history_msgs, last_user_content)
+        summary = _single_phase_summarize(agent, history_msgs, system_msg, existing)
     else:
-        summary = _batch_summarize(agent, history_msgs, full_history_msgs) or _single_phase_summarize(agent, history_msgs, last_user_content)
+        summary = (
+            _batch_summarize(agent, history_msgs, full_history_msgs, existing)
+            or _single_phase_summarize(agent, history_msgs, system_msg, existing)
+        )
 
     return summary
 
 
 def _single_phase_summarize(
-    agent: LLMAgent, history_msgs: list[dict], last_user_content: str = ""
+    agent: LLMAgent,
+    history_msgs: list[dict],
+    system_msg: Optional[dict],
+    existing: Optional[dict] = None,
 ) -> Optional[str]:
     """
-    Однофазная суммаризация — один вызов LLM.
+    Однофазная суммаризация: черновик (draft) + review.
     Промпт суммаризации добавляется в конец structured истории.
+    system_msg передаётся 0-м сообщением для переиспользования KV-cache.
+    После черновика выполняется review-проход: прунинг устаревшего +
+    добавление недостающих деталей.
     """
-    prompt = (
-        f"{ENVIRONMENT_PREFIX} Based on the conversation above "
-        f"write very dense and detailed summarized dialog using roles User, AI, tool.\n"
-        f"Ensure preserving:"
-        f"1. The last user message and the original user task.\n"
-        f"2. Key decisions made\n"
-        f"3. Critical details for further conversation/work\n"
-        f"4. Current task state (what's done, what's pending)\n"
-        f"Remove reasoning chains and redundant info. "
-        f"Output ONLY the dense summary in dialog format (like 'AI: ...\\n User: ...' and so on)."
-    )
+    summary = _draft_summary(agent, history_msgs, system_msg, existing)
+    if not summary:
+        return None
+    if Config.AUTO_SUMMARY_REVIEW_PASS:
+        summary = _review_summary(agent, history_msgs, summary, system_msg, existing) or summary
+    return summary
+
+
+def _draft_summary(
+    agent: LLMAgent,
+    history_msgs: list[dict],
+    system_msg: Optional[dict],
+    existing: Optional[dict] = None,
+) -> Optional[str]:
+    prompt = _build_draft_prompt(existing)
     msgs = history_msgs + [{"role": "user", "content": prompt}]
     msg_obj, err, usage = LLMClient.call(msgs, temp=0.1, timeout=60, tools=None)
     if usage:
@@ -84,22 +119,109 @@ def _single_phase_summarize(
     return msg_obj.content.strip()
 
 
-def _summarize_batch(agent: LLMAgent, full_history_msgs: list[dict], target_content: str) -> Optional[str]:
+def _review_summary(
+    agent: LLMAgent,
+    history_msgs: list[dict],
+    draft: str,
+    system_msg: Optional[dict],
+    existing: Optional[dict] = None,
+) -> Optional[str]:
+    """
+    Review-проход: модель отревьюивает черновик саммари на фоне реальной
+    истории. Задача — СДЕЛАТЬ ПРУНИНГ: убрать устаревшие, дублирующиеся и
+    ненужные детали (в первую очередь потерявшие актуальность), и ДОБАВИТЬ
+    недостающие важные факты (chain-of-density).
+    """
+    existing_note = (
+        "\nThere is an EXISTING auto-summary inside the history. Keep its still-relevant facts, "
+        "fade out what is now outdated/unneeded."
+        if existing and existing.get("body") else ""
+    )
+    review_prompt = (
+        f"{ENVIRONMENT_PREFIX} Below is a DRAFT summary of the conversation above.\n"
+        f"Review it against the actual conversation and produce the FINAL summary:\n"
+        f"PRUNE: remove outdated, duplicated and no longer needed details — fade out first "
+        f"what is already finished/superseded/irrelevant to the current task.\n"
+        f"ADD: put back important facts missing from the draft (do not invent, only recover):\n"
+        f"1. The ORIGINAL USER TASK and the MOST RECENT USER REQUEST (find the last user message in history).\n"
+        f"2. Actual file/function/class/variable names, tool names and their arguments, exact paths, "
+        f"commands and any concrete values/numbers/errors mentioned.\n"
+        f"3. Key decisions, conclusions and results of tool execution.\n"
+        f"4. Current state: what is DONE vs PENDING/BLOCKED, and what the next step is.\n"
+        f"{existing_note}\n"
+        f"Keep the summary dense, structured and complete. Do not add irrelevant noise. "
+        f"Output ONLY the final summary.\n"
+        f"\nDRAFT SUMMARY:\n{draft}"
+    )
+    msgs = history_msgs + [{"role": "user", "content": review_prompt}]
+    msg_obj, err, usage = LLMClient.call(msgs, temp=0.1, timeout=60, tools=None)
+    if usage:
+        agent.token_tracker.update_from_usage(usage)
+    if err or not msg_obj or not msg_obj.content:
+        return None
+    return msg_obj.content.strip()
+
+
+def _build_draft_prompt(existing: Optional[dict] = None) -> str:
+    """Строит промпт черновой суммаризации с акцентом на сохранность фактов."""
+    if existing and existing.get("body"):
+        summary_note = (
+            f"\nThere is an EXISTING auto-summary of earlier part of the dialog inside the history. "
+            f"Keep its still-important facts and MERGE with the newer messages. "
+            f"Do not re-add facts that are no longer relevant."
+        )
+    else:
+        summary_note = ""
+
+    prompt = (
+        f"{ENVIRONMENT_PREFIX} Based on the conversation above "
+        f"write a very dense, detailed and lossless summary of the dialog.\n"
+        f"Preserve ALL of the following:"
+        f"1. The ORIGINAL USER TASK (findable at the start of the conversation) and the MOST RECENT "
+        f"USER REQUEST (the last user message) — keep their intent precisely.\n"
+        f"2. Every important concrete fact: file paths, function/class/variable names, tool names and "
+        f"their arguments, exact commands, values, numbers, error messages.\n"
+        f"3. Key decisions made and their reasons.\n"
+        f"4. Results of tool executions: what was read, written, created, changed.\n"
+        f"5. Current task state: what's DONE, what's PENDING/BLOCKED, what's the next step.\n"
+        f"{summary_note}\n"
+        f"Remove only reasoning chains and redundant filler. "
+        f"Do NOT generalize or replace concrete identifiers with vague words. "
+        f"Output ONLY the dense structured summary:"
+        f"\n"
+        f"SUMMARY:\n"
+        f"TASK:\n"
+        f"PROGRESS:\n"
+        f"KEY FACTS:\n"
+        f"DECISIONS:\n"
+        f"STATE / NEXT STEPS:"
+    )
+    return prompt
+
+
+def _summarize_batch(agent: LLMAgent, full_history_msgs: list[dict], target_content: str,
+                     target_msg: Optional[dict] = None) -> Optional[str]:
     """
     Суммаризация одного длинного сообщения (до 2 попыток).
-    full_history_msgs + prompt(с кусочком target) → summary.
+    full_history_msgs + prompt(с содержимым целевого сообщения) → summary.
     Если summary не короче оригинала после 2 попыток — возвращает None.
     """
     original_chars = len(target_content)
 
+    # Ограничиваем, чтобы не превратить ошибку модели в прогресс
+    cap = int(original_chars * 0.7)
+
     for attempt in range(2):
-        snippet = target_content[:100]
+        # Включаем часть содержимого целевого сообщения прямо в промпт, чтобы
+        # модель точно видела, что сжимать (не полагаемся на поиск по сниппету).
+        sample = target_content[:cap]
         prompt = (
-            f"{ENVIRONMENT_PREFIX} Summarize that 1 message above in a very dense detailed way."
-            f"Preserve critical details for further dialog/work. "
+            f"{ENVIRONMENT_PREFIX} Summarize the single message below in a very dense detailed way. "
+            f"Preserve critical details verbatim: file paths, names, arguments, values, errors. "
             f"Remove: reasoning chains / redundant info. "
-            f"Output ONLY the dense detailed version of the message above."
-            f"\n\nTarget message begins with:\n{snippet}"
+            f"Output ONLY the dense detailed version of the message below.\n"
+            f"\n--- TARGET MESSAGE (truncated to keep prompt short) ---\n"
+            f"{sample}\n--- END ---"
         )
 
         msgs = full_history_msgs + [{"role": "user", "content": prompt}]
@@ -122,7 +244,8 @@ def _summarize_batch(agent: LLMAgent, full_history_msgs: list[dict], target_cont
 
 
 def _batch_summarize(
-    agent: LLMAgent, history_msgs: list[dict], full_history_msgs: list[dict]
+    agent: LLMAgent, history_msgs: list[dict], full_history_msgs: list[dict],
+    existing: Optional[dict] = None,
 ) -> Optional[str]:
     """
     Проходит по сообщениям, каждое длинное (> MIN_TOKENS_TO_SUMMARIZE)
@@ -143,8 +266,13 @@ def _batch_summarize(
         role = msg_dict.get('role', 'user')
         role = role if role != 'assistant' else 'AI'
 
+        # Ранее сгенерированное авто-саммари не сжимаем повторно
+        if is_summary_message(content):
+            parts.append(f"SUMMARY: {content}")
+            continue
+
         if len(content) >= MIN_CHARS:
-            batch = _summarize_batch(agent, full_history_msgs, content)
+            batch = _summarize_batch(agent, full_history_msgs, content, msg_dict)
             if batch:
                 parts.append(role + ': ' + batch)
                 summarized += 1
@@ -152,7 +280,13 @@ def _batch_summarize(
 
         parts.append(role + ': ' + content)
 
-    return "\n\n".join(parts) if summarized > 0 and parts else None
+    if summarized > 0 and parts:
+        merged = "\n\n".join(parts)
+        if existing and existing.get("body"):
+            merged = f"SUMMARY (existing, pruned): {existing['body']}\n\n{merged}"
+        return merged
+
+    return None
 
 
 def synthesize_task_goal(agent: LLMAgent, tool_name: str) -> str:
