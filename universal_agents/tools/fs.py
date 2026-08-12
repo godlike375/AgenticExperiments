@@ -247,7 +247,7 @@ def _summarize_file(path: str, content: str, agent) -> str:
 
     result = sub.run(task, '<sub_agent><skeleton>').strip()
     if not result:
-        return f"(Empty summary for {path}. It's probably an error, try one more time...)"
+        return f"Error (Empty summary for {path}. It's probably an error, try one more time...)"
     return result
 
 
@@ -315,7 +315,7 @@ def search(pattern: str, path: str = ".", include: str = None, exclude: str = No
         try:
             compiled = _re.compile(pattern)
         except _re.error as e:
-            return f"{ENVIRONMENT_PREFIX} Invalid regex: {e}"
+            return f"{ENVIRONMENT_PREFIX} Error Invalid regex: {e}"
         matcher = lambda text: compiled.search(text) is not None
     else:
         matcher = lambda text: pattern in text
@@ -338,7 +338,7 @@ def search(pattern: str, path: str = ".", include: str = None, exclude: str = No
                     continue
                 files.append(os.path.join(root, fn))
     else:
-        return f"{ENVIRONMENT_PREFIX} Path not found: {path}"
+        return f"{ENVIRONMENT_PREFIX} Error Path not found: {path}"
 
     results = []
     total = 0
@@ -385,7 +385,7 @@ def search(pattern: str, path: str = ".", include: str = None, exclude: str = No
         results.append(f"\n{filepath}:\n" + "\n".join(formatted))
 
     if not results:
-        return f"{ENVIRONMENT_PREFIX} No matches found for '{pattern}'"
+        return f"{ENVIRONMENT_PREFIX} Error No matches found for '{pattern}'"
 
     output = ENVIRONMENT_PREFIX + " " + f"Found {total} matches:\n" + "\n".join(results)
     return output

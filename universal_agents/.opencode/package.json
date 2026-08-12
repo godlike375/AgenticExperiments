@@ -1,0 +1,8 @@
+{
+  "name": "opencode-custom-tools",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@opencode-ai/plugin": "1.18.11"
+  }
+}

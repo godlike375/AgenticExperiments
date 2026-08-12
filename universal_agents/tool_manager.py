@@ -65,10 +65,10 @@ class ToolManager:
     def load(self, name: str) -> str:
         """Включает ранее отключённый инструмент по имени."""
         if name in self._tools_map:
-            return f"'{name}' is already loaded."
+            return f"Error '{name}' is already loaded."
 
         if not self.is_tool_allowed(name):
-            return f"'{name}' is not allowed by tools_config."
+            return f"Error '{name}' is not allowed by tools_config."
 
         external_tools = load_external_plugins(_tools_directory())
         if name in external_tools:
@@ -80,15 +80,15 @@ class ToolManager:
 
             return f"'{name}' loaded."
 
-        return f"'{name}' not found in loadable tools"
+        return f"Error '{name}' not found in loadable tools"
 
     def unload(self, name: str) -> str:
         """Отключает инструмент по имени."""
         if name not in self._tools_map:
-            return f"Tool '{name}' is not loaded yet."
+            return f"Error Tool '{name}' is not loaded yet."
 
         if name in CORE_TOOLS:
-            return f"Cannot disable built-in tool '{name}'."
+            return f"Error Cannot disable built-in tool '{name}'."
 
         del self._tools_map[name]
 
@@ -120,7 +120,7 @@ class ToolManager:
         """Добавляет директорию в доверенные (edit_file пропускает подтверждение)."""
         abs_path = os.path.abspath(path)
         if not os.path.isdir(abs_path):
-            return f"'{path}' is not a directory"
+            return f"Error '{path}' is not a directory"
         self.trusted_dirs.add(abs_path)
         return f"Trusted: {abs_path}"
 
@@ -130,7 +130,7 @@ class ToolManager:
         if abs_path in self.trusted_dirs:
             self.trusted_dirs.discard(abs_path)
             return f"Untrusted: {abs_path}"
-        return f"'{path}' was not trusted"
+        return f"Error '{path}' was not trusted"
 
     def is_path_trusted(self, path: str) -> bool:
         """Проверяет, находится ли путь внутри доверенной директории."""

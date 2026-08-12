@@ -33,6 +33,26 @@ def _tc_args(tc) -> str:
     return getattr(tc, 'arguments', None) or ""
 
 
+def _is_error_content(content: str) -> bool:
+    """True, если вывод инструмента — ошибка (по конвенции начинается с 'Error')."""
+    s = content.strip()
+    while s.startswith(ENVIRONMENT_PREFIX):
+        s = s[len(ENVIRONMENT_PREFIX):].strip()
+    return s.startswith("Error")
+
+
+def _build_tool_calls(tool_calls_data: dict) -> list:
+    """Собирает ToolCall'ы из накопленных данных стрима."""
+    return [
+        ToolCall(
+            id=tc_data["id"],
+            name=tc_data["function"]["name"],
+            arguments=tc_data["function"]["arguments"]
+        )
+        for tc_data in tool_calls_data.values()
+    ]
+
+
 class LLMAgent:
     def __init__(
         self,
@@ -81,7 +101,7 @@ class LLMAgent:
         self.token_tracker = TokenUsageTracker(system_prompt, max_context_tokens if max_context_tokens is not None else Config.MAX_CONTEXT_TOKENS)
         self.tools_manager = ToolManager(tools_config, external_plugins)
         self.loop_detector = LoopDetector()
-        self._temp_boost_active = False
+        self._temp_override: Optional[float] = None
         self._original_temp = temp
         self.on_stream_chunk = on_stream_chunk
         self.on_stream_start = on_stream_start
@@ -190,6 +210,31 @@ class LLMAgent:
             self.on_render(tr)
             self._emit_token_info()
 
+    def _erase_last_failed_tool_call(self) -> int:
+        """Удаляет из истории последний неудачный вызов инструмента (assistant + его error result)."""
+        msgs = self.history.get_all()
+        removed: set[int] = set()
+        for i in range(len(msgs) - 1, -1, -1):
+            m = msgs[i]
+            if isinstance(m, ToolResult) and m.is_error and not m.is_user_denied:
+                removed.add(i)
+            elif isinstance(m, AssistantMessage) and m.has_tool_calls():
+                removed.add(i)
+                break
+            else:
+                break
+        if removed:
+            self.history.remove_at(removed)
+            self.history.normalize()
+        return len(removed)
+
+    def _get_last_answer_text(self) -> Optional[str]:
+        """Текст последнего текстового ответа ассистента из истории."""
+        for msg in reversed(self.history.get_all()):
+            if isinstance(msg, AssistantMessage) and (msg.content or "").strip():
+                return msg.content.strip()
+        return None
+
     def _format_tool_stats(self) -> str:
         total = sum(self._tool_usage.values())
         items = " · ".join(f"{name} ×{count}" for name, count in sorted(self._tool_usage.items(), key=lambda x: -x[1]))
@@ -293,7 +338,10 @@ class LLMAgent:
                 else:
                     full_result = handler(**args_dict)
                 content = str(full_result) if full_result is not None else "Tool executed successfully"
-                tr = ToolResult.success(tc.id, name, content)
+                if _is_error_content(content):
+                    tr = ToolResult(tc.id, name, content, is_error=True)
+                else:
+                    tr = ToolResult.success(tc.id, name, content)
 
                 auto_compress_tool_result(self, tr)
                 results.append(tr)
@@ -324,6 +372,11 @@ class LLMAgent:
         )
         return result
 
+    @staticmethod
+    def _watch_diverged(watch_prefix: str, prefill: str, full_content: str) -> bool:
+        """True, если накопленный текст перестал совпадать с началом прежнего ответа."""
+        return bool(watch_prefix) and not watch_prefix.startswith((prefill or "") + full_content)
+
     def _call_with_streaming(
         self,
         messages: list[dict],
@@ -331,10 +384,18 @@ class LLMAgent:
         tools: list[dict] = None,
         previous_response_id: str = None,
         params: GenerationParams = None,
+        watch_prefix: str = None,
+        watch_continue_temp: float = None,
     ) -> tuple:
         """
         Вызов LLM с streaming для текста.
         Возвращает (message_obj, error, usage) как обычный LLMClient.call().
+
+        watch_prefix: если задан, накопленный текст сверяется с ним по префиксу.
+        Как только модель перестаёт повторять прежний ответ (расхождение), генерация
+        на горячей температуре прерывается, и ответ достраивается отдельным запросом
+        на спокойной температуре (watch_continue_temp) начиная с точки расхождения —
+        так высокий буст не успевает спровоцировать галлюцинации.
         """
         try:
             stream = LLMClient.stream(
@@ -361,26 +422,33 @@ class LLMAgent:
             if self.on_stream_start:
                 self.on_stream_start()
 
+            diverged = False
+
             self._process_stream_chunk(first_chunk, tool_calls_data)
             self._apply_stream_chunk(first_chunk, stream_state)
 
-            for chunk in stream:
-                self._process_stream_chunk(chunk, tool_calls_data)
-                self._apply_stream_chunk(chunk, stream_state)
+            if self._watch_diverged(watch_prefix, prefill, stream_state["full_content"]):
+                diverged = True
+
+            if not diverged:
+                for chunk in stream:
+                    self._process_stream_chunk(chunk, tool_calls_data)
+                    added = self._apply_stream_chunk(chunk, stream_state)
+                    if added and self._watch_diverged(watch_prefix, prefill, stream_state["full_content"]):
+                        diverged = True
+                        break
 
             if self.on_stream_end:
                 self.on_stream_end()
             if stream_state["reasoning_started"] and self.on_reasoning_end:
                 self.on_reasoning_end()
 
-            tool_calls = []
-            if tool_calls_data:
-                for tc_data in tool_calls_data.values():
-                    tool_calls.append(ToolCall(
-                        id=tc_data["id"],
-                        name=tc_data["function"]["name"],
-                        arguments=tc_data["function"]["arguments"]
-                    ))
+            if diverged:
+                return self._continue_stream_after_divergence(
+                    messages, tools, prefill, stream_state, tool_calls_data, watch_continue_temp
+                )
+
+            tool_calls = _build_tool_calls(tool_calls_data)
 
             message_obj = AssistantMessage(
                 content=stream_state["full_content"],
@@ -395,9 +463,51 @@ class LLMAgent:
             
         except Exception as e:
             return None, str(e), None
+
+    def _continue_stream_after_divergence(
+        self,
+        messages: list[dict],
+        tools: list[dict],
+        prefill: str,
+        stream_state: dict,
+        tool_calls_data: dict,
+        watch_continue_temp: float,
+    ) -> tuple:
+        """Достраивает прерванный на расхождении ответ спокойной генерацией."""
+        partial_text = (prefill or "") + stream_state["full_content"]
+        calm_temp = watch_continue_temp if watch_continue_temp is not None else Config.DUPLICATE_CONTINUATION_TEMP
+        calm_params = self._gen_params.with_temp(calm_temp)
+        followup, ferr, fusage = LLMClient.call(
+            messages,
+            tools=tools,
+            prefill=partial_text,
+            params=calm_params,
+        )
+        tool_calls = _build_tool_calls(tool_calls_data)
+
+        if ferr or not followup:
+            msg_obj = AssistantMessage(
+                content=partial_text,
+                tool_calls=tool_calls,
+                reasoning_content=stream_state["full_reasoning"],
+                streamed=True,
+            )
+            msg_obj.content = apply_prefill(msg_obj.content, prefill)
+            return msg_obj, None, stream_state["usage"]
+
+        followup_reasoning = getattr(followup, 'reasoning_content', None) or ""
+        message_obj = AssistantMessage(
+            content=partial_text + (followup.content or ""),
+            tool_calls=tool_calls,
+            reasoning_content=stream_state["full_reasoning"] + followup_reasoning,
+            streamed=True,
+        )
+        message_obj.content = apply_prefill(message_obj.content, prefill)
+        return message_obj, None, fusage or stream_state["usage"]
     
-    def _apply_stream_chunk(self, chunk, state: dict) -> None:
-        """Применяет чанк стрима: usage, reasoning и текстовый контент."""
+    def _apply_stream_chunk(self, chunk, state: dict) -> str:
+        """Применяет чанк стрима: usage, reasoning и текстовый контент.
+        Возвращает добавленный текстовый delta."""
         usage = getattr(chunk, 'usage', None)
         if usage:
             state["usage"] = build_usage_dict(
@@ -406,7 +516,7 @@ class LLMAgent:
                 usage.total_tokens,
             )
         if not getattr(chunk, 'choices', None):
-            return
+            return ""
         delta = chunk.choices[0].delta
         rc = getattr(delta, 'reasoning_content', None)
         if rc:
@@ -417,10 +527,13 @@ class LLMAgent:
                     self.on_reasoning_start()
             if self.on_reasoning_chunk:
                 self.on_reasoning_chunk(rc)
+        added = ""
         if delta.content:
-            state["full_content"] += delta.content
+            added = delta.content
+            state["full_content"] += added
             if self.on_stream_chunk:
-                self.on_stream_chunk(delta.content)
+                self.on_stream_chunk(added)
+        return added
 
     def _process_stream_chunk(self, chunk, tool_calls_data: dict):
         """Обработка чанка для сбора tool calls"""
@@ -602,6 +715,7 @@ class LLMAgent:
 
         consecutive_errors = 0
         MAX_CONSECUTIVE_ERRORS = 5
+        tool_error_retries_left = Config.ERROR_RECOVERY_RETRIES
 
         for i in range(max_iter):
             step_prefill = current_prefill if i == 0 else None
@@ -614,30 +728,24 @@ class LLMAgent:
                 messages_to_send = all_messages[self._last_sent_msg_count:]
                 prev_response_id = self._last_response_id
 
-            max_generation_attempts = self._max_generation_attempts if self._max_generation_attempts is not None else 2
+            max_generation_attempts = self._max_generation_attempts if self._max_generation_attempts is not None else Config.MAX_LOOP_RETRIES
             message_obj = None
-            last_duplicate_info = None
+            last_retry_warning: Optional[str] = None
+            dup_watch_target: Optional[str] = None
             api_error_occurred = False
 
             for attempt in range(max_generation_attempts):
                 attempt_params = self._gen_params
-                if self._temp_boost_active:
-                    attempt_params = self._gen_params.with_temp(Config.BOOST_TEMP)
-                    self._temp_boost_active = False
+                if self._temp_override is not None:
+                    attempt_params = self._gen_params.with_temp(self._temp_override)
+                    self._temp_override = None
 
                 active_messages = [dict(msg) for msg in messages_to_send]
 
-                if last_duplicate_info:
-                    dup_name, dup_args = last_duplicate_info
-                    warning_text = (
-                        f"\n\n{ENVIRONMENT_PREFIX} Your previous attempt to call tool '{dup_name}' "
-                        f"with arguments '{dup_args}' was blocked because it is a duplicate of a call already made "
-                        f"in this turn. Do NOT call '{dup_name}' again with the same parameters. "
-                        f"Use other parameters, call a different tool, or provide your final response."
-                    )
+                if last_retry_warning:
                     if active_messages:
                         last_msg = active_messages[-1]
-                        last_msg["content"] = (last_msg.get("content") or "") + warning_text
+                        last_msg["content"] = (last_msg.get("content") or "") + last_retry_warning
 
                 # Streaming или обычный режим
                 if self.streaming_enabled and self.on_stream_chunk:
@@ -647,6 +755,8 @@ class LLMAgent:
                         tools=self.tools if self.tools else None,
                         previous_response_id=prev_response_id,
                         params=attempt_params,
+                        watch_prefix=dup_watch_target,
+                        watch_continue_temp=Config.DUPLICATE_CONTINUATION_TEMP if dup_watch_target is not None else None,
                     )
                 else:
                     message_obj, err, usage = LLMClient.call(
@@ -656,6 +766,7 @@ class LLMAgent:
                         previous_response_id=prev_response_id,
                         params=attempt_params,
                     )
+                dup_watch_target = None
                 
                 if usage:
                     self.token_tracker.update_from_usage(usage)
@@ -678,16 +789,40 @@ class LLMAgent:
                     for tc in message_obj.tool_calls:
                         if self.loop_detector.check_duplicate_in_turn(_tc_name(tc), _tc_args(tc), current_history):
                             has_duplicate = True
-                            last_duplicate_info = (_tc_name(tc), _tc_args(tc))
+                            dup_name, dup_args = _tc_name(tc), _tc_args(tc)
+                            last_retry_warning = (
+                                f"\n\n{ENVIRONMENT_PREFIX} Your previous attempt to call tool '{dup_name}' "
+                                f"with arguments '{dup_args}' was blocked because it is a duplicate of a call already made "
+                                f"in this turn. Do NOT call '{dup_name}' again with the same parameters. "
+                                f"Use other parameters, call a different tool, or provide your final response."
+                            )
                             self.on_system_msg(
-                                f"[PROACTIVE LOOP DETECTED] Intercepted duplicate call to '{_tc_name(tc)}'. "
+                                f"[PROACTIVE LOOP DETECTED] Intercepted duplicate call to '{dup_name}'. "
                                 f"Discarding response. Activating temperature boost ({Config.BOOST_TEMP}) "
                                 f"and injecting temporary warning. Attempt {attempt + 1}/{max_generation_attempts}."
                             )
                             break
 
                     if has_duplicate:
-                        self._temp_boost_active = True
+                        self._temp_override = Config.BOOST_TEMP
+                        continue
+
+                else:
+                    answer_text = (message_obj.content or "").strip()
+                    prev_answer = self._get_last_answer_text()
+                    if answer_text and prev_answer and answer_text == prev_answer:
+                        last_retry_warning = (
+                            f"\n\n{ENVIRONMENT_PREFIX} Your previous response was identical to your last answer. "
+                            f"This is considered a duplicate. Do NOT repeat it. "
+                            f"Provide a different, new answer instead."
+                        )
+                        dup_watch_target = prev_answer
+                        self.on_system_msg(
+                            f"[DUPLICATE ANSWER DETECTED] Model repeated the previous answer verbatim. "
+                            f"Discarding response. Activating temperature boost ({Config.BOOST_TEMP}) "
+                            f"and injecting temporary warning. Attempt {attempt + 1}/{max_generation_attempts}."
+                        )
+                        self._temp_override = Config.BOOST_TEMP
                         continue
 
                 break
@@ -703,6 +838,19 @@ class LLMAgent:
 
             result_text, tool_error_occurred = self._process_llm_response(message_obj)
 
+            if tool_error_occurred and tool_error_retries_left > 0:
+                tool_error_retries_left -= 1
+                erased = self._erase_last_failed_tool_call()
+                self._temp_override = Config.ERROR_RECOVERY_TEMP
+                self._last_response_id = None
+                self._last_sent_msg_count = 0
+                self.on_system_msg(
+                    f"[TOOL ERROR RECOVERY] Tool error detected. Erased {erased} message(s) "
+                    f"and regenerating with temperature {Config.ERROR_RECOVERY_TEMP} "
+                    f"(retries left: {tool_error_retries_left})."
+                )
+                continue
+
             if self._get_context_usage_percent() >= Config.AUTO_SUMMARY_THRESHOLD:
                 self._auto_summarize_dialogue()
 
@@ -710,6 +858,7 @@ class LLMAgent:
                 consecutive_errors += 1
             else:
                 consecutive_errors = 0
+                tool_error_retries_left = Config.ERROR_RECOVERY_RETRIES
 
             if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
                 self.history.normalize(is_error_recovery=True)

@@ -3,12 +3,16 @@ class Config:
     MODEL_NAME = ""
     AFTER_SYSTEM_PROMPT = 1  # Index after which dialog starts (0 = system)
     BOOST_TEMP = 2
+    ERROR_RECOVERY_TEMP = 1
+    MAX_LOOP_RETRIES = 2  # попыток перегенерации при повторяющемся вызове/ответе
+    ERROR_RECOVERY_RETRIES = 2  # попыток перегенерации после ошибки инструмента
+    DUPLICATE_CONTINUATION_TEMP = round(BOOST_TEMP / 4, 2)  # спокойная достройка после расхождения ⏤ BOOST/3 ≈ 0.67
 
     # Параметры генерации
-    TEMP = 0.1
+    TEMP = 0.38
     TOP_P = 0.94
-    FREQUENCY_PENALTY = 0
-    PRESENCE_PENALTY = 0.0
+    FREQUENCY_PENALTY = 0.05
+    PRESENCE_PENALTY = 0.15
     MAX_CONTEXT_TOKENS = 3500
     MAX_OUTPUT_TOKENS = min(32000, int(MAX_CONTEXT_TOKENS / 1.5))
     TIMEOUT = 1800

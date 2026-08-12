@@ -89,18 +89,18 @@ def summarize_messages(agent: LLMAgent, start_id: int, end_id: int = -1) -> str:
 
     if safe_start > safe_end:
         return (
-            f"{ENVIRONMENT_PREFIX} Cannot summarize: range [{start_id}:{safe_end}] "
+            f"{ENVIRONMENT_PREFIX} Error Cannot summarize: range [{start_id}:{safe_end}] "
             f"is invalid or overlaps with protected last 2 messages."
         )
 
     summary = summarize_dialogue(agent, start_id=safe_start, end_id=safe_end)
     if not summary:
-        return f"{ENVIRONMENT_PREFIX} Summarization failed (empty response or error)."
+        return f"{ENVIRONMENT_PREFIX} Error Summarization failed (empty response or error)."
 
     original_len = history.content_len(safe_start, safe_end)
     if len(summary) >= original_len:
         return (
-            f"{ENVIRONMENT_PREFIX} Summarization produced text longer than original "
+            f"{ENVIRONMENT_PREFIX} Error Summarization produced text longer than original "
             f"({len(summary)} >= {original_len}). Nothing to compress."
         )
 
@@ -125,7 +125,7 @@ def summarize_messages(agent: LLMAgent, start_id: int, end_id: int = -1) -> str:
 def delegate_to_subagent(agent: LLMAgent, task: str, max_iter: int = None) -> str:
     depth = getattr(agent, '_depth', 0)
     if depth >= MAX_SUB_AGENT_DEPTH:
-        return f"{ENVIRONMENT_PREFIX} Sub-agent depth limit ({MAX_SUB_AGENT_DEPTH}) reached. You can't delegate to sub-agent. Do it yourself."
+        return f"{ENVIRONMENT_PREFIX} Error Sub-agent depth limit ({MAX_SUB_AGENT_DEPTH}) reached. You can't delegate to sub-agent. Do it yourself."
 
     sub_plugins = {}
     for name, tool_info in agent._all_tools.items():
@@ -153,7 +153,7 @@ def delegate_to_subagent(agent: LLMAgent, task: str, max_iter: int = None) -> st
     agent.on_system_msg(f"[DELEGATE] Completed. Tokens spent by sub-agent: {sub.tokens_spent}")
 
     if not result.strip():
-        return f"{ENVIRONMENT_PREFIX} Sub-agent returned empty result."
+        return f"{ENVIRONMENT_PREFIX} Error Sub-agent returned empty result."
     return f"{ENVIRONMENT_PREFIX} Sub-agent result:\n{result}"
 
 

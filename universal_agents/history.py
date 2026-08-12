@@ -52,7 +52,7 @@ class ChatHistory:
         safe_start = max(start_id, Config.AFTER_SYSTEM_PROMPT)
         safe_end = end_id
         if safe_start > safe_end:
-            return f"{ENVIRONMENT_PREFIX} Nothing to delete"
+            return f"{ENVIRONMENT_PREFIX} Error Nothing to delete"
         for msg in self._messages[safe_start:]:
             if isinstance(msg, UserMessage):
                 msg._cached_header = None
