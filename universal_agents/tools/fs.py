@@ -255,7 +255,7 @@ def _summarize_file(path: str, content: str, agent) -> str:
       short_description="read file / ls dir",
       path=("str", "Optional path to file/dir (default '.'). Use '..' to open parent dir"),
       start_line=("int", "Optional 1-based start line. Omit (with end_line) to get a subagent summary instead of raw content"),
-      end_line=("int", "Optional 1-based inclusive end line"))
+      end_line=("int", "Optional 1-based inclusive end line (supports negative values like Python slices)"))
 def read(agent: 'LLMAgent', path: str = '.', start_line: int = None, end_line: int = None):
     if not os.path.exists(path):
         raise FileNotFoundError(f"Path not found: {path}")
@@ -268,7 +268,7 @@ def read(agent: 'LLMAgent', path: str = '.', start_line: int = None, end_line: i
                     return read_err
                 lines = raw.splitlines()
                 start = max(1, start_line if start_line is not None else 1)
-                end = end_line if end_line is not None else len(lines)
+                end = len(lines) if end_line is None else (len(lines) + end_line if end_line < 0 else end_line)
                 end = max(start, min(end, len(lines)))
                 selected = lines[start - 1:end]
                 # Реальные номера строк файла, чтобы модель могла точно редактировать
