@@ -1,7 +1,7 @@
 """Управление инструментами агента: регистрация, фильтрация, доверенные папки."""
 
 import os
-from typing import Callable, Union
+from typing import Callable, Union, Optional
 
 from universal_agents.constants import CORE_TOOLS
 from universal_agents.tool_registry import load_external_plugins, build_tool_dict
@@ -22,6 +22,7 @@ class ToolManager:
     ):
         self._tools_config = tools_config
         self._tools_map: dict[str, dict] = {}
+        self._all_known_names: Optional[set[str]] = None
         if external_plugins:
             for name, func in external_plugins.items():
                 self._tools_map[name] = build_tool_dict(func, is_instance_method=False)
@@ -31,6 +32,13 @@ class ToolManager:
     @property
     def tools_map(self) -> dict[str, dict]:
         return self._tools_map
+
+    @property
+    def all_known_names(self) -> set[str]:
+        """Имена всех инструментов, доступных к загрузке (даже ещё не загруженных)."""
+        if self._all_known_names is None:
+            self._all_known_names = set(load_external_plugins(_tools_directory()).keys())
+        return self._all_known_names
 
     @property
     def schemas(self) -> list[dict]:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Union, Callable, Optional
 
 from universal_agents.constants import ENVIRONMENT_PREFIX
@@ -39,6 +40,44 @@ def _is_error_content(content: str) -> bool:
     while s.startswith(ENVIRONMENT_PREFIX):
         s = s[len(ENVIRONMENT_PREFIX):].strip()
     return s.startswith("Error")
+
+
+# Сильные признаки XML-вызова: известные имена тегов
+_STRONG_TAGS = ("tool_call", "tool", "function", "call")
+
+
+def _detect_broken_call(content: str, tool_names: set[str]) -> bool:
+    """True, если ответ похож на нераспарсенный вызов инструмента.
+
+    Иерархия признаков (базовый гейт — наличие открывающегося XML-тега):
+      1) известные имена тегов (``<tool_call>``, ``<tool>``, ``<function>``,
+         ``<call>``) — срабатывает само по себе, особенно если тег в начале
+         сообщения;
+      2) наличие любого XML-тега + признак вызова известного инструмента
+         (``имя_тула + скобка``, напр. ``read({...})`` или ``load_tools(``).
+
+    Без XML-тега вызов НЕ детектится — это исключает ложные срабатывания вроде
+    «The function cwd() returns the dir.».
+    """
+    if not content or not content.strip():
+        return False
+
+    # Базовый гейт: хотя бы один открывающийся xml-тег
+    if not re.search(r'<\s*[a-zA-Z_][\w-]*', content):
+        return False
+
+    # 1) известные имена тегов (полное совпадение имени тега, без продолжения словом)
+    has_strong_tag = any(
+        re.search(rf'<{re.escape(t)}(?!\w)', content) for t in _STRONG_TAGS
+    )
+    if has_strong_tag:
+        return True
+
+    # 2) тег уже есть (базовый гейт пройден) + признак вызова известного инструмента
+    has_tool_call_sign = any(
+        re.search(rf'\b{re.escape(name)}\s*[\({{]', content) for name in tool_names
+    )
+    return bool(has_tool_call_sign)
 
 
 def _build_tool_calls(tool_calls_data: dict) -> list:
@@ -210,6 +249,13 @@ class LLMAgent:
             self.on_render(tr)
             self._emit_token_info()
 
+    def _erase_last_assistant(self) -> None:
+        """Удаляет последнее сообщение ассистента из истории (сломанный вызов без tool_calls)."""
+        msgs = self.history.get_all()
+        if msgs and isinstance(msgs[-1], AssistantMessage):
+            self.history.remove_at({len(msgs) - 1})
+            self.history.normalize()
+
     def _erase_last_failed_tool_call(self) -> int:
         """Удаляет из истории последний неудачный вызов инструмента (assistant + его error result)."""
         msgs = self.history.get_all()
@@ -239,6 +285,12 @@ class LLMAgent:
         total = sum(self._tool_usage.values())
         items = " · ".join(f"{name} ×{count}" for name, count in sorted(self._tool_usage.items(), key=lambda x: -x[1]))
         return f"Tools: {items} ({total} total)"
+
+    def _known_tool_names(self) -> set[str]:
+        """Имена всех инструментов, о которых модель может знать (загруженных и доступных к загрузке)."""
+        names = set(self._all_tools.keys())
+        names |= self.tools_manager.all_known_names
+        return names
 
     def _get_context_usage_percent(self) -> float:
         """Процент заполнения контекста по фактическому расходу из API (тот же
@@ -564,9 +616,9 @@ class LLMAgent:
                     if tc.function.arguments:
                         tool_calls_data[idx]["function"]["arguments"] += tc.function.arguments
     
-    def _process_llm_response(self, message_obj) -> tuple[str, bool]:
+    def _process_llm_response(self, message_obj) -> tuple[str, bool, bool]:
         if not message_obj:
-            return "Empty response", True
+            return "Empty response", True, False
 
         content = message_obj.content or ""
         clean_content = content.strip()
@@ -597,19 +649,22 @@ class LLMAgent:
 
         if not clean_content and not assistant_msg.has_tool_calls():
             self.on_system_msg("[EMPTY RESPONSE] Model returned no content. Discarding and retrying...")
-            return clean_content, True
+            return clean_content, True, False
 
         self._append_assistant(assistant_msg)
 
         if not assistant_msg.has_tool_calls():
-            return clean_content, False
+            if _detect_broken_call(clean_content, self._known_tool_names()):
+                self.on_system_msg("[BROKEN CALL] Response looks like an unparsed tool call (prose or XML).")
+                return clean_content, False, True
+            return clean_content, False, False
 
         tool_results = self._execute_tools(assistant_msg.tool_calls)
         self._append_tool_results(tool_results)
         prune_all_failed_tool_calls_except_last(self)
 
         tool_error_occurred = any(tr.is_error and not tr.is_user_denied for tr in tool_results)
-        return clean_content, tool_error_occurred
+        return clean_content, tool_error_occurred, False
 
     # --------------------------------------------------------
     # Self-consistency
@@ -716,6 +771,8 @@ class LLMAgent:
         consecutive_errors = 0
         MAX_CONSECUTIVE_ERRORS = 5
         tool_error_retries_left = Config.ERROR_RECOVERY_RETRIES
+        broken_regen_left = Config.BROKEN_CALL_REGEN_RETRIES
+        broken_fix_left = Config.BROKEN_CALL_FIX_RETRIES
 
         for i in range(max_iter):
             step_prefill = current_prefill if i == 0 else None
@@ -836,7 +893,44 @@ class LLMAgent:
                 self.on_system_msg("⚠️ [RECOVERY] API error occurred. Role sequence restored. Handing control to user.")
                 return ""
 
-            result_text, tool_error_occurred = self._process_llm_response(message_obj)
+            result_text, tool_error_occurred, broken_call = self._process_llm_response(message_obj)
+
+            if broken_call:
+                if broken_regen_left > 0:
+                    broken_regen_left -= 1
+                    self._erase_last_assistant()
+                    self._temp_override = Config.ERROR_RECOVERY_TEMP
+                    self._last_response_id = None
+                    self._last_sent_msg_count = 0
+                    self.on_system_msg(
+                        f"[BROKEN CALL] Detected malformed tool call. "
+                        f"Regenerating with temp {Config.ERROR_RECOVERY_TEMP} "
+                        f"(retries left: {broken_regen_left})."
+                    )
+                    continue
+                if broken_fix_left > 0:
+                    broken_fix_left -= 1
+                    self.history.add(UserMessage(
+                        f"{ENVIRONMENT_PREFIX} Your previous message looked like a tool call "
+                        f"but was not parsed as a valid tool_call by the API. Re-emit it using the "
+                        f"proper tools mechanism (exactly one call per turn). Do NOT write it as "
+                        f"plain text, prose, or XML tags."
+                    ))
+                    self.on_render(self.history.get_all()[-1])
+                    self._last_response_id = None
+                    self._last_sent_msg_count = 0
+                    self.on_system_msg(
+                        f"[BROKEN CALL] Injected fix prompt for the model "
+                        f"(retries left: {broken_fix_left})."
+                    )
+                    continue
+                self.history.normalize(is_error_recovery=True)
+                self.on_system_msg(
+                    f"⚠️ [BROKEN CALL] Could not recover malformed tool call after "
+                    f"{Config.BROKEN_CALL_REGEN_RETRIES + Config.BROKEN_CALL_FIX_RETRIES} attempts. "
+                    "Handing control to user."
+                )
+                return ""
 
             if tool_error_occurred and tool_error_retries_left > 0:
                 tool_error_retries_left -= 1

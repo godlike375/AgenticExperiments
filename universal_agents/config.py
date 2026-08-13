@@ -6,6 +6,8 @@ class Config:
     ERROR_RECOVERY_TEMP = 1
     MAX_LOOP_RETRIES = 2  # попыток перегенерации при повторяющемся вызове/ответе
     ERROR_RECOVERY_RETRIES = 2  # попыток перегенерации после ошибки инструмента
+    BROKEN_CALL_REGEN_RETRIES = 2  # попыток перегенерации при обнаружении сломанного вызова
+    BROKEN_CALL_FIX_RETRIES = 2    # попыток «починить» вызов через промпт после неудачной регенерации
     DUPLICATE_CONTINUATION_TEMP = round(BOOST_TEMP / 4, 2)  # спокойная достройка после расхождения ⏤ BOOST/3 ≈ 0.67
 
     # Параметры генерации
