@@ -362,6 +362,9 @@ def auto_compress_tool_result(agent: LLMAgent, tool_result: ToolResult) -> None:
 
     if len(new_tool_result_content) < original_len * 0.95:
         tool_result.content = new_tool_result_content
+        # Содержимое результата сжато — модель потеряла фактический контент,
+        # поэтому кэш хэша файла сбрасываем, чтобы следующий read перечитал файл.
+        agent.file_states.prune()
         agent.on_system_msg(
             f"[AUTO-COMPRESS] Summarized '{tool_result.name}' output: "
             f"{original_len} → {len(tool_result.content)} chars"

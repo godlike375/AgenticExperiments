@@ -8,6 +8,7 @@ import fnmatch as _fnmatch
 
 from universal_agents.config import Config
 from universal_agents.constants import ENVIRONMENT_PREFIX
+from universal_agents.file_states import _content_hash
 from universal_agents.tool import tool
 
 
@@ -273,10 +274,11 @@ def read(agent: 'LLMAgent', path: str = '.', start_line: int = None, end_line: i
                 selected = lines[start - 1:end]
                 # Реальные номера строк файла, чтобы модель могла точно редактировать
                 numbered = [f"{start + i} {line}" for i, line in enumerate(selected)]
-                return (f"{ENVIRONMENT_PREFIX} File: {path}\n"
-                        f"Modified: {mtime}\n"
-                        f"Lines {start}-{end} of {len(lines)}:\n---\n"
-                        + ("\n".join(numbered) if numbered else ""))
+                content = (f"{ENVIRONMENT_PREFIX} File: {path}\n"
+                           f"Modified: {mtime}\n"
+                           f"Lines {start}-{end} of {len(lines)}:\n---\n"
+                           + ("\n".join(numbered) if numbered else ""))
+                return _read_or_skip(agent, path, raw, content)
             # Без диапазона: маленькие файлы — целиком, крупные — саммари от субагента
             raw, read_err = _read_text(path)
             if read_err:
@@ -284,7 +286,9 @@ def read(agent: 'LLMAgent', path: str = '.', start_line: int = None, end_line: i
             lines = raw.splitlines()
             if len(raw) <= _SUMMARY_THRESHOLD or Config.DISABLE_FILE_SKELETONIZATION:
                 numbered = [f"{i+1} {line}" for i, line in enumerate(lines)]
-                return f"{ENVIRONMENT_PREFIX} File: {path}\nModified: {mtime}\nContent:\n---\n" + ("\n".join(numbered) if numbered else "")
+                content = f"{ENVIRONMENT_PREFIX} File: {path}\nModified: {mtime}\nContent:\n---\n" + ("\n".join(numbered) if numbered else "")
+                return _read_or_skip(agent, path, raw, content)
+            # Скелет от субагента: состояние больших файлов не отслеживаем (дорого)
             summary = _summarize_file(path, raw, agent)
             return (f"{ENVIRONMENT_PREFIX} File: {path}\nModified: {mtime}\nTotal lines: {len(lines)}\n"
                     f"Summary:\n---\n{summary}")
@@ -293,6 +297,22 @@ def read(agent: 'LLMAgent', path: str = '.', start_line: int = None, end_line: i
         raise RuntimeError("Unexpected file type")
     except Exception as e:
         raise PermissionError(f"Error accessing {path}: {e}")
+
+
+def _read_or_skip(agent: 'LLMAgent', path: str, raw: str, content: str) -> str:
+    """Возвращает контент чтения либо пропуск, если файл не менялся с прошлого чтения.
+
+    Запоминает хэш содержимого и (через agent._read_registrations) указывает,
+    какой read-результат нужно привязать к записи в _execute_tools.
+    """
+    disk_hash = _content_hash(raw)
+    if agent.file_states.should_skip(path, disk_hash):
+        return (f"{ENVIRONMENT_PREFIX} Error: re-reading file '{path}' is not allowed - it is unchanged "
+                f"since the last read in this session and its content is already in context. "
+                f"Do NOT call 'read' again on unchanged files; use the content you already have.")
+    agent.file_states.record(path, disk_hash, _content_hash(content))
+    agent._read_registrations.append(path)
+    return content
 
 
 _REGEX_CHARS = set(r".*+?()[]|\\^$")

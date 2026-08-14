@@ -93,10 +93,11 @@ class TestChatHistory(unittest.TestCase):
         h = history_with_dialog()
         with tempfile.TemporaryDirectory() as td:
             path = os.path.join(td, "hist.json")
-            h.save(path, loaded_tools=["read", "edit_file"])
+            h.save(path, loaded_tools=["read", "edit_file"], file_states={"a.py": {"disk_hash": "x", "content_hash": "y", "tool_call_id": "t1"}})
             h2 = ChatHistory("sys")
-            tools = h2.load(path)
+            tools, file_states = h2.load(path)
             self.assertEqual(tools, ["read", "edit_file"])
+            self.assertEqual(file_states["a.py"]["disk_hash"], "x")
             self.assertEqual(len(h2), len(h))
 
 

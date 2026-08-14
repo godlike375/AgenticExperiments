@@ -45,12 +45,12 @@ class TestSummaryHelpers(unittest.TestCase):
 
     def test_find_existing_summary(self):
         msgs = _history().get_all()
-        self.assertIsNone(_find_existing_summary(msgs, 1, len(msgs) - 1))
+        self.assertIsNone(_find_existing_summary(msgs, len(msgs) - 1))
 
         h = _history()
         h.replace_range(2, 2, [UserMessage(f"{SUMMARY_MARKER}: earlier facts\npath /etc/x")])
         msgs = h.get_all()
-        found = _find_existing_summary(msgs, 1, len(msgs) - 1)
+        found = _find_existing_summary(msgs, len(msgs) - 1)
         self.assertIsNotNone(found)
         self.assertEqual(found["index"], 2)
         # body — это текст после первой строки-заголовка (маркера)

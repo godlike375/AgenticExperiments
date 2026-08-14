@@ -15,6 +15,7 @@ from universal_agents.sub_agent import SubAgent
 
 from universal_agents.compressors import auto_compress_tool_result, summarize_dialogue
 from universal_agents.context_builder import prepare_messages_for_api, get_effective_prefill
+from universal_agents.file_states import FileStateTracker
 from universal_agents.history_repair import prune_all_failed_tool_calls_except_last
 
 
@@ -118,6 +119,8 @@ class LLMAgent:
         max_generation_attempts: int = None,
     ):
         self.history = ChatHistory(system_prompt)
+        self.file_states = FileStateTracker(self.history)
+        self._read_registrations: list[str] = []
         self._gen_params = GenerationParams.from_overrides(
             temp=temp,
             timeout=timeout,
@@ -255,6 +258,7 @@ class LLMAgent:
         if msgs and isinstance(msgs[-1], AssistantMessage):
             self.history.remove_at({len(msgs) - 1})
             self.history.normalize()
+            self.file_states.prune()
 
     def _erase_last_failed_tool_call(self) -> int:
         """Удаляет из истории последний неудачный вызов инструмента (assistant + его error result)."""
@@ -272,6 +276,7 @@ class LLMAgent:
         if removed:
             self.history.remove_at(removed)
             self.history.normalize()
+            self.file_states.prune()
         return len(removed)
 
     def _get_last_answer_text(self) -> Optional[str]:
@@ -322,6 +327,7 @@ class LLMAgent:
             return
 
         self.history.compress_old_messages(summary, preserve_last=preserve_last)
+        self.file_states.prune()
         self.on_system_msg(
             f"[AUTO-SUMMARY] Context compressed ({int(original_len / Config.CHARS_PER_TOKEN)} -> {int(len(summary) / Config.CHARS_PER_TOKEN)} tokens)"
         )
@@ -394,6 +400,8 @@ class LLMAgent:
                     tr = ToolResult(tc.id, name, content, is_error=True)
                 else:
                     tr = ToolResult.success(tc.id, name, content)
+                    if name == 'read' and self._read_registrations:
+                        self.file_states.mark_tool_call(self._read_registrations.pop(0), tr.tool_call_id)
 
                 auto_compress_tool_result(self, tr)
                 results.append(tr)

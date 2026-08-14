@@ -95,6 +95,7 @@ class CLI:
         for _ in range(n - 1):
             self.agent.history.pop_until_user()
         user_msg = self.agent.history.pop_until_user()
+        self.agent.file_states.prune()
         if not user_msg:
             ConsoleUI.system_msg("Cannot find a preceding user message to regenerate")
             return
@@ -113,8 +114,12 @@ class CLI:
         filename = parts[1] if len(parts) > 1 else "default_history.json"
         try:
             tool_names = list(self.agent._all_tools.keys())
-            self.agent.history.save(filename, loaded_tools=tool_names)
-            ConsoleUI.system_msg(f"History saved to '{filename}' (tools: {tool_names})")
+            self.agent.history.save(
+                filename,
+                loaded_tools=tool_names,
+                file_states=self.agent.file_states.to_dict(),
+            )
+            ConsoleUI.system_msg(f"History saved to '{filename}' (tools: {tool_names}, file_states: {len(self.agent.file_states)})")
         except Exception as e:
             ConsoleUI.system_msg(f"Error saving history: {e}")
 
@@ -124,7 +129,8 @@ class CLI:
             ConsoleUI.system_msg(f"File '{filename}' not found")
             return
         try:
-            loaded_tools = self.agent.history.load(filename)
+            loaded_tools, file_states = self.agent.history.load(filename)
+            self.agent.file_states.from_dict(file_states)
             self.agent.rebuild_tool_usage()
             for name in loaded_tools:
                 if name not in self.agent._all_tools:
