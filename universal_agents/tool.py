@@ -7,11 +7,12 @@ from universal_agents.constants import ENVIRONMENT_PREFIX
 __all__ = ["tool", "ENVIRONMENT_PREFIX"]
 
 
-def tool(description="", short_description="", requires_confirmation=False, **params):
+def tool(description="", short_description="", requires_confirmation=False, path_safety=False, **params):
     def decorator(func):
         func._is_tool = True
         func._tool_name = func.__name__
         func._requires_confirmation = requires_confirmation
+        func._path_safety = path_safety
         func._short_description = short_description
 
         signature_params = list(inspect.signature(func).parameters)

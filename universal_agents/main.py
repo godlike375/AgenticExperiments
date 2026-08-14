@@ -4,6 +4,7 @@ from universal_agents.agent import LLMAgent
 from universal_agents.tool_registry import load_external_plugins
 from universal_agents.ui import ConsoleUI, CLI
 from universal_agents.constants import ENVIRONMENT_PREFIX
+from universal_agents.project_root import find_project_root
 
 if __name__ == "__main__":
     tools_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tools")
@@ -12,9 +13,17 @@ if __name__ == "__main__":
     print(f"Loaded startup tools: {list(startup_tools.keys())}")
     print("Use load_tools to load tools dynamically.")
 
+    project_root = find_project_root()
+    root_line = (
+        f"Current project root & working dir: '{project_root}'"
+        if project_root
+        else "Current project root & working dir: (not found - no .git upwards)"
+    )
+
     sys_prompt = (
         "* You are tool-calling LLM-assistant.\n"
         "* You are in a special program environment to use tools.\n"
+        f"* {root_line}\n"
         f"* '{ENVIRONMENT_PREFIX}' prefix means system says something.\n"
         "* Use 'load_tools' without args only 1 time.\n"
         "* Do NOT repeat identical tool calls with same arguments twice. You can call only 1 tool at 1 turn (message). "
@@ -24,7 +33,7 @@ if __name__ == "__main__":
 
     agent = LLMAgent(
         system_prompt=sys_prompt,
-        tools_config=['load_tools', 'read', 'edit_file', 'cwd', 'search', 'get_messages'],
+        tools_config=['load_tools', 'read', 'edit_file', 'cwd', 'search', 'get_messages', 'run_bash_host', 'run_powershell'],
         external_plugins=startup_tools,
         on_render=ConsoleUI.render_message,
         on_confirm=ConsoleUI.confirm_action,

@@ -17,6 +17,8 @@ from universal_agents.compressors import auto_compress_tool_result, summarize_di
 from universal_agents.context_builder import prepare_messages_for_api, get_effective_prefill
 from universal_agents.file_states import FileStateTracker
 from universal_agents.history_repair import prune_all_failed_tool_calls_except_last
+from universal_agents.project_root import find_project_root, external_paths
+from universal_agents.command_paths import extract_paths
 
 
 def _tc_name(tc) -> str:
@@ -203,6 +205,22 @@ class LLMAgent:
         """Check if path is inside a trusted directory."""
         return self.tools_manager.is_path_trusted(path)
 
+    def _check_external_paths(self, name: str, args: dict) -> list[str]:
+        """Для инструментов с path_safety извлекает из аргументов команды пути,
+        выходящие за пределы корня проекта (.git). Возвращает список внешних путей."""
+        if not args:
+            return []
+        root = find_project_root()
+        if not root:
+            return []
+        external: list[str] = []
+        for key in ("command", "cmd", "script", "path"):
+            value = args.get(key)
+            if isinstance(value, str) and value.strip():
+                paths = extract_paths(value)
+                external.extend(external_paths(paths, root))
+        return list(dict.fromkeys(external))
+
     def make_sub_agent(
         self,
         *,
@@ -383,11 +401,17 @@ class LLMAgent:
                 results.append(ToolResult.error(tc.id, name, f"Invalid JSON: {e}"))
                 continue
 
-            if tool_info.get('requires_confirmation', False):
+            if tool_info.get('requires_confirmation', False) or tool_info.get('path_safety', False):
                 skip_confirm = (name == "edit_file" and "path" in args_dict and self.is_path_trusted(args_dict["path"]))
-                if not skip_confirm and not self.on_confirm(name, args_dict):
-                    results.append(ToolResult.user_denied(tc.id, name))
-                    continue
+                external = self._check_external_paths(name, args_dict)
+                if not skip_confirm and (external or not tool_info.get('path_safety', False)):
+                    if external:
+                        self.on_system_msg(
+                            f"🚫 Command references path(s) OUTSIDE project root: {', '.join(external)}"
+                        )
+                    if not self.on_confirm(name, args_dict):
+                        results.append(ToolResult.user_denied(tc.id, name))
+                        continue
 
             try:
                 handler = tool_info['handler']

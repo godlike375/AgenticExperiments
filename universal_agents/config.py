@@ -42,6 +42,17 @@ class Config:
 
     DISABLE_PER_MESSAGE_SUMMARIZATION = True
 
+    # Как исполнять bash на Windows (для run_bash_host):
+    #   "wsl"     — через WSL (bash.exe / wsl.exe)
+    #   "gitbash" — через Git Bash (C:\Program Files\Git\bin\bash.exe и т.п.)
+    #   "auto"    — попытаться определить: git bash при наличии, иначе WSL (по умолчанию)
+    #   "system"  — shutil.which("bash") без дополнительной логики
+    BASH_BACKEND = "auto"
+
+    # Явный путь к Git Bash для BASH_BACKEND="gitbash".
+    # Если пусто — поиск по стандартным расположениям установки Git.
+    GIT_BASH_PATH = ""
+
 
 # Модульные алиасы часто используемых констант (атрибуты Config как имена модуля)
 CHARS_PER_TOKEN = Config.CHARS_PER_TOKEN

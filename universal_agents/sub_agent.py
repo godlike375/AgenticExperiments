@@ -58,6 +58,7 @@ class SubAgent:
             safe_plugins = {
                 name: func for name, func in external_plugins.items()
                 if not getattr(func, '_requires_confirmation', False)
+                and not getattr(func, '_path_safety', False)
             }
 
         # Полный контекст: без деления бюджета — сервер сам управляет limits
