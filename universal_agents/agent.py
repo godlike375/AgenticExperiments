@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from typing import Union, Callable, Optional
 
@@ -14,6 +15,7 @@ from universal_agents.tool_manager import ToolManager
 from universal_agents.sub_agent import SubAgent
 
 from universal_agents.compressors import auto_compress_tool_result, summarize_dialogue
+from universal_agents.task_tracker import DONE_TOOL, compact_completed_tasks, validate_task_mark_call
 from universal_agents.context_builder import prepare_messages_for_api, get_effective_prefill
 from universal_agents.file_states import FileStateTracker
 from universal_agents.history_repair import prune_all_failed_tool_calls_except_last
@@ -144,6 +146,7 @@ class LLMAgent:
         self.sc_samples = 3
         self.token_tracker = TokenUsageTracker(system_prompt, max_context_tokens if max_context_tokens is not None else Config.MAX_CONTEXT_TOKENS)
         self.tools_manager = ToolManager(tools_config, external_plugins)
+        self._auto_trust_git_root()
         self.loop_detector = LoopDetector()
         self._temp_override: Optional[float] = None
         self._original_temp = temp
@@ -159,6 +162,9 @@ class LLMAgent:
         self._last_response_id: Optional[str] = None
         self._last_sent_msg_count: int = 0
         self._depth: int = 0
+        self._compacted_task_ids: set[str] = set()
+        self.task_plan: list[str] = []
+        self.task_plan_map: dict = {}
 
     # --------------------------------------------------------
     # Делегирование управления инструментами в ToolManager
@@ -196,6 +202,16 @@ class LLMAgent:
     def trust_dir(self, path: str) -> str:
         """Add a directory to trusted dirs (edit_file skips confirmation)."""
         return self.tools_manager.trust_dir(path)
+
+    def _auto_trust_git_root(self) -> None:
+        """Если в текущей папке (или выше) есть валидный `.git` — доверяем корень
+        проекта по умолчанию: edit_file внутри него не запрашивает подтверждение
+        (git позволяет откатить любые правки)."""
+        if not Config.AUTO_TRUST_GIT_ROOT:
+            return
+        root = find_project_root()
+        if root:
+            self.tools_manager.trusted_dirs.add(os.path.abspath(root))
 
     def untrust_dir(self, path: str) -> str:
         """Remove a directory from trusted dirs."""
@@ -321,13 +337,17 @@ class LLMAgent:
         total = self.token_tracker.get_total_context_tokens()
         return (total / self.token_tracker.max_context_tokens) * 100
 
+    def _compact_completed_tasks(self) -> None:
+        """Структурная компактизация истории: сжимает завершённые подзадачи
+        (размеченных через инструмент task_mark_done). Ничего не делает, если завершённых
+        задач нет. Применяется перед грубой суммаризацией по порогу токенов."""
+        compact_completed_tasks(self)
+
     def _auto_summarize_dialogue(self) -> None:
         """Автоматическая суммаризация диалога при превышении порога контекста."""
         preserve_last = Config.AUTO_SUMMARY_PRESERVE_LAST
-        total = len(self.history)
 
-        if total <= Config.AFTER_SYSTEM_PROMPT + preserve_last:
-            return
+        total = len(self.history)
 
         end_id = total - 1 - preserve_last
         start_id = Config.AFTER_SYSTEM_PROMPT
@@ -400,6 +420,17 @@ class LLMAgent:
             except Exception as e:
                 results.append(ToolResult.error(tc.id, name, f"Invalid JSON: {e}"))
                 continue
+
+            # Принудительный порядок декомпозиции: неверный вызов task_mark_done
+            # → ошибка → существующий механизм перегенерации ответа модели.
+            if name == DONE_TOOL:
+                order_err = validate_task_mark_call(
+                    history_before_current_turn, args_dict, self.task_plan_map, self._compacted_task_ids
+                )
+                if order_err:
+                    self.on_system_msg(f"[TASK ORDER] Rejected out-of-order task_mark_done call: {order_err}")
+                    results.append(ToolResult.error(tc.id, name, f"{ENVIRONMENT_PREFIX} {order_err}"))
+                    continue
 
             if tool_info.get('requires_confirmation', False) or tool_info.get('path_safety', False):
                 skip_confirm = (name == "edit_file" and "path" in args_dict and self.is_path_trusted(args_dict["path"]))
@@ -982,6 +1013,7 @@ class LLMAgent:
                 )
                 continue
 
+            self._compact_completed_tasks()
             if self._get_context_usage_percent() >= Config.AUTO_SUMMARY_THRESHOLD:
                 self._auto_summarize_dialogue()
 

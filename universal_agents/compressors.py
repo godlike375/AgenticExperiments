@@ -199,6 +199,59 @@ def _build_draft_prompt(existing: Optional[dict] = None) -> str:
     return prompt
 
 
+def _draft_task_summary(
+    agent: LLMAgent, history_msgs: list[dict], task_id: str, task_title: str
+) -> Optional[str]:
+    """Черновик саммари завершённой подзадачи по её сегменту истории."""
+    prompt = (
+        f"{ENVIRONMENT_PREFIX} Below is the execution trace of a COMPLETED subtask "
+        f"'{task_title}' (id={task_id}).\n"
+        f"Write a very dense, detailed and lossless summary of what was done and the result.\n"
+        f"Preserve ALL important concrete facts: file paths, function/class/variable names, "
+        f"tool names and their arguments, exact commands, values, numbers, error messages.\n"
+        f"Key decisions and their reasons, and the results of tool executions.\n"
+        f"State what is DONE vs PENDING/BLOCKED and what the next step is.\n"
+        f"Remove only reasoning chains and redundant filler. Do NOT generalize identifiers.\n"
+        f"Output ONLY the dense structured summary:\n"
+        f"SUMMARY:\n"
+        f"PROGRESS:\n"
+        f"KEY FACTS:\n"
+        f"DECISIONS:\n"
+        f"STATE / NEXT STEPS:"
+    )
+    msgs = history_msgs + [{"role": "user", "content": prompt}]
+    msg_obj, err, usage = LLMClient.call(msgs, temp=0.1, timeout=60, tools=None)
+    if usage:
+        agent.token_tracker.update_from_usage(usage)
+    if err or not msg_obj or not msg_obj.content:
+        return None
+    return msg_obj.content.strip()
+
+
+def _review_task_summary(
+    agent: LLMAgent, history_msgs: list[dict], draft: str, task_id: str, task_title: str
+) -> Optional[str]:
+    """Review-проход: прунинг устаревшего + добавление пропущенного в черновике."""
+    review_prompt = (
+        f"{ENVIRONMENT_PREFIX} Below is a DRAFT summary of the completed subtask "
+        f"'{task_title}' (id={task_id}) from the conversation above.\n"
+        f"Review it against the actual conversation and produce the FINAL summary.\n"
+        f"PRUNE: remove outdated, duplicated and no longer needed details.\n"
+        f"ADD: put back important facts missing from the draft (do not invent, only recover): "
+        f"concrete names, paths, tool names and args, values, errors, decisions, and "
+        f"DONE vs PENDING/next step.\n"
+        f"Keep the summary dense, structured and complete. Output ONLY the final summary.\n"
+        f"\nDRAFT SUMMARY:\n{draft}"
+    )
+    msgs = history_msgs + [{"role": "user", "content": review_prompt}]
+    msg_obj, err, usage = LLMClient.call(msgs, temp=0.1, timeout=60, tools=None)
+    if usage:
+        agent.token_tracker.update_from_usage(usage)
+    if err or not msg_obj or not msg_obj.content:
+        return None
+    return msg_obj.content.strip()
+
+
 def _summarize_batch(agent: LLMAgent, full_history_msgs: list[dict], target_content: str,
                      target_msg: Optional[dict] = None) -> Optional[str]:
     """

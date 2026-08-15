@@ -5,11 +5,12 @@ from universal_agents.tool_registry import load_external_plugins
 from universal_agents.ui import ConsoleUI, CLI
 from universal_agents.constants import ENVIRONMENT_PREFIX
 from universal_agents.project_root import find_project_root
+from universal_agents.task_tracker import TASK_MARK_INSTRUCTIONS
 
 if __name__ == "__main__":
     tools_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tools")
     all_tools = load_external_plugins(tools_dir)
-    startup_tools = {n: f for n, f in all_tools.items() if n == "load_tools"}
+    startup_tools = {n: f for n, f in all_tools.items() if n in ("load_tools", "task_mark_done", "create_plan")}
     print(f"Loaded startup tools: {list(startup_tools.keys())}")
     print("Use load_tools to load tools dynamically.")
 
@@ -29,11 +30,12 @@ if __name__ == "__main__":
         "* Do NOT repeat identical tool calls with same arguments twice. You can call only 1 tool at 1 turn (message). "
         "So you must wait for tool results before making any next call. "
         "Говори только на русском."
+        f"{TASK_MARK_INSTRUCTIONS}"
     )
 
     agent = LLMAgent(
         system_prompt=sys_prompt,
-        tools_config=['load_tools', 'read', 'edit_file', 'cwd', 'search', 'get_messages', 'run_bash_host', 'run_powershell'],
+        tools_config=['load_tools', 'read', 'edit_file', 'cwd', 'search', 'get_messages', 'run_bash_host', 'run_powershell', 'task_mark_done', 'create_plan'],
         external_plugins=startup_tools,
         on_render=ConsoleUI.render_message,
         on_confirm=ConsoleUI.confirm_action,

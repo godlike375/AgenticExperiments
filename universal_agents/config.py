@@ -5,17 +5,17 @@ class Config:
     BOOST_TEMP = 2
     ERROR_RECOVERY_TEMP = 1
     MAX_LOOP_RETRIES = 2  # попыток перегенерации при повторяющемся вызове/ответе
-    ERROR_RECOVERY_RETRIES = 2  # попыток перегенерации после ошибки инструмента
+    ERROR_RECOVERY_RETRIES = 1  # попыток перегенерации после ошибки инструмента
     BROKEN_CALL_REGEN_RETRIES = 2  # попыток перегенерации при обнаружении сломанного вызова
     BROKEN_CALL_FIX_RETRIES = 2    # попыток «починить» вызов через промпт после неудачной регенерации
     DUPLICATE_CONTINUATION_TEMP = round(BOOST_TEMP / 4, 2)  # спокойная достройка после расхождения ⏤ BOOST/3 ≈ 0.67
 
     # Параметры генерации
-    TEMP = 0.38
+    TEMP = 0.2
     TOP_P = 0.94
     FREQUENCY_PENALTY = 0.05
     PRESENCE_PENALTY = 0.15
-    MAX_CONTEXT_TOKENS = 3500
+    MAX_CONTEXT_TOKENS = 32000
     MAX_OUTPUT_TOKENS = min(32000, int(MAX_CONTEXT_TOKENS / 1.5))
     TIMEOUT = 1800
     MAX_ITER = 35
@@ -29,6 +29,14 @@ class Config:
     AUTO_SUMMARY_THRESHOLD = 60  # процент контекста (55%)
     AUTO_SUMMARY_PRESERVE_LAST = 1  # сколько последних сообщений не трогать
     AUTO_SUMMARY_REVIEW_PASS = True  # отревьювить черновик саммари: подчистить устаревшее + добавить пропущенное
+
+    # Структурная компактизация истории по завершённым подзадачам
+    TASK_COMPACTION_ENABLED = True  # сжимать завершённые группы подзадач
+    MAX_TASK_COMPACTION_ROUNDS = 20  # макс. число групп за один проход
+
+    # Авто-доверие корня проекта: если в папке есть валидный .git, она доверена
+    # для edit_file по умолчанию (без запроса подтверждения) — git поможет откатить.
+    AUTO_TRUST_GIT_ROOT = True
 
     # Константы токенизации и суммаризации
     CHARS_PER_TOKEN = 2.3
