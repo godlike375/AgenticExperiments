@@ -89,5 +89,66 @@ class TestAgentChat(unittest.TestCase):
         self.assertIn("tool", roles)
 
 
+    def test_chat_streaming_applies_prefill_and_emits_it(self):
+        seen = []
+
+        def on_chunk(chunk):
+            seen.append(chunk)
+
+        agent = LLMAgent(
+            system_prompt="sys",
+            streaming_enabled=True,
+            on_stream_chunk=on_chunk,
+        )
+
+        def stream(*args, **kwargs):
+            yield _chunk(_delta(content="hello back"))
+
+        with mock.patch("universal_agents.agent.LLMClient.stream", return_value=stream()):
+            result = agent.chat("hello", prefill="<start>")
+
+        self.assertTrue(result.startswith("<start>"), f"result should start with prefill: {result!r}")
+        self.assertEqual(seen[0], "<start>", "prefill should be the first streamed chunk")
+        self.assertEqual("".join(seen), "<start>hello back", f"unexpected stream chunks: {seen!r}")
+
+    def test_chat_streaming_emits_prefill_after_reasoning(self):
+        seen = []
+
+        def on_chunk(chunk):
+            seen.append(chunk)
+
+        agent = LLMAgent(
+            system_prompt="sys",
+            streaming_enabled=True,
+            on_stream_chunk=on_chunk,
+        )
+
+        def stream(*args, **kwargs):
+            yield _chunk(_delta(reasoning_content="think..."))
+            yield _chunk(_delta(content="hello back"))
+
+        with mock.patch("universal_agents.agent.LLMClient.stream", return_value=stream()):
+            result = agent.chat("hello", prefill="<start>")
+
+        self.assertTrue(result.startswith("<start>"))
+        self.assertEqual(seen, ["<start>", "hello back"], f"unexpected stream chunks: {seen!r}")
+
+    def test_chat_streaming_prefill_with_empty_content(self):
+        agent = LLMAgent(
+            system_prompt="sys",
+            streaming_enabled=True,
+            on_stream_chunk=lambda _: None,
+        )
+
+        def stream(*args, **kwargs):
+            yield _chunk(_delta(content=""))
+            yield _chunk(usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1, total_tokens=2))
+
+        with mock.patch("universal_agents.agent.LLMClient.stream", return_value=stream()):
+            result = agent.chat("hello", prefill="X")
+
+        self.assertEqual(result, "X")
+
+
 if __name__ == "__main__":
     unittest.main()

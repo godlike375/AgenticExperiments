@@ -497,6 +497,7 @@ class LLMAgent:
                 "full_reasoning": "",
                 "usage": None,
                 "reasoning_started": False,
+                "prefill_pending": prefill,
             }
 
             first_chunk = next(stream)
@@ -613,6 +614,10 @@ class LLMAgent:
                 self.on_reasoning_chunk(rc)
         added = ""
         if delta.content:
+            if state.get("prefill_pending"):
+                if self.on_stream_chunk:
+                    self.on_stream_chunk(state["prefill_pending"])
+                state["prefill_pending"] = None
             added = delta.content
             state["full_content"] += added
             if self.on_stream_chunk:

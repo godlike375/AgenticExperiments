@@ -16,11 +16,14 @@ def build_usage_dict(prompt_tokens: int, completion_tokens: int, total_tokens: O
     }
 
 
-def apply_prefill(content: str, prefill: Optional[str]) -> str:
+def apply_prefill(content: Optional[str], prefill: Optional[str]) -> str:
     """Добавляет prefill в начало содержимого, если его там ещё нет."""
-    if prefill and content and not content.startswith(prefill):
-        return prefill + content
-    return content
+    if prefill is None:
+        return content or ""
+    content = content or ""
+    if content.startswith(prefill):
+        return content
+    return prefill + content
 
 
 class TokenUsageTracker:
@@ -206,7 +209,10 @@ class LLMClient:
                 kwargs["top_p"] = top_p
 
             response = LLMClient.get_client().responses.create(**kwargs)
-            return LLMClient._parse_responses_output(response), None, LLMClient._extract_responses_usage(response)
+            msg = LLMClient._parse_responses_output(response)
+            if msg and prefill:
+                msg.content = apply_prefill(msg.content, prefill)
+            return msg, None, LLMClient._extract_responses_usage(response)
         except Exception as e:
             return None, str(e), None
 
@@ -229,7 +235,10 @@ class LLMClient:
                 kwargs["top_p"] = top_p
 
             response = LLMClient.get_client().responses.create(**kwargs)
-            return LLMClient._parse_responses_output(response), None, LLMClient._extract_responses_usage(response)
+            msg = LLMClient._parse_responses_output(response)
+            if msg and prefill:
+                msg.content = apply_prefill(msg.content, prefill)
+            return msg, None, LLMClient._extract_responses_usage(response)
         except Exception as e:
             return None, str(e), None
 
