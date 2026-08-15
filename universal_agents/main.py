@@ -10,7 +10,7 @@ from universal_agents.task_tracker import TASK_MARK_INSTRUCTIONS
 if __name__ == "__main__":
     tools_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tools")
     all_tools = load_external_plugins(tools_dir)
-    startup_tools = {n: f for n, f in all_tools.items() if n in ("load_tools", "task_mark_done", "create_plan")}
+    startup_tools = {n: f for n, f in all_tools.items() if n in ("load_tools", "run_bash_host", "create_plan")}
     print(f"Loaded startup tools: {list(startup_tools.keys())}")
     print("Use load_tools to load tools dynamically.")
 
@@ -35,7 +35,7 @@ if __name__ == "__main__":
 
     agent = LLMAgent(
         system_prompt=sys_prompt,
-        tools_config=['load_tools', 'read', 'edit_file', 'cwd', 'search', 'get_messages', 'run_bash_host', 'run_powershell', 'task_mark_done', 'create_plan'],
+        tools_config=['load_tools', 'read', 'edit_file', 'cwd', 'search', 'get_messages', 'run_bash_host', 'run_powershell', 'have_done', 'create_plan'],
         external_plugins=startup_tools,
         on_render=ConsoleUI.render_message,
         on_confirm=ConsoleUI.confirm_action,

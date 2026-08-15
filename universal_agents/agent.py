@@ -339,7 +339,7 @@ class LLMAgent:
 
     def _compact_completed_tasks(self) -> None:
         """Структурная компактизация истории: сжимает завершённые подзадачи
-        (размеченных через инструмент task_mark_done). Ничего не делает, если завершённых
+        (размеченных через инструмент have_done). Ничего не делает, если завершённых
         задач нет. Применяется перед грубой суммаризацией по порогу токенов."""
         compact_completed_tasks(self)
 
@@ -421,14 +421,14 @@ class LLMAgent:
                 results.append(ToolResult.error(tc.id, name, f"Invalid JSON: {e}"))
                 continue
 
-            # Принудительный порядок декомпозиции: неверный вызов task_mark_done
+            # Принудительный порядок декомпозиции: неверный вызов have_done
             # → ошибка → существующий механизм перегенерации ответа модели.
             if name == DONE_TOOL:
                 order_err = validate_task_mark_call(
                     history_before_current_turn, args_dict, self.task_plan_map, self._compacted_task_ids
                 )
                 if order_err:
-                    self.on_system_msg(f"[TASK ORDER] Rejected out-of-order task_mark_done call: {order_err}")
+                    self.on_system_msg(f"[TASK ORDER] Rejected out-of-order have_done call: {order_err}")
                     results.append(ToolResult.error(tc.id, name, f"{ENVIRONMENT_PREFIX} {order_err}"))
                     continue
 

@@ -117,6 +117,20 @@ class TestCommandPaths(unittest.TestCase):
         self.assertEqual(extract_paths(f"Remove-Item -Path {ws}\\x.txt -Force", ws),
                          [os.path.normpath(os.path.join(ws, "x.txt"))])
 
+    def test_css_pseudo_class_not_path(self):
+        # a:hover (CSS-псевдокласс) не должен распознаваться как диск/путь
+        cmd = "cat > ./site.html << 'EOF'\na:hover { color: red; }\nEOF\n"
+        found = extract_paths(cmd, ".")
+        # реальный путь вывода присутствует, а a:hover — нет
+        self.assertIn(os.path.normpath("site.html"), found)
+        self.assertEqual(len(found), 1)
+
+    def test_windows_drive_with_separator_still_detected(self):
+        # настоящий Windows-путь с разделителем (C:\ / C:/) должен ловиться
+        found = extract_paths("copy C:\\foo C:/bar", ".")
+        self.assertIn(os.path.normpath("C:\\foo"), found)
+        self.assertIn(os.path.normpath("C:/bar"), found)
+
 
 class TestToolPathSafety(unittest.TestCase):
     def test_path_safety_flag(self):

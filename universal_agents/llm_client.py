@@ -91,9 +91,17 @@ class LoopDetector:
                 break
 
             if isinstance(msg, AssistantMessage):
-                # Повторный create_plan (ревизия плана) меняет контекст: вызовы того же
-                # инструмента ПОСЛЕ него не считаются повтором.
-                if any(getattr(tc, "name", "") == "create_plan" for tc in msg.tool_calls):
+                # create_plan особый случай:
+                #  - повторный create_plan с ТЕМИ ЖЕ аргументами = зацикливание;
+                #  - create_plan с ДРУГИМИ аргументами = ревизия плана (граница
+                #    контекста): вызовы ПОСЛЕ него повтором не считаются.
+                found_plan = False
+                for tc in msg.tool_calls:
+                    if getattr(tc, "name", "") == "create_plan":
+                        found_plan = True
+                        if self.normalize_args(tc.arguments) == norm_args:
+                            return True
+                if found_plan:
                     break
                 for tc in msg.tool_calls:
                     if tc.name == tool_name:

@@ -125,7 +125,9 @@ def _has_clear_path_marker(token: str) -> bool:
         return True
     if token.startswith(("./", "../", "~/", "~\\", ":\\", ":/", "/", "\\")):
         return True
-    if re.match(r"^[A-Za-z]:", token):  # Windows drive: C:foo
+    # Windows drive: C:\ / C:/ (с разделителем). Одинокое "C:" или "a:hover"
+    # (CSS-псевдокласс) путём не считаем — иначе ложные срабатывания.
+    if re.match(r"^[A-Za-z]:[\\/]", token):
         return True
     # файл по расширению
     if "." in os.path.basename(token):

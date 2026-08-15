@@ -179,7 +179,8 @@ def unload_tool(agent: LLMAgent, name: str) -> str:
 
 @tool(
     description="Marks a task from the plan as DONE with a brief result summary. "
-                "Call ONLY AFTER really performing the task with real tools "
+                "Available ONLY AFTER a successful create_plan (it is dynamically loaded "
+                "once the plan is set). Call ONLY AFTER really performing the task with real tools "
                 "(read/search/edit_file/run_bash etc.). Do NOT mark a task done and do NOT "
                 "invent a summary if you have not actually done the work. Must be called strictly "
                 "in plan order (the system rejects out-of-order calls).",
@@ -187,7 +188,7 @@ def unload_tool(agent: LLMAgent, name: str) -> str:
     id=("str", "Task id from the plan (e.g. 't1', 'a-1')"),
     summary=("str", "Brief result summary of this task"),
 )
-def task_mark_done(agent: LLMAgent, id: str, summary: str = "") -> str:
+def have_done(agent: LLMAgent, id: str, summary: str = "") -> str:
     from universal_agents.task_tracker import mark_task_done
 
     return mark_task_done(agent, id, summary)
@@ -197,7 +198,7 @@ def task_mark_done(agent: LLMAgent, id: str, summary: str = "") -> str:
     description="Creates or revises the task plan: an ORDERED FLAT list of tasks to execute "
                 "(like a bullet list). Each entry is {\"id\", \"title\"}. The list order IS the "
                 "execution order. Execute each task for real with real tools, then mark it done "
-                "with task_mark_done. Call this FIRST for any multi-step task, and call it again "
+                "with have_done. Call this FIRST for any multi-step task, and call it again "
                 "to REVISE the plan (allows starting from a different step; execution then "
                 "continues in the new plan's order).",
     short_description="create/revise task plan",

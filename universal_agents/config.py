@@ -2,7 +2,7 @@ class Config:
     API_URL = "http://192.168.50.196:1234/v1"
     MODEL_NAME = ""
     AFTER_SYSTEM_PROMPT = 1  # Index after which dialog starts (0 = system)
-    BOOST_TEMP = 2
+    BOOST_TEMP = 1.5
     ERROR_RECOVERY_TEMP = 1
     MAX_LOOP_RETRIES = 2  # попыток перегенерации при повторяющемся вызове/ответе
     ERROR_RECOVERY_RETRIES = 1  # попыток перегенерации после ошибки инструмента
@@ -11,10 +11,10 @@ class Config:
     DUPLICATE_CONTINUATION_TEMP = round(BOOST_TEMP / 4, 2)  # спокойная достройка после расхождения ⏤ BOOST/3 ≈ 0.67
 
     # Параметры генерации
-    TEMP = 0.2
+    TEMP = 0.45
     TOP_P = 0.94
-    FREQUENCY_PENALTY = 0.05
-    PRESENCE_PENALTY = 0.15
+    FREQUENCY_PENALTY = 0.0
+    PRESENCE_PENALTY = 0.0
     MAX_CONTEXT_TOKENS = 32000
     MAX_OUTPUT_TOKENS = min(32000, int(MAX_CONTEXT_TOKENS / 1.5))
     TIMEOUT = 1800

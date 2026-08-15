@@ -45,6 +45,37 @@ class TestLoopDetector(unittest.TestCase):
         self.assertTrue(self.detector.check_duplicate_in_turn("read", '{ "a" : 1 }', history))
         self.assertFalse(self.detector.check_duplicate_in_turn("read", '{"a": 2}', history))
 
+    def test_repeated_create_plan_same_args_is_loop(self):
+        history = [
+            UserMessage("do the task"),
+            AssistantMessage(content="", tool_calls=[
+                ToolCall(id="c1", name="create_plan", arguments='{"plan":[{"id":"t2","title":"X"}]}')
+            ]),
+        ]
+        self.assertTrue(self.detector.check_duplicate_in_turn(
+            "create_plan", '{"plan":[{"id":"t2","title":"X"}]}', history))
+
+    def test_create_plan_revision_with_different_args_is_allowed(self):
+        history = [
+            UserMessage("do the task"),
+            AssistantMessage(content="", tool_calls=[
+                ToolCall(id="c1", name="create_plan", arguments='{"plan":[{"id":"t1","title":"X"}]}')
+            ]),
+        ]
+        self.assertFalse(self.detector.check_duplicate_in_turn(
+            "create_plan", '{"plan":[{"id":"t2","title":"Y"}]}', history))
+
+    def test_create_plan_resets_duplicate_scan_for_other_tools(self):
+        history = [
+            UserMessage("do the task"),
+            AssistantMessage(content="", tool_calls=[ToolCall(id="r", name="read", arguments="{}")]),
+            AssistantMessage(content="", tool_calls=[
+                ToolCall(id="c1", name="create_plan", arguments='{"plan":[{"id":"t1","title":"X"}]}')
+            ]),
+        ]
+        # Повторный read ПОСЛЕ create_plan не считается дублем (ревизия = граница контекста)
+        self.assertFalse(self.detector.check_duplicate_in_turn("read", "{}", history))
+
 
 if __name__ == "__main__":
     unittest.main()

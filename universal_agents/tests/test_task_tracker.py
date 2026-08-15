@@ -19,7 +19,7 @@ def _done(tid, summary=""):
     args = {"id": tid, "summary": summary}
     return ToolCall(
         id=f"call_done_{tid}",
-        name="task_mark_done",
+        name="have_done",
         arguments=json.dumps(args, ensure_ascii=False),
     )
 
@@ -29,7 +29,7 @@ def _assistant_done(tid, summary=""):
 
 
 def _done_result(tid):
-    return ToolResult.success(f"call_done_{tid}", "task_mark_done", "ok")
+    return ToolResult.success(f"call_done_{tid}", "have_done", "ok")
 
 
 def _plan_call(plan_list):
@@ -192,7 +192,7 @@ class TestOrderValidation(unittest.TestCase):
         h.add(AssistantMessage(content="", tool_calls=[_plan_call(planA)]))
         h.add(ToolResult.success("c", "create_plan", "Plan set"))
         h.add(_assistant_done("A1"))
-        h.add(ToolResult.success("c", "task_mark_done", "ok"))
+        h.add(ToolResult.success("c", "have_done", "ok"))
         # Новый план переиспользует те же id, но порядок: A3,A1,A2
         planB = [{"id": "A3"}, {"id": "A1"}, {"id": "A2"}]
         pm_b = {e["id"]: {"title": ""} for e in planB}
@@ -230,11 +230,11 @@ class TestOrderValidation(unittest.TestCase):
         self.assertIn("NO-WORK-DONE", err)
 
     def test_rejected_done_does_not_mark_task_complete(self):
-        # Ошибочный (отклонённый) task_mark_done не должен считаться выполненным:
+        # Ошибочный (отклонённый) have_done не должен считаться выполненным:
         # после него следующей задачей всё ещё остаётся A1, а не A2.
         h, pm = self._history(self.PLAN)
         h.add(_assistant_done("A1"))  # отклонённый вызов (без успешного ToolResult)
-        h.add(ToolResult.error("x", "task_mark_done", "NO-WORK-DONE"))
+        h.add(ToolResult.error("x", "have_done", "NO-WORK-DONE"))
         err = validate_task_mark_call(h.get_all(), {"id": "A1"}, pm, set())
         # всё ещё A1 (нет успешного done-маркера), а не OUT-OF-ORDER на A2
         self.assertIsNotNone(err)
@@ -243,7 +243,7 @@ class TestOrderValidation(unittest.TestCase):
 
     def test_accepts_done_after_real_work(self):
         h, pm = self._history(self.PLAN)
-        # реальная работа: вызов read между планом и task_mark_done
+        # реальная работа: вызов read между планом и have_done
         h.add(AssistantMessage(content="", tool_calls=[ToolCall("r", "read", '{"path":"a"}')]))
         h.add(ToolResult.success("r", "read", "file contents"))
         self.assertIsNone(validate_task_mark_call(h.get_all(), {"id": "A1"}, pm, set()))
@@ -276,7 +276,7 @@ class TestCompaction(unittest.TestCase):
             m for m in agent.history
             if isinstance(m, AssistantMessage) and m.has_tool_calls()
         ]
-        self.assertTrue(all(all(tc.name != "task_mark_done" for tc in m.tool_calls) for m in remaining))
+        self.assertTrue(all(all(tc.name != "have_done" for tc in m.tool_calls) for m in remaining))
 
     def test_compaction_marks_compacted_ids(self):
         agent = _make_agent()
