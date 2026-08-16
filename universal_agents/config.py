@@ -23,16 +23,26 @@ class Config:
 
     STREAM_ENABLED = True
 
+    # Держать reasoning_content ассистента в истории/контексте (для экспериментов).
+    # Если False (по умолчанию) — reasoning_content не попадает в API-контекст и в
+    # сохранённую историю (экономия токенов/KV-кэша; reasoning не нужен downstream).
+    KEEP_REASONING_CONTENT_IN_HISTORY = False
+
     USE_RESPONSES_API = False
 
     # Автоматическая суммаризация диалога
-    AUTO_SUMMARY_THRESHOLD = 60  # процент контекста (55%)
+    AUTO_SUMMARY_THRESHOLD = 85  # процент контекста (55%)
     AUTO_SUMMARY_PRESERVE_LAST = 1  # сколько последних сообщений не трогать
     AUTO_SUMMARY_REVIEW_PASS = True  # отревьювить черновик саммари: подчистить устаревшее + добавить пропущенное
 
     # Структурная компактизация истории по завершённым подзадачам
     TASK_COMPACTION_ENABLED = True  # сжимать завершённые группы подзадач
     MAX_TASK_COMPACTION_ROUNDS = 20  # макс. число групп за один проход
+
+    # Порог длины содержимого результата have_done (в символах): если больше —
+    # при компактизации задачи обрезаем его до короткого стаба, т.к. детальные
+    # факты уже сохранены в компактизационном summary.
+    HAVE_DONE_TRIM_THRESHOLD = 250
 
     # Авто-доверие корня проекта: если в папке есть валидный .git, она доверена
     # для edit_file по умолчанию (без запроса подтверждения) — git поможет откатить.
@@ -43,7 +53,7 @@ class Config:
     MIN_TOKENS_TO_SUMMARIZE = 500
 
     # Отключает скелетизацию больших файлов: read без start_line/end_line вернёт полный файл
-    DISABLE_FILE_SKELETONIZATION = True
+    DISABLE_FILE_SKELETONIZATION = False
 
     # Отключает автоматическую суммаризацию большого вывода любых инструментов
     DISABLE_TOOL_AUTO_SUMMARIZATION = True

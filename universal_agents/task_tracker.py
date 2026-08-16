@@ -265,17 +265,28 @@ def _earliest_done_leaf(history: list, leaves: list, compacted: set[str], plan_p
 
 
 def _leaf_block(history: list, leaf: str, leaves: list, plan_pos: int) -> tuple:
-    """Возвращает (start, end) сегмента задачи. end — позиция УСПЕШНОГО результата
-    have_done задачи, start — сразу после результата предыдущей задачи
-    (или после создания плана)."""
+    """Возвращает (start, end) компактизируемого сегмента задачи — только реальная
+    работа между сохраняемыми маркерами.
+
+    Маркеры create_plan и have_done (вызов + результат) в сегмент НЕ входят и
+    остаются в истории (чтобы модель всегда видела порядок плана и факт завершения).
+    start — сразу после последней сохраняемой границы (результата create_plan либо
+    результата have_done предыдущей задачи); end — непосредственно перед вызовом
+    have_done этой задачи (его результат на done[leaf])."""
     done = _done_marker_positions(history, leaves, after=plan_pos)
-    end = done[leaf]
+    done_idx = done[leaf]        # индекс результата have_done этой задачи
+    hd_call = done_idx - 1       # вызов have_done (непосредственно перед результатом)
+
+    # Последняя сохраняемая граница перед работой задачи: результат create_plan
+    # (вызов на plan_pos) либо результат have_done последней размеченной предыдущей.
+    boundary = plan_pos + 1
     idx = leaves.index(leaf)
-    start = plan_pos + 1
-    if idx > 0:
-        prev = done.get(leaves[idx - 1])
-        if prev is not None:
-            start = prev + 1
+    for i in range(idx):
+        prev = done.get(leaves[i])
+        if prev is not None and prev > boundary:
+            boundary = prev
+    start = boundary + 1
+    end = hd_call - 1
     return start, end
 
 
@@ -295,6 +306,8 @@ def _compact_one_group(agent: LLMAgent) -> Optional[str]:
     leaf = _earliest_done_leaf(history, leaves, compacted, plan_pos=plan_pos)
     if leaf is None:
         return None
+
+    done = _done_marker_positions(history, leaves, after=plan_pos)
 
     start, end = _leaf_block(history, leaf, leaves, plan_pos)
     if start > end:
@@ -317,6 +330,13 @@ def _compact_one_group(agent: LLMAgent) -> Optional[str]:
         content=f"{SUMMARY_MARKER} (subtask '{title}' [{leaf}] done):\n{summary}"
     )
     agent.history.replace_range(start, end, [summary_msg])
+    # Обрезаем раздутый summary в результате have_done: детальные факты уже
+    # сохранены в компактизационном summary, дублировать их в маркере не нужно.
+    done_idx = done.get(leaf)
+    hd = history[done_idx] if done_idx is not None else None
+    if hd is not None and not getattr(hd, 'is_error', False):
+        if len(getattr(hd, 'content', '') or '') > Config.HAVE_DONE_TRIM_THRESHOLD:
+            hd.content = f"{ENVIRONMENT_PREFIX} Task '{leaf}' marked done (summary compacted)."
     agent.file_states.prune()
     compacted.add(leaf)
     agent.on_system_msg(

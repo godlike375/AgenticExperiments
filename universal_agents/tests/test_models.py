@@ -7,6 +7,7 @@ from universal_agents.models import (
     ToolCall,
     ToolResult,
 )
+from universal_agents.config import Config
 
 
 class TestMessages(unittest.TestCase):
@@ -24,9 +25,22 @@ class TestMessages(unittest.TestCase):
         d = msg.to_api_dict()
         self.assertEqual(d["role"], "assistant")
         self.assertEqual(d["content"], "hi")
-        self.assertEqual(d["reasoning_content"], "thinking")
+        # По умолчанию reasoning_content не попадает в контекст
+        self.assertNotIn("reasoning_content", d)
         self.assertEqual(len(d["tool_calls"]), 1)
         self.assertTrue(msg.has_tool_calls())
+
+    def test_assistant_message_reasoning_toggle(self):
+        tc = ToolCall(id="t1", name="read", arguments="{}")
+        msg = AssistantMessage(content="hi", tool_calls=[tc], reasoning_content="thinking")
+        original = Config.KEEP_REASONING_CONTENT_IN_HISTORY
+        try:
+            Config.KEEP_REASONING_CONTENT_IN_HISTORY = True
+            self.assertEqual(msg.to_api_dict()["reasoning_content"], "thinking")
+            Config.KEEP_REASONING_CONTENT_IN_HISTORY = False
+            self.assertNotIn("reasoning_content", msg.to_api_dict())
+        finally:
+            Config.KEEP_REASONING_CONTENT_IN_HISTORY = original
 
     def test_assistant_message_has_streamed_field(self):
         msg = AssistantMessage(content="x", streamed=True)

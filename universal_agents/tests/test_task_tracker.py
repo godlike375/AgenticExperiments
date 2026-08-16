@@ -262,21 +262,61 @@ class TestOrderValidation(unittest.TestCase):
 class TestCompaction(unittest.TestCase):
     def test_compaction_compresses_done_tasks(self):
         agent = _make_agent()
-        before = len(agent.history)
+        before = agent.history.content_len(0, len(agent.history) - 1)
         with mock.patch(
             "universal_agents.task_tracker.summarize_task_segment",
             return_value="dense summary of task",
         ):
             n = compact_completed_tasks(agent)
         self.assertGreater(n, 0)
-        self.assertLess(len(agent.history), before)
+        after = agent.history.content_len(0, len(agent.history) - 1)
+        self.assertLess(after, before)
         summary_msgs = [m for m in agent.history if isinstance(m, UserMessage) and SUMMARY_MARKER in m.content]
         self.assertTrue(summary_msgs)
-        remaining = [
-            m for m in agent.history
-            if isinstance(m, AssistantMessage) and m.has_tool_calls()
+        # маркеры create_plan и have_done сохраняются (не компактизируются)
+        remaining = [m for m in agent.history if isinstance(m, AssistantMessage) and m.has_tool_calls()]
+        self.assertTrue(
+            any(any(tc.name == "create_plan" for tc in m.tool_calls) for m in remaining)
+        )
+        done_calls = [
+            tc.name for m in remaining for tc in m.tool_calls if tc.name == "have_done"
         ]
-        self.assertTrue(all(all(tc.name != "have_done" for tc in m.tool_calls) for m in remaining))
+        # A1 и A2 размечены и их have_done-маркеры остаются в истории
+        self.assertEqual(len(done_calls), 2)
+
+    def test_compaction_trims_bloated_have_done_summary(self):
+        h = ChatHistory("sys")
+        h.add(UserMessage("do X"))
+        h.add(AssistantMessage(content="", tool_calls=[_plan_call([
+            {"id": "A1", "title": "A1"},
+            {"id": "B1", "title": "B1"},
+        ])]))
+        h.add(ToolResult.success("c0", "create_plan", "Plan set"))
+        h.add(AssistantMessage(content=("A1 work " * 500)))
+        long_summary = "x" * 5000
+        h.add(_assistant_done("A1", long_summary))
+        h.add(ToolResult.success(
+            "call_done_A1", "have_done",
+            f"Task 'A1' marked done. Summary recorded: {long_summary}",
+        ))
+        agent = SimpleNamespace(
+            history=h,
+            task_plan=[],
+            task_plan_map={},
+            _compacted_task_ids=set(),
+            file_states=SimpleNamespace(prune=lambda: None),
+            on_system_msg=lambda *a, **k: None,
+        )
+        set_plan(agent, [{"id": "A1", "title": "A1"}, {"id": "B1", "title": "B1"}])
+        with mock.patch(
+            "universal_agents.task_tracker.summarize_task_segment",
+            return_value="dense",
+        ):
+            compact_completed_tasks(agent)
+        hd_msgs = [m for m in agent.history if isinstance(m, ToolResult) and m.name == "have_done"]
+        self.assertEqual(len(hd_msgs), 1)
+        self.assertIn("summary compacted", hd_msgs[0].content)
+        self.assertLess(len(hd_msgs[0].content), 100)
 
     def test_compaction_marks_compacted_ids(self):
         agent = _make_agent()

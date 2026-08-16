@@ -223,7 +223,10 @@ class LLMAgent:
 
     def _check_external_paths(self, name: str, args: dict) -> list[str]:
         """Для инструментов с path_safety извлекает из аргументов команды пути,
-        выходящие за пределы корня проекта (.git). Возвращает список внешних путей."""
+        выходящие за пределы корня проекта (.git). Возвращает список внешних путей.
+
+        Триггерятся только СУЩЕСТВУЮЩИЕ пути: несуществующий путь — это скорее
+        создание, чем изменение существующих файлов, и потому менее критичен."""
         if not args:
             return []
         root = find_project_root()
@@ -234,7 +237,8 @@ class LLMAgent:
             value = args.get(key)
             if isinstance(value, str) and value.strip():
                 paths = extract_paths(value)
-                external.extend(external_paths(paths, root))
+                existing = [p for p in paths if os.path.exists(p)]
+                external.extend(external_paths(existing, root))
         return list(dict.fromkeys(external))
 
     def make_sub_agent(

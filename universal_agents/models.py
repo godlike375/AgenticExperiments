@@ -3,6 +3,8 @@ from typing import Optional, Any
 from dataclasses import dataclass, field
 from abc import ABC, abstractmethod
 
+from universal_agents.config import Config
+
 @dataclass
 class Message(ABC):
     timestamp: datetime = field(init=False)
@@ -57,7 +59,7 @@ class AssistantMessage(Message):
 
     def to_api_dict(self) -> dict[str, Any]:
         d = {"role": "assistant", "content": self.content}
-        if self.reasoning_content:
+        if self.reasoning_content and Config.KEEP_REASONING_CONTENT_IN_HISTORY:
             d["reasoning_content"] = self.reasoning_content
         if self.tool_calls:
             d["tool_calls"] = [tc.to_api_dict() for tc in self.tool_calls]
