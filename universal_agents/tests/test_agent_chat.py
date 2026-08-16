@@ -5,13 +5,19 @@ from unittest import mock
 from types import SimpleNamespace
 
 from universal_agents.agent import LLMAgent
-from universal_agents.models import AssistantMessage, ToolCall
+from universal_agents.models import AssistantMessage, ToolCall, UserMessage
 from universal_agents.tool import tool
+from universal_agents.config import Config
 
 
 @tool(description="double a value")
 def double_me(agent, value: int) -> str:
     return str(value * 2)
+
+
+@tool(description="always fails")
+def fail_me(agent, value: int) -> str:
+    raise ValueError("boom")
 
 
 def _chunk(delta=None, usage=None, choices=None):
@@ -155,7 +161,7 @@ class TestAgentChat(unittest.TestCase):
         with tempfile.TemporaryDirectory() as repo:
             os.makedirs(os.path.join(repo, ".git"))
             open(os.path.join(repo, ".git", "HEAD"), "w").close()
-            with mock.patch("universal_agents.agent.find_project_root", return_value=repo):
+            with mock.patch("universal_agents.agent_mixins.tools_mixin.find_project_root", return_value=repo):
                 agent = LLMAgent(system_prompt="sys")
             self.assertIn(os.path.abspath(repo), agent.trusted_dirs)
             # файлы внутри корня считаются доверенными
@@ -163,9 +169,78 @@ class TestAgentChat(unittest.TestCase):
 
     def test_auto_trust_skipped_when_no_git(self):
         with tempfile.TemporaryDirectory() as nodir:
-            with mock.patch("universal_agents.agent.find_project_root", return_value=None):
+            with mock.patch("universal_agents.agent_mixins.tools_mixin.find_project_root", return_value=None):
                 agent = LLMAgent(system_prompt="sys")
             self.assertEqual(agent.trusted_dirs, set())
+
+    def test_broken_call_triggers_regen(self):
+        agent = LLMAgent(system_prompt="sys", max_generation_attempts=3)
+        broken = AssistantMessage(content="Please use <tool_call>read</tool_call>")
+        fixed = AssistantMessage(content="ok done")
+        with mock.patch(
+            "universal_agents.agent.LLMClient.call",
+            side_effect=[(broken, None, None), (fixed, None, None)],
+        ):
+            result = agent.chat("do x")
+        self.assertEqual(result, "ok done")
+        # сломанное сообщение стёрто из истории, финальный ответ остался
+        last = agent.history.get_last_message()
+        self.assertEqual(last.content, "ok done")
+
+    def test_tool_error_triggers_recovery(self):
+        agent = LLMAgent(
+            system_prompt="sys",
+            tools_config=["fail_me"],
+            external_plugins={"fail_me": fail_me},
+            max_generation_attempts=3,
+        )
+        err_call = AssistantMessage(content="", tool_calls=[ToolCall(id="t1", name="fail_me", arguments='{"value": 1}')])
+        fixed = AssistantMessage(content="recovered answer")
+        with mock.patch(
+            "universal_agents.agent.LLMClient.call",
+            side_effect=[(err_call, None, None), (fixed, None, None)],
+        ):
+            result = agent.chat("do it")
+        self.assertEqual(result, "recovered answer")
+        # не найдено ни одного error-result в итоговой истории
+        self.assertFalse(any(getattr(m, 'is_error', False) for m in agent.history.get_all()))
+
+    def test_consecutive_tool_errors_hit_limit(self):
+        old_retries = Config.ERROR_RECOVERY_RETRIES
+        Config.ERROR_RECOVERY_RETRIES = 0
+        try:
+            agent = LLMAgent(
+                system_prompt="sys",
+                tools_config=["fail_me"],
+                external_plugins={"fail_me": fail_me},
+                max_generation_attempts=1,
+            )
+            err_call = AssistantMessage(
+                content="",
+                tool_calls=[ToolCall(id="t1", name="fail_me", arguments='{"value": 1}')],
+            )
+            with mock.patch(
+                "universal_agents.agent.LLMClient.call",
+                return_value=(err_call, None, None),
+            ):
+                result = agent.chat("loop", max_iter=10)
+            self.assertEqual(result, "")
+        finally:
+            Config.ERROR_RECOVERY_RETRIES = old_retries
+
+    def test_duplicate_answer_triggers_regen(self):
+        agent = LLMAgent(system_prompt="sys", max_generation_attempts=3)
+        # предыдущий ответ уже есть в истории
+        agent.history.add(UserMessage("first"))
+        agent.history.add(AssistantMessage(content="same answer"))
+        dup = AssistantMessage(content="same answer")
+        fresh = AssistantMessage(content="new answer")
+        with mock.patch(
+            "universal_agents.agent.LLMClient.call",
+            side_effect=[(dup, None, None), (fresh, None, None)],
+        ):
+            result = agent.chat("second")
+        self.assertEqual(result, "new answer")
 
 
 if __name__ == "__main__":

@@ -1,8 +1,8 @@
-import json
 from typing import Optional
 from openai import OpenAI
 from universal_agents.config import Config, CHARS_PER_TOKEN
 from universal_agents.generation import GenerationParams
+from universal_agents.tool_parsing import normalize_args
 
 
 def build_usage_dict(prompt_tokens: int, completion_tokens: int, total_tokens: Optional[int] = None) -> dict:
@@ -67,13 +67,8 @@ class LoopDetector:
 
     @staticmethod
     def normalize_args(args_str: str) -> str:
-        if not args_str or args_str.strip() in ("{}", "", "null"):
-            return ""
-        try:
-            parsed = json.loads(args_str)
-            return json.dumps(parsed, sort_keys=True, separators=(',', ':'), ensure_ascii=False)
-        except Exception:
-            return args_str.strip()
+        """Канонизирует аргументы для сравнения на дубликаты (см. tool_parsing.normalize_args)."""
+        return normalize_args(args_str)
 
     def check_duplicate_in_turn(self, tool_name: str, arguments: str, messages: list) -> bool:
         """

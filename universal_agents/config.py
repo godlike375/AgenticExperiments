@@ -1,5 +1,6 @@
 class Config:
-    API_URL = "http://192.168.50.196:1234/v1"
+    #API_URL = "http://192.168.50.196:1234/v1"
+    API_URL = "http://localhost:1234/v1"
     MODEL_NAME = ""
     AFTER_SYSTEM_PROMPT = 1  # Index after which dialog starts (0 = system)
     BOOST_TEMP = 1.5
@@ -8,14 +9,14 @@ class Config:
     ERROR_RECOVERY_RETRIES = 1  # попыток перегенерации после ошибки инструмента
     BROKEN_CALL_REGEN_RETRIES = 2  # попыток перегенерации при обнаружении сломанного вызова
     BROKEN_CALL_FIX_RETRIES = 2    # попыток «починить» вызов через промпт после неудачной регенерации
-    DUPLICATE_CONTINUATION_TEMP = round(BOOST_TEMP / 4, 2)  # спокойная достройка после расхождения ⏤ BOOST/3 ≈ 0.67
+    DUPLICATE_CONTINUATION_TEMP = round(BOOST_TEMP / 4, 2)  # спокойная достройка после расхождения
 
     # Параметры генерации
-    TEMP = 0.45
+    TEMP = 0.36
     TOP_P = 0.94
     FREQUENCY_PENALTY = 0.0
     PRESENCE_PENALTY = 0.0
-    MAX_CONTEXT_TOKENS = 2700
+    MAX_CONTEXT_TOKENS = 3500
     MAX_OUTPUT_TOKENS = min(32000, int(MAX_CONTEXT_TOKENS / 1.5))
     TIMEOUT = 1800
     MAX_ITER = 35
@@ -31,7 +32,7 @@ class Config:
     USE_RESPONSES_API = False
 
     # Автоматическая суммаризация диалога
-    AUTO_SUMMARY_THRESHOLD = 85  # процент контекста (55%)
+    AUTO_SUMMARY_THRESHOLD = 80  # процент контекста
     AUTO_SUMMARY_PRESERVE_LAST = 1  # сколько последних сообщений не трогать
     AUTO_SUMMARY_REVIEW_PASS = True  # отревьювить черновик саммари: подчистить устаревшее + добавить пропущенное
 
@@ -50,7 +51,7 @@ class Config:
 
     # Константы токенизации и суммаризации
     CHARS_PER_TOKEN = 2.3
-    MIN_TOKENS_TO_SUMMARIZE = 150
+    MIN_TOKENS_TO_SUMMARIZE = 165
 
     # Отключает скелетизацию больших файлов: read без start_line/end_line вернёт полный файл
     DISABLE_FILE_SKELETONIZATION = False

@@ -17,12 +17,12 @@
 
 from __future__ import annotations
 
-import json
 from typing import TYPE_CHECKING, Optional
 
 from universal_agents.config import Config
 from universal_agents.constants import ENVIRONMENT_PREFIX, SUMMARY_MARKER
 from universal_agents.models import AssistantMessage, UserMessage, ToolResult
+from universal_agents.tool_parsing import parse_tool_args
 
 if TYPE_CHECKING:
     from universal_agents.agent import LLMAgent
@@ -103,12 +103,7 @@ def mark_task_done(agent: LLMAgent, task_id: str, summary: str) -> str:
 
 
 def _parse_call_args(tc) -> dict:
-    args = getattr(tc, "arguments", None) or "{}"
-    try:
-        parsed = json.loads(args) if args not in ("{}", "", "null") else {}
-        return parsed if isinstance(parsed, dict) else {}
-    except Exception:
-        return {}
+    return parse_tool_args(getattr(tc, "arguments", None) or "{}")
 
 
 def _last_plan_position(history: list) -> int:

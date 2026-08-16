@@ -5,6 +5,7 @@ from universal_agents.config import Config, CHARS_PER_TOKEN, MIN_TOKENS_TO_SUMMA
 from universal_agents.constants import ENVIRONMENT_PREFIX, SUMMARY_MARKER
 from universal_agents.models import UserMessage, ToolResult
 from universal_agents.llm_client import LLMClient, TokenUsageTracker
+from universal_agents.context_builder import prepare_messages_for_api
 
 if TYPE_CHECKING:
     from universal_agents.agent import LLMAgent
@@ -50,18 +51,15 @@ def _dense_summarize_message(agent: LLMAgent, content: str) -> Optional[str]:
     if not content:
         return None
     prompt = (
-        f"{ENVIRONMENT_PREFIX} Produce a very dense, lossless summary of the single message below.\n"
+        f"{ENVIRONMENT_PREFIX} Write a CONCISE version of the previous message ('{content[:20]}...').\n"
         f"Preserve critical concrete facts verbatim: file paths, function/class/variable names, "
         f"tool names and arguments, exact commands, values, numbers, error messages, decisions.\n"
         f"Remove reasoning chains and redundant filler. Do NOT generalize identifiers.\n"
-        f"Output ONLY the dense summary.\n"
-        f"\n--- MESSAGE ---\n{content}\n--- END ---"
+        f"Output ONLY the summary.\n"
     )
     history_msgs = [m.to_api_dict() for m in agent.history.get_all()]
     msgs = history_msgs + [{"role": "user", "content": prompt}]
-    msg_obj, err, usage = LLMClient.call(msgs, temp=0.2, timeout=60, tools=None)
-    if usage:
-        agent.token_tracker.update_from_usage(usage)
+    msg_obj, err, usage = LLMClient.call(msgs, temp=0.2, timeout=60, tools=(agent.tools if agent.tools else None))
     if err or not msg_obj or not msg_obj.content:
         return None
     return msg_obj.content.strip()
@@ -179,9 +177,7 @@ def _draft_summary(
 ) -> Optional[str]:
     prompt = _build_draft_prompt(existing)
     msgs = history_msgs + [{"role": "user", "content": prompt}]
-    msg_obj, err, usage = LLMClient.call(msgs, temp=0.1, timeout=60, tools=None)
-    if usage:
-        agent.token_tracker.update_from_usage(usage)
+    msg_obj, err, usage = LLMClient.call(msgs, temp=0.1, timeout=60, tools=(agent.tools if agent.tools else None))
     if err or not msg_obj or not msg_obj.content:
         return None
     return msg_obj.content.strip()
@@ -222,9 +218,7 @@ def _review_summary(
         f"\nDRAFT SUMMARY:\n{draft}"
     )
     msgs = history_msgs + [{"role": "user", "content": review_prompt}]
-    msg_obj, err, usage = LLMClient.call(msgs, temp=0.1, timeout=60, tools=None)
-    if usage:
-        agent.token_tracker.update_from_usage(usage)
+    msg_obj, err, usage = LLMClient.call(msgs, temp=0.1, timeout=60, tools=(agent.tools if agent.tools else None))
     if err or not msg_obj or not msg_obj.content:
         return None
     return msg_obj.content.strip()
@@ -288,9 +282,7 @@ def _draft_task_summary(
         f"STATE / NEXT STEPS:"
     )
     msgs = history_msgs + [{"role": "user", "content": prompt}]
-    msg_obj, err, usage = LLMClient.call(msgs, temp=0.1, timeout=60, tools=None)
-    if usage:
-        agent.token_tracker.update_from_usage(usage)
+    msg_obj, err, usage = LLMClient.call(msgs, temp=0.1, timeout=60, tools=(agent.tools if agent.tools else None))
     if err or not msg_obj or not msg_obj.content:
         return None
     return msg_obj.content.strip()
@@ -312,9 +304,7 @@ def _review_task_summary(
         f"\nDRAFT SUMMARY:\n{draft}"
     )
     msgs = history_msgs + [{"role": "user", "content": review_prompt}]
-    msg_obj, err, usage = LLMClient.call(msgs, temp=0.1, timeout=60, tools=None)
-    if usage:
-        agent.token_tracker.update_from_usage(usage)
+    msg_obj, err, usage = LLMClient.call(msgs, temp=0.1, timeout=60, tools=(agent.tools if agent.tools else None))
     if err or not msg_obj or not msg_obj.content:
         return None
     return msg_obj.content.strip()
@@ -347,10 +337,8 @@ def _summarize_batch(agent: LLMAgent, full_history_msgs: list[dict], target_cont
 
         msgs = full_history_msgs + [{"role": "user", "content": prompt}]
         msg_obj, err, usage = LLMClient.call(
-            msgs, temp=0.2 if attempt == 0 else 0.45,
+            msgs, temp=0.2 if attempt == 0 else 0.45, tools=(agent.tools if agent.tools else None),
         )
-        if usage:
-            agent.token_tracker.update_from_usage(usage)
 
         if err or not msg_obj or not msg_obj.content:
             if attempt == 1:
@@ -417,7 +405,7 @@ def synthesize_task_goal(agent: LLMAgent, tool_name: str) -> str:
     """
     agent.on_system_msg(f"[GOAL SYNTHESIS] Analyzing conversation history to formulate goal for '{tool_name}'...")
 
-    messages_base = agent._prepare_messages_for_api()[:-1]
+    messages_base = prepare_messages_for_api(agent)[:-1]
 
     synthesis_prompt = (
         f"{ENVIRONMENT_PREFIX}\n"
@@ -433,11 +421,8 @@ def synthesize_task_goal(agent: LLMAgent, tool_name: str) -> str:
         synthesis_messages,
         temp=agent.temp,
         timeout=agent.timeout,
-        tools=None
+        tools=(agent.tools if agent.tools else None)
     )
-
-    if usage:
-        agent.token_tracker.update_from_usage(usage)
 
     if err or not msg_obj or not msg_obj.content:
         agent.on_system_msg("[GOAL SYNTHESIS] Failed to synthesize goal via LLM. Falling back to last user message.")

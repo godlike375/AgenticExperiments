@@ -74,6 +74,9 @@ class TestSummarizeDialogue(unittest.TestCase):
         agent = mock.Mock()
         agent.history = history
         agent.token_tracker = mock.Mock()
+        # per-message режим читает рабочую память; по умолчанию она пуста,
+        # поэтому суммаризация падает на однофазный (draft+review) путь.
+        agent._per_msg_summaries = {}
         return agent
 
     def test_system_prompt_is_first_in_draft_and_review(self):
