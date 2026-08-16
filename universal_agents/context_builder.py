@@ -18,7 +18,7 @@ def _format_token_header(tracker, first_system_message: str = "", last_user_cont
     """Только информация о токенах (с учётом последнего сообщения)."""
     total = tracker.get_total_context_tokens(first_system_message, last_user_content)
     remaining = tracker.max_context_tokens - total
-    return f"Memory remaining: {remaining} tokens"
+    return f"Memory: {remaining} tokens left"
 
 
 def _format_closing_header() -> str:

@@ -212,9 +212,25 @@ class ChatHistory:
             if 0 <= idx < len(self._messages):
                 del self._messages[idx]
 
+    def _message_len(self, msg: Message) -> int:
+        """Исчерпывающая длина сообщения: content + reasoning_content + tool_calls."""
+        total = len(msg.content or '')
+        if isinstance(msg, AssistantMessage):
+            total += len(msg.reasoning_content or '')
+            for tc in msg.tool_calls:
+                total += len(tc.id or '') + len(tc.name or '') + len(tc.arguments or '')
+        return total
+
     def content_len(self, start: int, end: int) -> int:
-        """Суммарная длина содержимого сообщений в диапазоне [start..end]."""
-        return sum(len(getattr(m, 'content', '') or '') for m in self._messages[start:end + 1])
+        """Суммарная исчерпывающая длина сообщений в диапазоне [start..end].
+
+        Учитывает content, reasoning_content (если есть) и tool_calls
+        (id + name + arguments), т.к. все они расходуют токены.
+        """
+        return sum(
+            self._message_len(m)
+            for m in self._messages[start:end + 1]
+        )
 
     def replace_range(self, start: int, end: int, replacement: list[Message]) -> None:
         """Заменяет сообщения [start..end] на replacement."""

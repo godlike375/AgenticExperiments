@@ -51,11 +51,11 @@ def _dense_summarize_message(agent: LLMAgent, content: str) -> Optional[str]:
     if not content:
         return None
     prompt = (
-        f"{ENVIRONMENT_PREFIX} Write a CONCISE version of the previous message ('{content[:20]}...').\n"
-        f"Preserve critical concrete facts verbatim: file paths, function/class/variable names, "
-        f"tool names and arguments, exact commands, values, numbers, error messages, decisions.\n"
+        f"{ENVIRONMENT_PREFIX} Write a dense CONCISE version of the previous message ('{content[:20]}...').\n"
+        f"Preserve critical concrete facts: file paths, identifiers, names, arguments, commands, values, numbers, errors, etc.\n"
+        "Try to group something if possible.\n"
         f"Remove reasoning chains and redundant filler. Do NOT generalize identifiers.\n"
-        f"Output ONLY the summary.\n"
+        f"Output ONLY the dense structured summary.\n"
     )
     history_msgs = [m.to_api_dict() for m in agent.history.get_all()]
     msgs = history_msgs + [{"role": "user", "content": prompt}]
@@ -268,18 +268,15 @@ def _draft_task_summary(
     prompt = (
         f"{ENVIRONMENT_PREFIX} Below is the execution trace of a COMPLETED subtask "
         f"'{task_title}' (id={task_id}).\n"
-        f"Write a very dense, detailed and lossless summary of what was done and the result.\n"
-        f"Preserve ALL important concrete facts: file paths, function/class/variable names, "
-        f"tool names and their arguments, exact commands, values, numbers, error messages.\n"
+        f"Write a dense CONCISE summary of what was done and the result.\n"
+        f"Preserve ALL important concrete facts: file paths, identifiers, names, arguments, commands, values, numbers, errors, etc.\n"
+        "Try to group something if possible.\n"
         f"Key decisions and their reasons, and the results of tool executions.\n"
         f"State what is DONE vs PENDING/BLOCKED and what the next step is.\n"
         f"Remove only reasoning chains and redundant filler. Do NOT generalize identifiers.\n"
         f"Output ONLY the dense structured summary:\n"
-        f"SUMMARY:\n"
-        f"PROGRESS:\n"
-        f"KEY FACTS:\n"
-        f"DECISIONS:\n"
-        f"STATE / NEXT STEPS:"
+        f"ACTIONS & DECISIONS MADE:\n"
+        f"NEXT STEP:"
     )
     msgs = history_msgs + [{"role": "user", "content": prompt}]
     msg_obj, err, usage = LLMClient.call(msgs, temp=0.1, timeout=60, tools=(agent.tools if agent.tools else None))

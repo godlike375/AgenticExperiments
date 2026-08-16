@@ -14,16 +14,12 @@ if __name__ == "__main__":
     print(f"Loaded startup tools: {list(startup_tools.keys())}")
     print("Use load_tools to load tools dynamically.")
 
-    project_root = find_project_root()
-    root_line = (
-        f"Current project root & working dir: '{project_root}'"
-        if project_root
-        else "Current project root & working dir: (not found - no .git upwards)"
-    )
+    project_root = find_project_root() or '(not found - no .git upwards)'
+    root_line = f"Current project root: {project_root}"
 
     sys_prompt = (
         "* You are tool-calling LLM-assistant.\n"
-        "* You are in a special program environment to use tools.\n"
+        "* You are launched in a custom environment to be able use tools.\n"
         f"* {root_line}\n"
         f"* '{ENVIRONMENT_PREFIX}' prefix means system says something.\n"
         "* Use 'load_tools' without args only 1 time.\n"

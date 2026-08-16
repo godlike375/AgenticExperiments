@@ -74,16 +74,26 @@ class LoopDetector:
         """
         Проверяет, вызывался ли уже этот инструмент с такими же параметрами
         после последнего сообщения пользователя (в рамках текущего хода).
+
+        Вызов, завершившийся ошибкой или отклонением, дубликатом НЕ считается:
+        задача не была реально выполнена, поэтому повторный вызов после
+        корректирующих действий (например, have_done после реальной работы) легитимен.
         """
+        from universal_agents.models import UserMessage, AssistantMessage, ToolResult
         norm_args = self.normalize_args(arguments)
+        failed_call_ids = set()
 
         # Идем с конца истории сообщений
         for msg in reversed(messages):
             # Если дошли до сообщения пользователя, значит этот ход начался здесь.
             # Всё, что было до него, не считается повтором в текущем ходу.
-            from universal_agents.models import UserMessage, AssistantMessage
             if isinstance(msg, UserMessage):
                 break
+
+            if isinstance(msg, ToolResult):
+                if msg.is_error or msg.is_user_denied:
+                    failed_call_ids.add(msg.tool_call_id)
+                continue
 
             if isinstance(msg, AssistantMessage):
                 # create_plan особый случай:
@@ -100,6 +110,9 @@ class LoopDetector:
                     break
                 for tc in msg.tool_calls:
                     if tc.name == tool_name:
+                        # вызов, упавший с ошибкой/отклонением, не является дубликатом
+                        if tc.id in failed_call_ids:
+                            continue
                         if self.normalize_args(tc.arguments) == norm_args:
                             return True
         return False

@@ -178,20 +178,19 @@ def unload_tool(agent: LLMAgent, name: str) -> str:
 
 
 @tool(
-    description="Marks a task from the plan as DONE with a brief result summary. "
+    description="Marks a task from the plan as DONE. "
                 "Available ONLY AFTER a successful create_plan (it is dynamically loaded "
                 "once the plan is set). Call ONLY AFTER really performing the task with real tools "
-                "(read/search/edit_file/run_bash etc.). Do NOT mark a task done and do NOT "
-                "invent a summary if you have not actually done the work. Must be called strictly "
+                "(read/search/edit_file/run_bash etc.). Do NOT mark a task done "
+                "if you have not actually done the work. Must be called strictly "
                 "in plan order (the system rejects out-of-order calls).",
     short_description="mark task done",
-    id=("str", "Task id from the plan (e.g. 't1', 'a-1')"),
-    summary=("str", "Brief result summary of this task"),
+    id=("str", "Task id from the plan (e.g. 't1')")
 )
-def have_done(agent: LLMAgent, id: str, summary: str = "") -> str:
+def have_done(agent: LLMAgent, id: str) -> str:
     from universal_agents.task_tracker import mark_task_done
 
-    return mark_task_done(agent, id, summary)
+    return mark_task_done(agent, id)
 
 
 @tool(

@@ -84,7 +84,7 @@ def set_plan(agent: LLMAgent, plan_list: list) -> str:
 # ---------------------------------------------------------------------------
 
 
-def mark_task_done(agent: LLMAgent, task_id: str, summary: str) -> str:
+def mark_task_done(agent: LLMAgent, task_id: str) -> str:
     """Обработчик have_done. Информационное подтверждение (не блокирует)."""
     tid = (task_id or "").strip()
     if not tid:
@@ -93,7 +93,7 @@ def mark_task_done(agent: LLMAgent, task_id: str, summary: str) -> str:
     if plan_map and tid not in plan_map:
         return f"{ENVIRONMENT_PREFIX} Error: '{tid}' is not in the plan."
     return (
-        f"{ENVIRONMENT_PREFIX} Task '{tid}' marked done. Summary recorded: {summary or '-'}"
+        f"{ENVIRONMENT_PREFIX} Task '{tid}' marked done."
     )
 
 
@@ -270,7 +270,7 @@ def _leaf_block(history: list, leaf: str, leaves: list, plan_pos: int) -> tuple:
     have_done этой задачи (его результат на done[leaf])."""
     done = _done_marker_positions(history, leaves, after=plan_pos)
     done_idx = done[leaf]        # индекс результата have_done этой задачи
-    hd_call = done_idx - 1       # вызов have_done (непосредственно перед результатом)
+    hd_call = done_idx
 
     # Последняя сохраняемая граница перед работой задачи: результат create_plan
     # (вызов на plan_pos) либо результат have_done последней размеченной предыдущей.
@@ -281,7 +281,7 @@ def _leaf_block(history: list, leaf: str, leaves: list, plan_pos: int) -> tuple:
         if prev is not None and prev > boundary:
             boundary = prev
     start = boundary + 1
-    end = hd_call - 1
+    end = hd_call
     return start, end
 
 
@@ -309,9 +309,8 @@ def _compact_one_group(agent: LLMAgent) -> Optional[str]:
         compacted.add(leaf)
         return None
 
-    segment = history[start:end + 1]
     title = (plan_map[leaf].get("title") or leaf)
-    summary = summarize_task_segment(agent, segment, leaf, title)
+    summary = summarize_task_segment(agent, history, leaf, title)
     original_len = agent.history.content_len(start, end)
     if not summary or len(summary) >= original_len:
         compacted.add(leaf)
@@ -322,7 +321,7 @@ def _compact_one_group(agent: LLMAgent) -> Optional[str]:
         return None
 
     summary_msg = UserMessage(
-        content=f"{SUMMARY_MARKER} (subtask '{title}' [{leaf}] done):\n{summary}"
+        content=f"{SUMMARY_MARKER} (subtask '{title}' [{leaf}] has been already done by you and marked as done so don't call have_done('{title}'):\n{summary}. Just take the next step if anything is remaining."
     )
     agent.history.replace_range(start, end, [summary_msg])
     # Обрезаем раздутый summary в результате have_done: детальные факты уже
@@ -349,10 +348,10 @@ def summarize_task_segment(agent: LLMAgent, segment_msgs: list, task_id: str, ta
     draft = _draft_task_summary(agent, history_msgs, task_id, task_title)
     if not draft:
         return None
-    if Config.AUTO_SUMMARY_REVIEW_PASS:
-        final = _review_task_summary(agent, history_msgs, draft, task_id, task_title)
-        if final:
-            return final
+    #if Config.AUTO_SUMMARY_REVIEW_PASS:
+    #    final = _review_task_summary(agent, history_msgs, draft, task_id, task_title)
+    #    if final:
+    #        return final
     return draft
 
 

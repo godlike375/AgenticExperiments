@@ -1,7 +1,7 @@
 import unittest
 
 from universal_agents.llm_client import LoopDetector
-from universal_agents.models import UserMessage, AssistantMessage, ToolCall
+from universal_agents.models import UserMessage, AssistantMessage, ToolCall, ToolResult
 
 
 class TestLoopDetector(unittest.TestCase):
@@ -75,6 +75,26 @@ class TestLoopDetector(unittest.TestCase):
         ]
         # Повторный read ПОСЛЕ create_plan не считается дублем (ревизия = граница контекста)
         self.assertFalse(self.detector.check_duplicate_in_turn("read", "{}", history))
+
+    def test_failed_call_is_not_duplicate(self):
+        # have_done отклонён (NO-WORK-DONE) → повторный вызов после работы не дубль
+        history = [
+            UserMessage("do the task"),
+            AssistantMessage(content="", tool_calls=[ToolCall(id="t1", name="have_done", arguments='{"id":"a1"}')]),
+            ToolResult.error("t1", "have_done", "NO-WORK-DONE: you marked done but did nothing"),
+            AssistantMessage(content="", tool_calls=[ToolCall(id="r", name="run_bash_host", arguments="{}")]),
+            ToolResult.success("r", "run_bash_host", "done"),
+        ]
+        self.assertFalse(self.detector.check_duplicate_in_turn("have_done", '{"id":"a1"}', history))
+
+    def test_succeeded_call_still_counts_as_duplicate(self):
+        # успешный вызов с теми же аргументами — дубль (реального прогресса не было)
+        history = [
+            UserMessage("do the task"),
+            AssistantMessage(content="", tool_calls=[ToolCall(id="t1", name="read", arguments="{}")]),
+            ToolResult.success("t1", "read", "ok"),
+        ]
+        self.assertTrue(self.detector.check_duplicate_in_turn("read", "{}", history))
 
 
 if __name__ == "__main__":
