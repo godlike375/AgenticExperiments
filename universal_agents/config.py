@@ -15,7 +15,7 @@ class Config:
     TOP_P = 0.94
     FREQUENCY_PENALTY = 0.0
     PRESENCE_PENALTY = 0.0
-    MAX_CONTEXT_TOKENS = 32000
+    MAX_CONTEXT_TOKENS = 2700
     MAX_OUTPUT_TOKENS = min(32000, int(MAX_CONTEXT_TOKENS / 1.5))
     TIMEOUT = 1800
     MAX_ITER = 35
@@ -50,7 +50,7 @@ class Config:
 
     # Константы токенизации и суммаризации
     CHARS_PER_TOKEN = 2.3
-    MIN_TOKENS_TO_SUMMARIZE = 500
+    MIN_TOKENS_TO_SUMMARIZE = 150
 
     # Отключает скелетизацию больших файлов: read без start_line/end_line вернёт полный файл
     DISABLE_FILE_SKELETONIZATION = False
@@ -58,7 +58,14 @@ class Config:
     # Отключает автоматическую суммаризацию большого вывода любых инструментов
     DISABLE_TOOL_AUTO_SUMMARIZATION = True
 
-    DISABLE_PER_MESSAGE_SUMMARIZATION = True
+    # Режим per-message summarization (при False):
+    #   • после каждого сообщения ассистента его плотное саммари складывается в
+    #     рабочую память агента (НЕ в контекст);
+    #   • длинные выводы инструментов (> MIN_TOKENS_TO_SUMMARIZE) тоже сразу
+    #     суммаризируются в рабочую память;
+    #   • когда контекст превышает AUTO_SUMMARY_THRESHOLD, из этих маленьких
+    #     саммари собирается новый, более короткий диалог.
+    DISABLE_PER_MESSAGE_SUMMARIZATION = False
 
     # Как исполнять bash на Windows (для run_bash_host):
     #   "wsl"     — через WSL (bash.exe / wsl.exe)

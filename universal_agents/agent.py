@@ -6,7 +6,7 @@ import re
 from typing import Union, Callable, Optional
 
 from universal_agents.constants import ENVIRONMENT_PREFIX
-from universal_agents.config import Config
+from universal_agents.config import Config, CHARS_PER_TOKEN, MIN_TOKENS_TO_SUMMARIZE
 from universal_agents.models import UserMessage, AssistantMessage, ToolCall, ToolResult
 from universal_agents.llm_client import LLMClient, TokenUsageTracker, LoopDetector, apply_prefill, build_usage_dict
 from universal_agents.history import ChatHistory
@@ -14,7 +14,7 @@ from universal_agents.generation import GenerationParams
 from universal_agents.tool_manager import ToolManager
 from universal_agents.sub_agent import SubAgent
 
-from universal_agents.compressors import auto_compress_tool_result, summarize_dialogue
+from universal_agents.compressors import auto_compress_tool_result, summarize_dialogue, _dense_summarize_message
 from universal_agents.task_tracker import DONE_TOOL, compact_completed_tasks, validate_task_mark_call
 from universal_agents.context_builder import prepare_messages_for_api, get_effective_prefill
 from universal_agents.file_states import FileStateTracker
@@ -165,6 +165,10 @@ class LLMAgent:
         self._compacted_task_ids: set[str] = set()
         self.task_plan: list[str] = []
         self.task_plan_map: dict = {}
+        # Рабочая память (НЕ попадает в контекст): плотные саммари отдельных
+        # сообщений (ключ — id(Message)). Используются при сжатии диалога,
+        # чтобы из маленьких саммари собрать более короткий новый диалог.
+        self._per_msg_summaries: dict[int, str] = {}
 
     # --------------------------------------------------------
     # Делегирование управления инструментами в ToolManager
@@ -280,15 +284,71 @@ class LLMAgent:
     def _append_assistant(self, msg: AssistantMessage) -> None:
         """Добавляет сообщение ассистента в историю и рендерит его."""
         self.history.add(msg)
+        if not Config.DISABLE_PER_MESSAGE_SUMMARIZATION:
+            self._summarize_assistant_message(msg)
         self.on_render(msg)
         self._emit_token_info()
 
     def _append_tool_results(self, results: list[ToolResult]) -> None:
         """Добавляет результаты инструментов в историю и рендерит их."""
-        self.history.extend(results)
         for tr in results:
+            self.history.add(tr)
+            if not Config.DISABLE_PER_MESSAGE_SUMMARIZATION:
+                self._maybe_summarize_tool_result(tr)
             self.on_render(tr)
             self._emit_token_info()
+
+    def _summarize_assistant_message(self, msg: AssistantMessage) -> None:
+        """Плотное саммари последнего сообщения ассистента в рабочую память
+        (не попадает в контекст). Только для сообщений длиннее порога."""
+        content = (msg.content or "").strip()
+        MIN_CHARS = int(MIN_TOKENS_TO_SUMMARIZE * CHARS_PER_TOKEN)
+        if len(content) < MIN_CHARS:
+            return
+        summary = _dense_summarize_message(self, content)
+        if summary:
+            self._per_msg_summaries[id(msg)] = f"AI: {summary}"
+            self.on_system_msg(
+                f"[PER-MSG SUMMARY] Assistant message ({len(content)} chars) "
+                f"summarized into working memory ({len(summary)} chars)."
+            )
+
+    def _maybe_summarize_user_message(self, msg: UserMessage) -> None:
+        """Плотное саммари длинного сообщения пользователя в рабочую память
+        (не попадает в контекст). Только для сообщений длиннее порога."""
+        content = (msg.content or "").strip()
+        MIN_CHARS = int(MIN_TOKENS_TO_SUMMARIZE * CHARS_PER_TOKEN)
+        if len(content) < MIN_CHARS:
+            return
+        summary = _dense_summarize_message(self, content)
+        if summary:
+            self._per_msg_summaries[id(msg)] = f"USER: {summary}"
+            self.on_system_msg(
+                f"[PER-MSG SUMMARY] User message ({len(content)} chars) "
+                f"summarized into working memory ({len(summary)} chars)."
+            )
+
+    def _maybe_summarize_tool_result(self, tr: ToolResult) -> None:
+        """Длинные выводы инструментов (> MIN_TOKENS_TO_SUMMARIZE) сразу
+        суммаризируются в рабочую память; при сжатии саммари встанет на их место."""
+        if tr.is_error or tr.is_user_denied:
+            return
+        content = (tr.content or "").strip()
+        MIN_CHARS = int(MIN_TOKENS_TO_SUMMARIZE * CHARS_PER_TOKEN)
+        if len(content) < MIN_CHARS:
+            return
+        summary = _dense_summarize_message(self, content)
+        if summary:
+            self._per_msg_summaries[id(tr)] = f"TOOL({tr.name}): {summary}"
+            self.on_system_msg(
+                f"[PER-MSG SUMMARY] Tool '{tr.name}' output ({len(content)} chars) "
+                f"summarized into working memory ({len(summary)} chars)."
+            )
+
+    def _prune_per_msg_summaries(self) -> None:
+        """Убирает из рабочей памяти саммари сообщений, которых больше нет в истории."""
+        alive = {id(m) for m in self.history.get_all()}
+        self._per_msg_summaries = {k: v for k, v in self._per_msg_summaries.items() if k in alive}
 
     def _erase_last_assistant(self) -> None:
         """Удаляет последнее сообщение ассистента из истории (сломанный вызов без tool_calls)."""
@@ -370,6 +430,7 @@ class LLMAgent:
 
         self.history.compress_old_messages(summary, preserve_last=preserve_last)
         self.file_states.prune()
+        self._prune_per_msg_summaries()
         self.on_system_msg(
             f"[AUTO-SUMMARY] Context compressed ({int(original_len / Config.CHARS_PER_TOKEN)} -> {int(len(summary) / Config.CHARS_PER_TOKEN)} tokens)"
         )
@@ -758,6 +819,8 @@ class LLMAgent:
     def _chat_self_consistent(self, message: str, prefill: str = None) -> str:
         user_message = UserMessage(content=message)
         self.history.add(user_message)
+        if not Config.DISABLE_PER_MESSAGE_SUMMARIZATION:
+            self._maybe_summarize_user_message(user_message)
         messages_base = self._prepare_messages_for_api()
 
         self.on_system_msg(f"Generating {self.sc_samples} drafts...")
@@ -836,6 +899,8 @@ class LLMAgent:
 
         user_msg = UserMessage(content=message)
         self.history.add(user_msg)
+        if not Config.DISABLE_PER_MESSAGE_SUMMARIZATION:
+            self._maybe_summarize_user_message(user_msg)
         current_prefill = self._get_effective_prefill(prefill)
         self._last_response_id = None
         self._last_sent_msg_count = 0

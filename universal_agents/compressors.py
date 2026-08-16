@@ -39,23 +39,93 @@ def _find_existing_summary(messages: list, end_id: int) -> Optional[dict]:
     return None
 
 
+def _dense_summarize_message(agent: LLMAgent, content: str) -> Optional[str]:
+    """
+    Плотное, безлоосное саммари ОДНОГО сообщения. Используется в режиме
+    per-message summarization: результат складывается в рабочую память агента
+    (agent._per_msg_summaries) и НЕ попадает в контекст, а при сжатии диалога
+    вставляется на место исходного сообщения.
+    """
+    content = (content or "").strip()
+    if not content:
+        return None
+    prompt = (
+        f"{ENVIRONMENT_PREFIX} Produce a very dense, lossless summary of the single message below.\n"
+        f"Preserve critical concrete facts verbatim: file paths, function/class/variable names, "
+        f"tool names and arguments, exact commands, values, numbers, error messages, decisions.\n"
+        f"Remove reasoning chains and redundant filler. Do NOT generalize identifiers.\n"
+        f"Output ONLY the dense summary.\n"
+        f"\n--- MESSAGE ---\n{content}\n--- END ---"
+    )
+    history_msgs = [m.to_api_dict() for m in agent.history.get_all()]
+    msgs = history_msgs + [{"role": "user", "content": prompt}]
+    msg_obj, err, usage = LLMClient.call(msgs, temp=0.2, timeout=60, tools=None)
+    if usage:
+        agent.token_tracker.update_from_usage(usage)
+    if err or not msg_obj or not msg_obj.content:
+        return None
+    return msg_obj.content.strip()
+
+
+def _build_from_per_message_summaries(
+    agent: LLMAgent, start_id: Optional[int], end_id: Optional[int]
+) -> Optional[str]:
+    """
+    Собирает новый (более короткий) диалог из маленьких саммари, накопленных
+    в рабочей памяти агента (agent._per_msg_summaries). Для сообщений без
+    саммари (короткие выводы инструментов и т.п.) используется исходный контент.
+    Возвращает None, если в сжимаемом диапазоне не нашлось ни одного саммари.
+    """
+    messages = agent.history.get_all()
+    if start_id is None:
+        start_id = Config.AFTER_SYSTEM_PROMPT
+    if end_id is None:
+        end_id = len(messages)
+
+    end_id = min(end_id, len(messages))
+
+    parts: list[str] = []
+    used_summaries = 0
+    for i in range(start_id, end_id):
+        msg = messages[i]
+        content = (msg.content or "").strip()
+        if not content:
+            continue
+        summary = agent._per_msg_summaries.get(id(msg))
+        if summary:
+            parts.append(summary)
+            used_summaries += 1
+            continue
+        if isinstance(msg, UserMessage):
+            parts.append(f"USER: {content}")
+        elif isinstance(msg, ToolResult):
+            parts.append(f"TOOL({msg.name}): {content}")
+        else:
+            parts.append(f"AI: {content}")
+
+    if used_summaries == 0 or not parts:
+        return None
+    return "\n\n".join(parts)
+
+
 def summarize_dialogue(
     agent: LLMAgent,
     start_id: Optional[int] = None,
     end_id: Optional[int] = None,
 ) -> Optional[str]:
     """
-    Суммаризация диалога через LLM: черновик + отревьюенная версия.
-    mode='single' — один вызов LLM со всей историей.
-    mode='batch' — разбивка на пачки по MIN_TOKENS_TO_SUMMARIZE, каждая
-                   суммаризируется отдельно, результаты склеиваются.
-    После черновика саммари отдаётся на review: модель подчищает устаревшие/
-    лишние детали и добавляет пропущенные важные факты. История заменяется
-    отревьюенным саммари.
+    Суммаризация диалога через LLM.
+    mode='per-message' (DISABLE_PER_MESSAGE_SUMMARIZATION=False) — новый диалог
+        собирается из маленьких саммари, накопленных в рабочей памяти агента
+        (по одному после каждого сообщения ассистента и длинного вывода
+        инструмента). Ничего не запрашивается у LLM на лету — только склейка.
+    mode='single' (DISABLE_PER_MESSAGE_SUMMARIZATION=True) — один вызов LLM со
+        всей историей (черновик + отревьюенная версия).
     """
     messages = agent.history.get_all()
 
-    end_id = len(messages)
+    if end_id is None:
+        end_id = len(messages)
 
     # Структурированные сообщения истории для KV-cache reuse
     history_msgs = [msg.to_api_dict() for msg in messages]
@@ -67,15 +137,13 @@ def summarize_dialogue(
     # Ранее сгенерированное авто-саммари в обрезаемом диапазоне
     existing = _find_existing_summary(messages, end_id)
 
-    # Вся история как prefix для KV-cache reuse
-    full_history_msgs = [msg.to_api_dict() for msg in messages]
-
     if Config.DISABLE_PER_MESSAGE_SUMMARIZATION:
         # Сразу суммаризируем весь диалог целиком, не трогая отдельные сообщения
         summary = _single_phase_summarize(agent, history_msgs, system_msg, existing)
     else:
+        # Новый диалог собирается из маленьких саммари рабочей памяти
         summary = (
-            _batch_summarize(agent, history_msgs, full_history_msgs, existing)
+            _build_from_per_message_summaries(agent, start_id, end_id)
             or _single_phase_summarize(agent, history_msgs, system_msg, existing)
         )
 

@@ -134,16 +134,24 @@ class ChatHistory:
 
         self._messages = valid
 
-    def save(self, path: str, loaded_tools: list[str] = None, file_states: dict = None):
+    def save(self, path: str, loaded_tools: list[str] = None, file_states: dict = None,
+             per_msg_summaries: dict[int, str] = None):
+        # Саммари рабочей памяти сохраняются списком, выровненным по индексам
+        # сообщений (ключ id() при перезагрузке не переживёт — объекты создаются заново).
+        summaries: list[str] = []
+        if per_msg_summaries:
+            for m in self._messages:
+                summaries.append(per_msg_summaries.get(id(m)) or "")
         payload = {
             "messages": self.get_all_api(),
             "loaded_tools": loaded_tools or [],
             "file_states": file_states or {},
+            "per_msg_summaries": summaries,
         }
         with open(path, 'w', encoding='utf-8') as f:
             json.dump(payload, f, ensure_ascii=False, indent=2)
 
-    def load(self, path: str) -> list[str]:
+    def load(self, path: str) -> tuple[list[str], dict, list[str]]:
         with open(path, 'r', encoding='utf-8') as f:
             raw = json.load(f)
 
@@ -151,10 +159,12 @@ class ChatHistory:
             data_list = raw
             loaded_tools = []
             file_states = {}
+            summaries = []
         elif isinstance(raw, dict) and "messages" in raw:
             data_list = raw["messages"]
             loaded_tools = raw.get("loaded_tools", [])
             file_states = raw.get("file_states", {}) or {}
+            summaries = raw.get("per_msg_summaries", []) or []
         else:
             raise ValueError(f"⚠️ {ENVIRONMENT_PREFIX} Invalid history format")
 
@@ -188,7 +198,7 @@ class ChatHistory:
                 ))
             else:
                 raise ValueError(f"Unknown role: {role}")
-        return loaded_tools, file_states
+        return loaded_tools, file_states, summaries
 
     def get_last_user_message(self) -> Optional[UserMessage]:
         for msg in reversed(self._messages):

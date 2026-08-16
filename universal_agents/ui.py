@@ -118,6 +118,7 @@ class CLI:
                 filename,
                 loaded_tools=tool_names,
                 file_states=self.agent.file_states.to_dict(),
+                per_msg_summaries=self.agent._per_msg_summaries,
             )
             ConsoleUI.system_msg(f"History saved to '{filename}' (tools: {tool_names}, file_states: {len(self.agent.file_states)})")
         except Exception as e:
@@ -129,8 +130,15 @@ class CLI:
             ConsoleUI.system_msg(f"File '{filename}' not found")
             return
         try:
-            loaded_tools, file_states = self.agent.history.load(filename)
+            loaded_tools, file_states, summaries = self.agent.history.load(filename)
             self.agent.file_states.from_dict(file_states)
+            # Перепривязываем сохранённые саммари рабочей памяти к пересозданным
+            # объектам сообщений (ключ id() меняется после загрузки).
+            self.agent._per_msg_summaries = {}
+            loaded_msgs = self.agent.history.get_all()
+            for i, s in enumerate(summaries):
+                if s and i < len(loaded_msgs):
+                    self.agent._per_msg_summaries[id(loaded_msgs[i])] = s
             self.agent.rebuild_tool_usage()
             for name in loaded_tools:
                 if name not in self.agent._all_tools:
