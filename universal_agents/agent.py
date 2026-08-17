@@ -206,9 +206,9 @@ class LLMAgent(
                         dup_name, dup_args = tc_name(tc), tc_args(tc)
                         last_retry_warning = (
                             f"\n\n{ENVIRONMENT_PREFIX} Your previous attempt to call tool '{dup_name}' "
-                            f"with arguments '{dup_args}' was blocked because it is a duplicate of a call already made "
-                            f"in this turn. Do NOT call '{dup_name}' again with the same parameters. "
-                            f"Use other parameters, call a different tool, or provide your final response."
+                            f"with args '{dup_args}' was blocked as a duplicate of a recently already made call."
+                            f" Do NOT call '{dup_name}' again with same params. "
+                            f"Use other params or a different tool or write a text answer."
                         )
                         self.on_system_msg(
                             f"[PROACTIVE LOOP DETECTED] Intercepted duplicate call to '{dup_name}'. "
@@ -226,9 +226,8 @@ class LLMAgent(
                 prev_answer = self._get_last_answer_text()
                 if answer_text and prev_answer and answer_text == prev_answer:
                     last_retry_warning = (
-                        f"\n\n{ENVIRONMENT_PREFIX} Your previous response was identical to your last answer. "
-                        f"This is considered a duplicate. Do NOT repeat it. "
-                        f"Provide a different, new answer instead."
+                        f"\n\n{ENVIRONMENT_PREFIX} Your previous answer was the same to the latest one. "
+                        f"Please do NOT repeat it again and answer differently."
                     )
                     dup_watch_target = prev_answer
                     self.on_system_msg(
@@ -316,9 +315,7 @@ class LLMAgent(
                     broken_fix_left -= 1
                     self.history.add(UserMessage(
                         f"{ENVIRONMENT_PREFIX} Your previous message looked like a tool call "
-                        f"but was not parsed as a valid tool_call by the API. Re-emit it using the "
-                        f"proper tools mechanism (exactly one call per turn). Do NOT write it as "
-                        f"plain text, prose, or XML tags."
+                        f"but was not successfully parsed by the API. Try to write it properly now."
                     ))
                     self.on_render(self.history.get_all()[-1])
                     self._last_response_id = None
