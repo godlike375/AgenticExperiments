@@ -26,7 +26,7 @@ if __name__ == "__main__":
     available_tools_text = tools_manager.list_available()
 
     sys_prompt = (
-        "* You are tool-calling LLM-assistant.\n"
+        f"{ENVIRONMENT_PREFIX} * You are tool-calling LLM-assistant.\n"
         "* You are launched in a custom environment to be able use tools.\n"
         f"* {root_line}\n"
         f"* '{ENVIRONMENT_PREFIX}' prefix means system says something.\n"

@@ -59,10 +59,10 @@ class MemoryMixin:
         summary = _dense_summarize_message(self, content)
         stored = f"TOOL({tr.name}): {summary}" if summary else None
         if stored and len(stored) < len(content):
-            # Для read в режиме интерактивной выемки заменяем оригинальный контент
-            # на суммаризацию прямо в результате инструмента: в контексте и истории
-            # остаётся суммаризация, а не исходный файл (экономия памяти).
-            if tr.name == "read" and Config.ENABLE_INTERACTIVE_FILE_EXTRACTION:
+            # Для read заменяем оригинальный контент на суммаризацию прямо в
+            # результате инструмента: в контексте и истории остаётся суммаризация,
+            # а не исходный файл (экономия памяти).
+            if tr.name == "read":
                 tr.content = summary
                 self.on_system_msg(
                     f"[READ SUMMARIZED] read result replaced with summary "

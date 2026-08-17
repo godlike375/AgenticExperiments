@@ -9,6 +9,17 @@ from universal_agents.task_tracker import DONE_TOOL, validate_task_mark_call
 from universal_agents.tool_parsing import parse_tool_args, is_error_content
 
 
+def _read_result_already_compressed(content: str) -> bool:
+    """True, если результат read уже обработан логикой больших файлов
+    (интерактивная выемка most_important_lines со скелетом либо её фолбэк —
+    усечённый префикс) и не должен повторно суммаризироваться
+    пер-сообщенческой суммаризацией."""
+    return (
+        "Most important file lines (for memory saving):" in content
+        or "Interactive extraction failed; showing truncated prefix" in content
+    )
+
+
 class ExecuteMixin:
     """Выполняет ToolCall'ы: защита от дубликатов, контроль порядка have_done, запуск."""
 
@@ -75,10 +86,11 @@ class ExecuteMixin:
                     self._tool_usage[name] = self._tool_usage.get(name, 0) + 1
                     if name == 'read' and self._read_registrations:
                         self.file_states.mark_tool_call(self._read_registrations.pop(0), tr.tool_call_id)
-                    # Выемка больших файлов уже вернула готовый сжатый результат
-                    # (most_important_lines со скелетом) — не даём пер-сообщенческой
-                    # суммаризации сжимать его повторно.
-                    if name == 'read' and "Most important file lines (for memory saving):" in content:
+                    # Обработка больших файлов уже вернула сжатый результат
+                    # (most_important_lines со скелетом либо усечённый префикс при
+                    # провале выемки) — не даём пер-сообщенческой суммаризации
+                    # сжимать его повторно.
+                    if name == 'read' and _read_result_already_compressed(content):
                         tr.skip_summarize = True
 
                 auto_compress_tool_result(self, tr)

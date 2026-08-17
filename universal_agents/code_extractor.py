@@ -36,6 +36,8 @@ def dump_project(root_path, exclude_patterns=None):
         print(f"Ошибка: Путь '{root_path}' не является директорией.", file=sys.stderr)
         sys.exit(1)
 
+    total_lines = 0
+
     # Проходим рекурсивно по всем файлам
     for dirpath, dirnames, filenames in os.walk(root_path):
         # Фильтруем директории "на лету", чтобы не спускаться в ненужные папки
@@ -64,10 +66,14 @@ def dump_project(root_path, exclude_patterns=None):
                     print(content)
                     print("```")
 
+                    total_lines += content.count('\n')
+
                 except UnicodeDecodeError:
                     print(f"# --- Ошибка кодировки в файле: {rel_path} ---", file=sys.stderr)
                 except Exception as e:
                     print(f"# --- Ошибка чтения {rel_path}: {e} ---", file=sys.stderr)
+
+    print(f"\n# --- Итого строк во всех файлах: {total_lines} ---")
 
 if __name__ == "__main__":
     # Если аргумент передан, используем его, иначе берем текущую директорию '.'
