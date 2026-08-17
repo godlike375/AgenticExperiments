@@ -2,6 +2,7 @@
 
 # Маркер, которым системные сообщения помечаются в истории и промптах
 ENVIRONMENT_PREFIX = '[[SYSTEM]]'
+ENVIRONMENT_PREFIX_END = '[[/SYSTEM]]'
 
 # Инструменты, которые нельзя отключить
 CORE_TOOLS = ("load_tools", "unload_tool")

@@ -167,15 +167,6 @@ def load_tools(agent: LLMAgent, name: str = "") -> str:
 
 
 @tool(
-    description="Disable a currently loaded tool by name. Cannot disable core tools like load_tools, unload_tool.",
-    short_description="unload tool",
-    name=("str", "Name of the tool to disable"),
-)
-def unload_tool(agent: LLMAgent, name: str) -> str:
-    return agent.unload_tool(name)
-
-
-@tool(
     description="Marks a task from the plan as DONE. "
                 "Call ONLY AFTER really performing actions with real tools you have. "
                 "Do NOT mark a task done "

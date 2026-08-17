@@ -8,7 +8,7 @@ import fnmatch as _fnmatch
 from typing import Optional
 
 from universal_agents.config import Config
-from universal_agents.constants import ENVIRONMENT_PREFIX
+from universal_agents.constants import ENVIRONMENT_PREFIX, ENVIRONMENT_PREFIX_END
 from universal_agents.file_states import _content_hash
 from universal_agents.llm_client import LLMClient
 from universal_agents.tool import tool
@@ -218,11 +218,9 @@ def _parse_important_lines(lines: list[str], ranges_text: str) -> list[int]:
 
     Диапазоны 'a:b'/'a-b' трактуются инклюзивно (конечная строка тоже сохраняется).
     """
-    inner = ranges_text or ""
-    if '[' in inner and ']' in inner:
-        inner = inner[inner.find('[') + 1:inner.rfind(']')]
+    inner = (ranges_text or "").replace('[', ',').replace(']', ',').replace(';', ',')
     kept: set[int] = set()
-    for token in inner.replace(';', ',').split(','):
+    for token in inner.split(','):
         token = token.strip()
         if not token:
             continue
@@ -265,7 +263,7 @@ def _interactive_file_extract(agent, path: str, content: str, mtime: str) -> Opt
         f" right after your reply.\n"
         f"Reply just with a line in format:\n"
         f"`most_important_lines: [1, 3, 5:8, 12:14]` (just an example) \n"
-        f"Do NOT call tools or write any other free text.\n"
+        f"Do NOT call tools or write any other free text.{ENVIRONMENT_PREFIX_END}"
     )
     if truncated:
         prompt += "\n\n(File is truncated due to remaining memory)"
@@ -277,7 +275,7 @@ def _interactive_file_extract(agent, path: str, content: str, mtime: str) -> Opt
     reply = None
     for attempt in range(Config.ERROR_RECOVERY_RETRIES + 1):
         msg_obj, err, usage = LLMClient.call(
-            msgs, temp=0.2, timeout=60, tools=(agent.tools if agent.tools else None)
+            msgs, prefill="<short_think> Let's", temp=0.2, timeout=60, tools=(agent.tools if agent.tools else None)
         )
         if err:
             break
@@ -345,7 +343,7 @@ def _summarize_file(path: str, content: str, agent) -> str:
         f"{specialist_instructions}\n\n"
         "The skeleton includes top-level elements (signatures of functions, classes, methods defined right in this file)"
         " and precise line number ranges for each element\n"
-        f"Now skeletonize it!"
+        f"Now skeletonize it!{ENVIRONMENT_PREFIX_END}"
     )
 
     max_tokens = agent.token_tracker.get_remaining() // Config.SUMMARIZATION_THRESHOLD_DIVIDER

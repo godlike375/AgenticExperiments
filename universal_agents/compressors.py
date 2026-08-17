@@ -51,8 +51,8 @@ def _dense_summarize_message(agent: LLMAgent, content: str) -> Optional[str]:
     if not content:
         return None
     prompt = (
-        f"{ENVIRONMENT_PREFIX} Write a dense CONCISE version of the previous message ('{content[:20]}...').\n"
-        f"Preserve critical concrete facts: file paths, identifiers, names, arguments, commands, values, numbers, errors, etc.\n"
+        f"{ENVIRONMENT_PREFIX} Write a very dense SHORT version of the previous message ('{content[:20]}...').\n"
+        f"Preserve critical concrete things: reasons, decisions, actions taken, files, identifiers, names, arguments, commands, values, numbers, errors, etc.\n"
         "Try to group something if possible.\n"
         f"Remove reasoning chains and redundant filler. Do NOT generalize identifiers.\n"
         f"Output ONLY the dense structured summary.\n"
@@ -268,7 +268,7 @@ def _draft_task_summary(
     prompt = (
         f"{ENVIRONMENT_PREFIX} Below is the execution trace of a COMPLETED subtask "
         f"'{task_title}' (id={task_id}).\n"
-        f"Write a dense CONCISE summary of what was done and the result.\n"
+        f"Write a very dense SHORT summary of what was done and the result.\n"
         f"Preserve ALL important concrete facts: file paths, identifiers, names, arguments, commands, values, numbers, errors, etc.\n"
         "Try to group something if possible.\n"
         f"Key decisions and their reasons, and the results of tool executions.\n"
