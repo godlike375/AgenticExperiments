@@ -179,13 +179,12 @@ def unload_tool(agent: LLMAgent, name: str) -> str:
 
 @tool(
     description="Marks a task from the plan as DONE. "
-                "Available ONLY AFTER a successful create_plan (it is dynamically loaded "
-                "once the plan is set). Call ONLY AFTER really performing the task with real tools "
-                "(read/search/edit_file/run_bash etc.). Do NOT mark a task done "
+                "Call ONLY AFTER really performing actions with real tools you have. "
+                "Do NOT mark a task done "
                 "if you have not actually done the work. Must be called strictly "
                 "in plan order (the system rejects out-of-order calls).",
     short_description="mark task done",
-    id=("str", "Task id from the plan (e.g. 't1')")
+    id=("str", "Task id by the plan")
 )
 def have_done(agent: LLMAgent, id: str) -> str:
     from universal_agents.task_tracker import mark_task_done
@@ -194,16 +193,13 @@ def have_done(agent: LLMAgent, id: str) -> str:
 
 
 @tool(
-    description="Creates or revises the task plan: an ORDERED FLAT list of tasks to execute "
-                "(like a bullet list). Each entry is {\"id\", \"title\"}. The list order IS the "
-                "execution order. Execute each task for real with real tools, then mark it done "
-                "with have_done. Call this FIRST for any multi-step task, and call it again "
-                "to REVISE the plan (allows starting from a different step; execution then "
-                "continues in the new plan's order).",
-    short_description="create/revise task plan",
-    plan=("list", "Ordered list of {id, title} dicts, in execution order"),
+    description="Plan in advance using make_plan to create a list of tasks/steps in execution order. "
+                "Each entry is {\"id\", \"title\"}. Call this FIRST for any multi-step task, and call it again "
+                "You can change the plan by creating a new one if something changed your mind.",
+    short_description="make a plan",
+    plan=("list", "List of {id, title} dicts, in execution order"),
 )
-def create_plan(agent: LLMAgent, plan: list) -> str:
+def make_plan(agent: LLMAgent, plan: list) -> str:
     from universal_agents.task_tracker import set_plan
 
     return set_plan(agent, plan)

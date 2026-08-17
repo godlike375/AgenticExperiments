@@ -16,7 +16,7 @@ class Config:
     TOP_P = 0.94
     FREQUENCY_PENALTY = 0.0
     PRESENCE_PENALTY = 0.0
-    MAX_CONTEXT_TOKENS = 3500
+    MAX_CONTEXT_TOKENS = 33000
     MAX_OUTPUT_TOKENS = min(32000, int(MAX_CONTEXT_TOKENS / 1.5))
     TIMEOUT = 1800
     MAX_ITER = 35
@@ -50,7 +50,7 @@ class Config:
     AUTO_TRUST_GIT_ROOT = True
 
     # Константы токенизации и суммаризации
-    CHARS_PER_TOKEN = 2.3
+    CHARS_PER_TOKEN = 2.35
     MIN_TOKENS_TO_SUMMARIZE = 165
 
     # Отключает скелетизацию больших файлов: read без start_line/end_line вернёт полный файл

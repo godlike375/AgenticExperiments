@@ -35,7 +35,7 @@ def _done_result(tid):
 def _plan_call(plan_list):
     return ToolCall(
         id="call_plan",
-        name="create_plan",
+        name="make_plan",
         arguments=json.dumps({"plan": plan_list}, ensure_ascii=False),
     )
 
@@ -57,7 +57,7 @@ def _make_agent():
         {"id": "A2", "title": "A2"},
         {"id": "B1", "title": "B1"},
     ])]))
-    h.add(ToolResult.success("c0", "create_plan", "Plan set"))
+    h.add(ToolResult.success("c0", "make_plan", "Plan set"))
     h.add(AssistantMessage(content=("A1 work (long content) " * 40)))
     h.add(_assistant_done("A1", "done A1"))
     h.add(_done_result("A1"))
@@ -132,7 +132,7 @@ class TestOrderValidation(unittest.TestCase):
         h = ChatHistory("sys")
         h.add(UserMessage("do X"))
         h.add(AssistantMessage(content="", tool_calls=[_plan_call(plan_list)]))
-        h.add(ToolResult.success("c0", "create_plan", "Plan set"))
+        h.add(ToolResult.success("c0", "make_plan", "Plan set"))
         plan_map = {e["id"]: {"title": e.get("title", "")} for e in plan_list}
         return h, plan_map
 
@@ -190,14 +190,14 @@ class TestOrderValidation(unittest.TestCase):
         h.add(UserMessage("test"))
         planA = [{"id": "A1"}, {"id": "A2"}, {"id": "A3"}]
         h.add(AssistantMessage(content="", tool_calls=[_plan_call(planA)]))
-        h.add(ToolResult.success("c", "create_plan", "Plan set"))
+        h.add(ToolResult.success("c", "make_plan", "Plan set"))
         h.add(_assistant_done("A1"))
         h.add(ToolResult.success("c", "have_done", "ok"))
         # Новый план переиспользует те же id, но порядок: A3,A1,A2
         planB = [{"id": "A3"}, {"id": "A1"}, {"id": "A2"}]
         pm_b = {e["id"]: {"title": ""} for e in planB}
         h.add(AssistantMessage(content="", tool_calls=[_plan_call(planB)]))
-        h.add(ToolResult.success("c", "create_plan", "Plan set"))
+        h.add(ToolResult.success("c", "make_plan", "Plan set"))
         h.add(_work("w1"))
         h.add(_work_result("w1"))
         self.assertIsNone(validate_task_mark_call(h.get_all(), {"id": "A3"}, pm_b, set()))
@@ -223,7 +223,7 @@ class TestOrderValidation(unittest.TestCase):
         self.assertIsNotNone(err)
 
     def test_rejects_done_without_real_work(self):
-        # Сразу после create_plan помечаем задачу выполненной без реальных инструментов
+        # Сразу после make_plan помечаем задачу выполненной без реальных инструментов
         h, pm = self._history(self.PLAN)
         err = validate_task_mark_call(h.get_all(), {"id": "A1"}, pm, set())
         self.assertIsNotNone(err)
@@ -273,10 +273,10 @@ class TestCompaction(unittest.TestCase):
         self.assertLess(after, before)
         summary_msgs = [m for m in agent.history if isinstance(m, UserMessage) and SUMMARY_MARKER in m.content]
         self.assertTrue(summary_msgs)
-        # маркеры create_plan и have_done сохраняются (не компактизируются)
+        # маркеры make_plan и have_done сохраняются (не компактизируются)
         remaining = [m for m in agent.history if isinstance(m, AssistantMessage) and m.has_tool_calls()]
         self.assertTrue(
-            any(any(tc.name == "create_plan" for tc in m.tool_calls) for m in remaining)
+            any(any(tc.name == "make_plan" for tc in m.tool_calls) for m in remaining)
         )
         done_calls = [
             tc.name for m in remaining for tc in m.tool_calls if tc.name == "have_done"
@@ -291,7 +291,7 @@ class TestCompaction(unittest.TestCase):
             {"id": "A1", "title": "A1"},
             {"id": "B1", "title": "B1"},
         ])]))
-        h.add(ToolResult.success("c0", "create_plan", "Plan set"))
+        h.add(ToolResult.success("c0", "make_plan", "Plan set"))
         h.add(AssistantMessage(content=("A1 work " * 500)))
         long_summary = "x" * 5000
         h.add(_assistant_done("A1", long_summary))
@@ -355,7 +355,7 @@ class TestCompaction(unittest.TestCase):
         self.assertTrue(any(isinstance(m, UserMessage) for m in msgs))
         self.assertTrue(
             any(isinstance(m, AssistantMessage) and m.has_tool_calls()
-                and any(tc.name == "create_plan" for tc in m.tool_calls)
+                and any(tc.name == "make_plan" for tc in m.tool_calls)
                 for m in msgs)
         )
 

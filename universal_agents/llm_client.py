@@ -96,13 +96,13 @@ class LoopDetector:
                 continue
 
             if isinstance(msg, AssistantMessage):
-                # create_plan особый случай:
-                #  - повторный create_plan с ТЕМИ ЖЕ аргументами = зацикливание;
-                #  - create_plan с ДРУГИМИ аргументами = ревизия плана (граница
+                # make_plan особый случай:
+                #  - повторный make_plan с ТЕМИ ЖЕ аргументами = зацикливание;
+                #  - make_plan с ДРУГИМИ аргументами = ревизия плана (граница
                 #    контекста): вызовы ПОСЛЕ него повтором не считаются.
                 found_plan = False
                 for tc in msg.tool_calls:
-                    if getattr(tc, "name", "") == "create_plan":
+                    if getattr(tc, "name", "") == "make_plan":
                         found_plan = True
                         if self.normalize_args(tc.arguments) == norm_args:
                             return True
@@ -148,6 +148,7 @@ class LLMClient:
         if prefill:
             messages_to_send.append({"role": "assistant", "content": prefill})
 
+        result = None
         if Config.USE_RESPONSES_API:
             if previous_response_id is not None:
                 msg, err, usage = LLMClient._call_responses_api(
@@ -155,18 +156,46 @@ class LLMClient:
                     frequency_penalty, presence_penalty, max_tokens, previous_response_id
                 )
                 if not err and msg and (msg.content or msg.tool_calls):
-                    return msg, err, usage
-            msg, err, usage = LLMClient._call_responses_api_full(
-                messages_to_send, temp, timeout, tools, top_p,
+                    result = (msg, err, usage)
+            if result is None:
+                msg, err, usage = LLMClient._call_responses_api_full(
+                    messages_to_send, temp, timeout, tools, top_p,
+                    frequency_penalty, presence_penalty, max_tokens
+                )
+                if not err and msg and (msg.content or msg.tool_calls):
+                    result = (msg, err, usage)
+        if result is None:
+            result = LLMClient._call_chat_completions(
+                messages_to_send, temp, timeout, tools, prefill, top_p,
                 frequency_penalty, presence_penalty, max_tokens
             )
-            if not err and msg and (msg.content or msg.tool_calls):
-                return msg, err, usage
 
-        return LLMClient._call_chat_completions(
-            messages_to_send, temp, timeout, tools, prefill, top_p,
-            frequency_penalty, presence_penalty, max_tokens
-        )
+        LLMClient._debug_log(messages_to_send, result)
+        return result
+
+    @staticmethod
+    def _debug_log(messages_to_send, result):
+        """Выводит в лог экрана содержимое служебного вызова LLM (для отладки)."""
+        try:
+            print("\n" + "=" * 30)
+            print("📤 LLM DEBUG CALL OUTPUT:")
+
+            msg, err, usage = result
+            if err:
+                print(f"  ⚠️ ERROR: {err}")
+            else:
+                if msg is not None and getattr(msg, "content", None):
+                    print(msg.content)
+                elif msg is not None and getattr(msg, "tool_calls", None):
+                    for tc in msg.tool_calls:
+                        print(f"  🔨 {getattr(tc, 'name', '?')}({getattr(tc, 'arguments', '')})")
+                else:
+                    print("  (no content / empty)")
+                if usage:
+                    print(f"  ⏱ usage: {usage}")
+            print("=" * 30)
+        except Exception:
+            pass
 
     @staticmethod
     def _resolve_params(params, temp, timeout, top_p, frequency_penalty, presence_penalty, max_tokens):

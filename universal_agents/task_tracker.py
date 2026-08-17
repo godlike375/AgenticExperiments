@@ -1,18 +1,18 @@
 """План-ориентированная декомпозиция и структурная компактизация истории.
 
 Модель:
-   1) создаёт ПЛАН через `create_plan(plan=[...])` — плоский упорядоченный
+   1) создаёт ПЛАН через `make_plan(plan=[...])` — плоский упорядоченный
      список задач {id, title} (как bullet list).
    2) выполняет задачи и помечает каждую выполненной через
      `have_done(id, summary)` — строго по порядку плана.
 
 Система читает план из истории и заставляет `have_done` идти строго по
-порядку списка. При изменении плана (повторный `create_plan`) «следующий шаг»
+порядку списка. При изменении плана (повторный `make_plan`) «следующий шаг»
 пересчитывается из нового плана, что позволяет начать с произвольного шага и
 далее идти по порядку.
 
 Инструмент `have_done` динамически подключается агентом только после УСПЕШНОГО
-создания плана через `create_plan` (до этого он отсутствует в инструментарии).
+создания плана через `make_plan` (до этого он отсутствует в инструментарии).
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ if TYPE_CHECKING:
     from universal_agents.agent import LLMAgent
 
 DONE_TOOL = "have_done"
-PLAN_TOOL = "create_plan"
+PLAN_TOOL = "make_plan"
 
 
 # ---------------------------------------------------------------------------
@@ -42,9 +42,9 @@ def plan_leaf_sequence(plan_map: dict) -> list[str]:
 
 
 def set_plan(agent: LLMAgent, plan_list: list) -> str:
-    """Обработчик create_plan. Сохраняет плоский план на агенте и возвращает порядок."""
+    """Обработчик make_plan. Сохраняет плоский план на агенте и возвращает порядок."""
     if not isinstance(plan_list, list) or not plan_list:
-        return f"{ENVIRONMENT_PREFIX} Error: create_plan expects a non-empty list of {{id, title}} tasks."
+        return f"{ENVIRONMENT_PREFIX} Error: make_plan expects a non-empty list of {{id, title}} tasks."
     meta: dict = {}
     for entry in plan_list:
         if not isinstance(entry, dict):
@@ -61,7 +61,7 @@ def set_plan(agent: LLMAgent, plan_list: list) -> str:
     # предыдущего плана, чтобы переиспользуемые id не считались выполненными.
     agent._compacted_task_ids = set()
     # Динамически подключаем have_done: он доступен только после успешного
-    # create_plan (до этого в инструментарии его нет).
+    # make_plan (до этого в инструментарии его нет).
     tm = getattr(agent, "tools_manager", None)
     if tm is not None:
         try:
@@ -107,7 +107,7 @@ def _parse_call_args(tc) -> dict:
 
 
 def _last_plan_position(history: list) -> int:
-    """Индекс последнего вызова create_plan (граница текущего плана), иначе -1."""
+    """Индекс последнего вызова make_plan (граница текущего плана), иначе -1."""
     pos = -1
     for i, msg in enumerate(history):
         if isinstance(msg, AssistantMessage) and msg.has_tool_calls():
@@ -121,7 +121,7 @@ _META_TOOLS = {PLAN_TOOL, DONE_TOOL, "load_tools"}
 
 
 def _last_real_work_position(history: list, after: int) -> int:
-    """Индекс последнего вызова РЕАЛЬНОГО инструмента (не create_plan/have_done)
+    """Индекс последнего вызова РЕАЛЬНОГО инструмента (не make_plan/have_done)
     после позиции `after`; иначе -1."""
     pos = -1
     for i, msg in enumerate(history):
@@ -193,14 +193,14 @@ def validate_task_mark_call(history_before: list, args: dict, plan_map: dict,
 
     if not plan_map:
         return (
-            "OUT-OF-ORDER: no task plan yet. Call create_plan with the ordered list of "
+            "OUT-OF-ORDER: no task plan yet. Call make_plan with the ordered list of "
             "tasks FIRST, then mark them done with have_done in plan order."
         )
     leaves = plan_leaf_sequence(plan_map)
     if tid not in leaves:
         return f"CANNOT MARK '{tid}': not in the plan."
 
-    # Учитываем только выполнение ТЕКУЩЕГО плана: маркеры после последнего create_plan.
+    # Учитываем только выполнение ТЕКУЩЕГО плана: маркеры после последнего make_plan.
     # Это исключает утечку done-маркеров/компактизации предыдущего плана.
     plan_pos = _last_plan_position(history_before)
     done = set(compacted)
@@ -209,13 +209,13 @@ def validate_task_mark_call(history_before: list, args: dict, plan_map: dict,
     if next_leaf is None:
         return (
             f"CANNOT MARK '{tid}': all planned tasks are already done. "
-            f"Revise the plan with create_plan to add more tasks."
+            f"Revise the plan with make_plan to add more tasks."
         )
     if tid != next_leaf:
         return (
             f"OUT-OF-ORDER: plan says the next task is '{next_leaf}', but you tried to mark '{tid}'. "
             f"Follow the plan order. To start from a different step, revise the plan with "
-            f"create_plan(plan=[...])."
+            f"make_plan(plan=[...])."
         )
     # Защита от «фиктивного» выполнения: нельзя пометить задачу выполненной, если
     # после последнего done-маркера (или создания плана) не было НИ ОДНОГО реального
@@ -263,16 +263,16 @@ def _leaf_block(history: list, leaf: str, leaves: list, plan_pos: int) -> tuple:
     """Возвращает (start, end) компактизируемого сегмента задачи — только реальная
     работа между сохраняемыми маркерами.
 
-    Маркеры create_plan и have_done (вызов + результат) в сегмент НЕ входят и
+    Маркеры make_plan и have_done (вызов + результат) в сегмент НЕ входят и
     остаются в истории (чтобы модель всегда видела порядок плана и факт завершения).
-    start — сразу после последней сохраняемой границы (результата create_plan либо
+    start — сразу после последней сохраняемой границы (результата make_plan либо
     результата have_done предыдущей задачи); end — непосредственно перед вызовом
     have_done этой задачи (его результат на done[leaf])."""
     done = _done_marker_positions(history, leaves, after=plan_pos)
     done_idx = done[leaf]        # индекс результата have_done этой задачи
     hd_call = done_idx
 
-    # Последняя сохраняемая граница перед работой задачи: результат create_plan
+    # Последняя сохраняемая граница перед работой задачи: результат make_plan
     # (вызов на plan_pos) либо результат have_done последней размеченной предыдущей.
     boundary = plan_pos + 1
     idx = leaves.index(leaf)
@@ -295,7 +295,7 @@ def _compact_one_group(agent: LLMAgent) -> Optional[str]:
     if not leaves:
         return None
 
-    # позиция последнего create_plan (текущий план) для границы сегмента
+    # позиция последнего make_plan (текущий план) для границы сегмента
     plan_pos = _last_plan_position(history)
 
     leaf = _earliest_done_leaf(history, leaves, compacted, plan_pos=plan_pos)
@@ -363,7 +363,7 @@ TASK_MARK_INSTRUCTIONS = (
     "\n"
     "* TASK DECOMPOSITION (для длинных многошаговых задач):\n"
     f"  - Сложную многошаговую просьбу разбивай на шаги-подзадачи.\n"
-    "  - СНАЧАЛА вызови create_plan\n"
+    "  - СНАЧАЛА вызови make_plan\n"
     "  - Затем выполняй задачи СТРОГО по одной в порядке плана. Для КАЖДОЙ задачи:\n"
     "      (1) реально выполни её РЕАЛЬНЫМИ инструментами (read, search, edit_file, run_bash, "
     "run_powershell и т.п.) — читай код, вноси правки, запускай команды;\n"
@@ -373,13 +373,13 @@ TASK_MARK_INSTRUCTIONS = (
     "НЕ помечай задачу выполненной и НЕ выдумывай итог, если ты её ещё не выполнил(а). "
     "Саммари должно отражать то, что реально сделано (файлы/команды/результаты).\n"
     "  - Система заставит идти по плану: нельзя пометить выполненной задачу не по порядку. "
-    "Чтобы изменить план или начать с другого шага — вызови create_plan заново (новая версия плана), "
+    "Чтобы изменить план или начать с другого шага — вызови make_plan заново (новая версия плана), "
     "далее иди по его порядку.\n"
     "  - Давай каждой задаче уникальный id (e.g. t1, t2, ...).\n"
-    "  - Инструмент have_done становится доступным ТОЛЬКО после успешного create_plan; "
+    "  - Инструмент have_done становится доступным ТОЛЬКО после успешного make_plan; "
     "до создания плана его нет в списке инструментов.\n"
-    "  - НЕ вызывай create_plan/have_done для простых ответов/вопросов без многошаговой работы — "
+    "  - НЕ вызывай make_plan/have_done для простых ответов/вопросов без многошаговой работы — "
     "только при реальной декомпозиции.\n"
-    "  - create_plan и have_done невидимы пользователю; они помогают системе компактизировать "
+    "  - make_plan и have_done невидимы пользователю; они помогают системе компактизировать "
     "память после завершения подзадач.\n"
 )
