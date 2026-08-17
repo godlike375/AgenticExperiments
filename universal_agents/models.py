@@ -74,6 +74,7 @@ class ToolResult(Message):
     is_user_denied: bool = False
     execution_time_ms: Optional[float] = None
     retry_count: int = 0
+    skip_summarize: bool = False
 
     def to_api_dict(self) -> dict[str, Any]:
         return {

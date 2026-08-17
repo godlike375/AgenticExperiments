@@ -75,6 +75,11 @@ class ExecuteMixin:
                     self._tool_usage[name] = self._tool_usage.get(name, 0) + 1
                     if name == 'read' and self._read_registrations:
                         self.file_states.mark_tool_call(self._read_registrations.pop(0), tr.tool_call_id)
+                    # Выемка больших файлов уже вернула готовый сжатый результат
+                    # (most_important_lines со скелетом) — не даём пер-сообщенческой
+                    # суммаризации сжимать его повторно.
+                    if name == 'read' and "Most important file lines (for memory saving):" in content:
+                        tr.skip_summarize = True
 
                 auto_compress_tool_result(self, tr)
                 results.append(tr)

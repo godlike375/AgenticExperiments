@@ -45,7 +45,7 @@ class ResponseMixin:
     def _append_assistant(self, msg: AssistantMessage) -> None:
         """Добавляет сообщение ассистента в историю и рендерит его."""
         self.history.add(msg)
-        if not Config.DISABLE_PER_MESSAGE_SUMMARIZATION:
+        if not (Config.DISABLE_PER_MESSAGE_SUMMARIZATION or self._disable_per_msg_summarization):
             self._summarize_assistant_message(msg)
         self.on_render(msg)
         self._emit_token_info()
@@ -54,7 +54,7 @@ class ResponseMixin:
         """Добавляет результаты инструментов в историю и рендерит их."""
         for tr in results:
             self.history.add(tr)
-            if not Config.DISABLE_PER_MESSAGE_SUMMARIZATION:
+            if not (Config.DISABLE_PER_MESSAGE_SUMMARIZATION or self._disable_per_msg_summarization):
                 self._maybe_summarize_tool_result(tr)
             self.on_render(tr)
             self._emit_token_info()

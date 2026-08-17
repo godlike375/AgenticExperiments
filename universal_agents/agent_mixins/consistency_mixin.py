@@ -30,7 +30,7 @@ class ConsistencyMixin:
     def _chat_self_consistent(self, message: str, prefill: str = None) -> str:
         user_message = UserMessage(content=message)
         self.history.add(user_message)
-        if not Config.DISABLE_PER_MESSAGE_SUMMARIZATION:
+        if not (Config.DISABLE_PER_MESSAGE_SUMMARIZATION or self._disable_per_msg_summarization):
             self._maybe_summarize_user_message(user_message)
         messages_base = prepare_messages_for_api(self)
 

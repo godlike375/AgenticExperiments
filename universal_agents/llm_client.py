@@ -178,6 +178,10 @@ class LLMClient:
         """Выводит в лог экрана содержимое служебного вызова LLM (для отладки)."""
         try:
             print("\n" + "=" * 30)
+            print("📤 LLM DEBUG CALL INPUT:")
+
+            print(messages_to_send[-1])
+
             print("📤 LLM DEBUG CALL OUTPUT:")
 
             msg, err, usage = result

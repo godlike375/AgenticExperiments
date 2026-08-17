@@ -51,10 +51,21 @@ class Config:
 
     # Константы токенизации и суммаризации
     CHARS_PER_TOKEN = 2.35
-    MIN_TOKENS_TO_SUMMARIZE = 165
+    MIN_TOKENS_TO_SUMMARIZE = 180
 
     # Отключает скелетизацию больших файлов: read без start_line/end_line вернёт полный файл
     DISABLE_FILE_SKELETONIZATION = False
+
+    # Интерактивная выемка полезных строк большого файла в read. Когда файл
+    # больше MIN_TOKENS_TO_SUMMARIZE, LLM спрашивается: какие строки наиболее
+    # полезны? Она указывает их диапазоны (most_important_lines:), к ним
+    # добавляется скелет. В результат инструмента попадает только выбранное,
+    # остальное из памяти удаляется. При False — прежнее поведение (скелет).
+    ENABLE_INTERACTIVE_FILE_EXTRACTION = True
+
+    # В режиме интерактивной выемки к вырезанным строкам добавлять структурный
+    # скелет файла (гибрид «скелет + важные строки»).
+    INTERACTIVE_EXTRACT_WITH_SKELETON = True
 
     # Отключает автоматическую суммаризацию большого вывода любых инструментов
     DISABLE_TOOL_AUTO_SUMMARIZATION = True

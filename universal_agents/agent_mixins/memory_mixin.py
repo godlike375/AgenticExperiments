@@ -48,6 +48,10 @@ class MemoryMixin:
         суммаризируются в рабочую память; при сжатии саммари встанет на их место."""
         if tr.is_error or tr.is_user_denied:
             return
+        # Уже сжатый результат (например DIGEST из выемки больших файлов) не
+        # суммаризируем повторно — не делаем суммаризацию суммаризации.
+        if getattr(tr, "skip_summarize", False):
+            return
         content = (tr.content or "").strip()
         MIN_CHARS = int(MIN_TOKENS_TO_SUMMARIZE * CHARS_PER_TOKEN)
         if len(content) < MIN_CHARS:
@@ -55,6 +59,16 @@ class MemoryMixin:
         summary = _dense_summarize_message(self, content)
         stored = f"TOOL({tr.name}): {summary}" if summary else None
         if stored and len(stored) < len(content):
+            # Для read в режиме интерактивной выемки заменяем оригинальный контент
+            # на суммаризацию прямо в результате инструмента: в контексте и истории
+            # остаётся суммаризация, а не исходный файл (экономия памяти).
+            if tr.name == "read" and Config.ENABLE_INTERACTIVE_FILE_EXTRACTION:
+                tr.content = summary
+                self.on_system_msg(
+                    f"[READ SUMMARIZED] read result replaced with summary "
+                    f"({len(content)} -> {len(summary)} chars)."
+                )
+                return
             self._per_msg_summaries[id(tr)] = stored
             self.on_system_msg(
                 f"[PER-MSG SUMMARY] Tool '{tr.name}' output ({len(content)} chars) "

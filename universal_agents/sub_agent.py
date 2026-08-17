@@ -42,6 +42,7 @@ class SubAgent:
             on_reasoning_chunk: Optional[Callable[[str], None]] = None,
             on_reasoning_start: Optional[Callable[[], None]] = None,
             on_reasoning_end: Optional[Callable[[], None]] = None,
+            disable_per_msg_summarization: bool = False,
     ):
         from universal_agents.agent import LLMAgent
 
@@ -125,6 +126,7 @@ class SubAgent:
             on_reasoning_chunk=on_reasoning_chunk,
             on_reasoning_start=on_reasoning_start,
             on_reasoning_end=on_reasoning_end,
+            disable_per_msg_summarization=disable_per_msg_summarization,
         )
         self._agent.token_tracker = self._own_tracker
         self._agent._depth = depth

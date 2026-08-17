@@ -5,10 +5,12 @@ import difflib
 import os
 import re as _re
 import fnmatch as _fnmatch
+from typing import Optional
 
 from universal_agents.config import Config
 from universal_agents.constants import ENVIRONMENT_PREFIX
 from universal_agents.file_states import _content_hash
+from universal_agents.llm_client import LLMClient
 from universal_agents.tool import tool
 
 
@@ -211,6 +213,118 @@ def _read_text(path: str) -> tuple:
         return None, f"{ENVIRONMENT_PREFIX} Error: Cannot read binary files (failed UTF-8 decode)"
 
 
+def _parse_important_lines(lines: list[str], ranges_text: str) -> list[int]:
+    """Разбирает '[1, 3, 5:8, 12:14]' или '1-20, 35-50' в список 1-based индексов.
+
+    Диапазоны 'a:b'/'a-b' трактуются инклюзивно (конечная строка тоже сохраняется).
+    """
+    inner = ranges_text or ""
+    if '[' in inner and ']' in inner:
+        inner = inner[inner.find('[') + 1:inner.rfind(']')]
+    kept: set[int] = set()
+    for token in inner.replace(';', ',').split(','):
+        token = token.strip()
+        if not token:
+            continue
+        sep = ':' if ':' in token else ('-' if '-' in token else None)
+        if sep:
+            try:
+                a, b = token.split(sep, 1)
+                kept.update(range(int(a.strip()), int(b.strip()) + 1))
+            except ValueError:
+                continue
+        else:
+            try:
+                kept.add(int(token))
+            except ValueError:
+                continue
+    return sorted(k for k in kept if 1 <= k <= len(lines))
+
+
+def _interactive_file_extract(agent, path: str, content: str, mtime: str) -> Optional[str]:
+    """Спрашивает LLM, какие строки файла наиболее полезны, и сохраняет только их.
+
+    Модель отвечает одной строкой 'most_important_lines: [1, 3, 5:8, 12:14]' —
+    выбранные строки вырезаются. К ним докидывается скелет от субагента
+    (_summarize_file). None — если модель не дала пригодного ответа.
+    """
+    lines = content.splitlines()
+    total = len(lines)
+
+    max_tokens = agent.token_tracker.get_remaining() // Config.SUMMARIZATION_THRESHOLD_DIVIDER
+    max_chars = int(max_tokens * Config.CHARS_PER_TOKEN)
+    truncated = len(content) > max_chars
+    snippet = content[:max_chars]
+    numbered = "\n".join(f"{i + 1} {line}" for i, line in enumerate(snippet.split("\n")))
+
+    prompt = (
+        f"{ENVIRONMENT_PREFIX} The file '{path}' is {total} lines.\n"
+        f"File content (line-numbered):\n{numbered}"
+        "The file is too large to keep fully in memory and that's why you need to "
+        f"decide which lines are MOST useful for your current task. Everything else will be REMOVED to save memory"
+        f" right after your reply.\n"
+        f"Reply in PLAIN TEXT with a single line in format:\n"
+        f'"most_important_lines: [1, 3, 5:8, 12:14]"\n'
+        f"Do NOT call any tool and do NOT add extra comms or summary.\n"
+    )
+    if truncated:
+        prompt += "\n\n(File is truncated due to remaining memory)"
+
+    history_msgs = [m.to_api_dict() for m in agent.history.get_all()]
+    msgs = history_msgs + [{"role": "user", "content": prompt}]
+    # Tools передаём ОБЯЗАТЕЛЬНО: они вшиваются в системный промпт/префикс, и без
+    # них не совпадает KV-cache префикс (вызов не переиспользует кэш родителя).
+    reply = None
+    for attempt in range(Config.ERROR_RECOVERY_RETRIES + 1):
+        msg_obj, err, usage = LLMClient.call(
+            msgs, temp=0.2, timeout=60, tools=(agent.tools if agent.tools else None)
+        )
+        if err:
+            break
+        if msg_obj and msg_obj.content and msg_obj.content.strip():
+            reply = msg_obj.content.strip()
+            break
+        # Модель вместо текста выдала tool-call (например пустой ?()) — как в
+        # основном цикле: инжектим запрет инструментов и просим перегенерировать.
+        correction = (
+            f"{ENVIRONMENT_PREFIX} You tried to call a tool, but tools are FORBIDDEN in this "
+            f"extraction step. Answer in PLAIN TEXT only, in the form 'most_important_lines: [...]'."
+        )
+        agent.on_system_msg("[READ EXTRACT] Model returned a tool call instead of text; retrying with a tool ban...")
+        msgs = msgs + [{"role": "user", "content": correction}]
+
+    if not reply:
+        return None
+
+    lower = reply.lower()
+    lines_text = None
+    if "most_important_lines" in lower:
+        _, _, lines_text = reply.partition("most_important_lines:")
+    elif "lines:" in lower:
+        _, _, lines_text = reply.partition("lines:")
+    if lines_text is None:
+        return None
+
+    kept = _parse_important_lines(lines, lines_text)
+    if not kept:
+        return None
+
+    kept_lines = [f"{i} {lines[i - 1]}" for i in kept]
+    result = (f"{ENVIRONMENT_PREFIX} Most important file lines (for memory saving): ...\n"
+              f"{ENVIRONMENT_PREFIX} File: {path}\nModified: {mtime}\nTotal lines: {total}\n"
+              f"Kept lines ({len(kept)}/{total}):\n---\n"
+              + "\n".join(kept_lines))
+
+    # Скелет от субагента — отдельный, качественный, склеиваем с важными строками.
+    if Config.INTERACTIVE_EXTRACT_WITH_SKELETON:
+        skeleton = _summarize_file(path, content, agent).strip()
+        if skeleton:
+            result += f"\n\n--- File skeleton ---\n{skeleton}"
+
+    agent.on_system_msg(f"[READ EXTRACT] Kept {len(kept)} of {total} lines from '{path}' (+ skeleton)")
+    return result
+
+
 def _summarize_file(path: str, content: str, agent) -> str:
     """Строит структурный скелет/саммари файла через изолированный субагент."""
     sub = agent.make_sub_agent(
@@ -279,7 +393,7 @@ def read(agent: 'LLMAgent', path: str = '.', start_line: int = None, end_line: i
                            f"Lines {start}-{end} of {len(lines)}:\n---\n"
                            + ("\n".join(numbered) if numbered else ""))
                 return _read_or_skip(agent, path, raw, content)
-            # Без диапазона: маленькие файлы — целиком, крупные — саммари от субагента
+            # Без диапазона: маленькие файлы — целиком, крупные — выемка/скелет
             raw, read_err = _read_text(path)
             if read_err:
                 return read_err
@@ -288,6 +402,21 @@ def read(agent: 'LLMAgent', path: str = '.', start_line: int = None, end_line: i
                 numbered = [f"{i+1} {line}" for i, line in enumerate(lines)]
                 content = f"{ENVIRONMENT_PREFIX} File: {path}\nModified: {mtime}\nContent:\n---\n" + ("\n".join(numbered) if numbered else "")
                 return _read_or_skip(agent, path, raw, content)
+            # Интерактивная выемка: LLM сама выбирает, что сохранить, остальное удаляется
+            if Config.ENABLE_INTERACTIVE_FILE_EXTRACTION:
+                extracted = _interactive_file_extract(agent, path, raw, mtime)
+                if extracted:
+                    return extracted
+                # Фолбэк БЕЗ дополнительного LLM-вызова (чтобы не было двух
+                # обращений к модели): отдаём усечённый префикс файла.
+                max_tokens = agent.token_tracker.get_remaining() // Config.SUMMARIZATION_THRESHOLD_DIVIDER
+                max_chars = int(max_tokens * Config.CHARS_PER_TOKEN)
+                prefix_lines = raw[:max_chars].split("\n")
+                numbered = [f"{i + 1} {line}" for i, line in enumerate(prefix_lines)]
+                return (f"{ENVIRONMENT_PREFIX} File: {path}\nModified: {mtime}\nTotal lines: {len(lines)}\n"
+                        f"Interactive extraction failed; showing truncated prefix. "
+                        f"To see exact code pass start_line/end_line:\n---\n"
+                        + "\n".join(numbered))
             # Скелет от субагента: состояние больших файлов не отслеживаем (дорого)
             summary = _summarize_file(path, raw, agent)
             return (f"{ENVIRONMENT_PREFIX} File: {path}\nModified: {mtime}\nTotal lines: {len(lines)}\n"

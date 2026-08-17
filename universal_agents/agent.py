@@ -57,6 +57,7 @@ class LLMAgent(
         on_reasoning_end: Callable[[], None] = None,
         streaming_enabled: bool = None,
         max_generation_attempts: int = None,
+        disable_per_msg_summarization: bool = False,
     ):
         self.history = ChatHistory(system_prompt)
         self.file_states = FileStateTracker(self.history)
@@ -98,6 +99,7 @@ class LLMAgent(
         self._last_response_id: Optional[str] = None
         self._last_sent_msg_count: int = 0
         self._depth: int = 0
+        self._disable_per_msg_summarization = disable_per_msg_summarization
         self._compacted_task_ids: set[str] = set()
         self.task_plan: list[str] = []
         self.task_plan_map: dict = {}
@@ -116,6 +118,7 @@ class LLMAgent(
         temp: float = None,
         on_log: Callable = None,
         depth: int = 0,
+        disable_per_msg_summarization: bool = True,
     ) -> SubAgent:
         """Создаёт SubAgent, наследуя историю и бюджет токенов родителя."""
         parent_system_prompt = self.history[0].content if len(self.history) else ""
@@ -131,6 +134,7 @@ class LLMAgent(
             temp=temp,
             on_log=on_log if on_log is not None else (lambda x: None),
             depth=depth,
+            disable_per_msg_summarization=disable_per_msg_summarization,
         )
 
     # --------------------------------------------------------
@@ -258,7 +262,7 @@ class LLMAgent(
 
         user_msg = UserMessage(content=message)
         self.history.add(user_msg)
-        if not Config.DISABLE_PER_MESSAGE_SUMMARIZATION:
+        if not (Config.DISABLE_PER_MESSAGE_SUMMARIZATION or self._disable_per_msg_summarization):
             self._maybe_summarize_user_message(user_msg)
         current_prefill = get_effective_prefill(prefill)
         self._last_response_id = None
