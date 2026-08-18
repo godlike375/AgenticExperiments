@@ -11,7 +11,7 @@ from universal_agents.tool_parsing import parse_tool_args, is_error_content
 
 def _read_result_already_compressed(content: str) -> bool:
     """True, если результат read уже обработан логикой больших файлов
-    (интерактивная выемка most_important_lines со скелетом либо её фолбэк —
+    (интерактивная выемка relevant_lines со скелетом либо её фолбэк —
     усечённый префикс) и не должен повторно суммаризироваться
     пер-сообщенческой суммаризацией."""
     return (
@@ -87,7 +87,7 @@ class ExecuteMixin:
                     if name == 'read' and self._read_registrations:
                         self.file_states.mark_tool_call(self._read_registrations.pop(0), tr.tool_call_id)
                     # Обработка больших файлов уже вернула сжатый результат
-                    # (most_important_lines со скелетом либо усечённый префикс при
+                    # (relevant_lines со скелетом либо усечённый префикс при
                     # провале выемки) — не даём пер-сообщенческой суммаризации
                     # сжимать его повторно.
                     if name == 'read' and _read_result_already_compressed(content):

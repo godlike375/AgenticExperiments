@@ -213,7 +213,7 @@ def _read_text(path: str) -> tuple:
         return None, f"{ENVIRONMENT_PREFIX} Error: Cannot read binary files (failed UTF-8 decode)"
 
 
-def _parse_important_lines(lines: list[str], ranges_text: str) -> list[int]:
+def _parse_relevant_lines(lines: list[str], ranges_text: str) -> list[int]:
     """Разбирает '[1, 3, 5:8, 12:14]' или '1-20, 35-50' в список 1-based индексов.
 
     Диапазоны 'a:b'/'a-b' трактуются инклюзивно (конечная строка тоже сохраняется).
@@ -242,7 +242,7 @@ def _parse_important_lines(lines: list[str], ranges_text: str) -> list[int]:
 def _interactive_file_extract(agent, path: str, content: str, mtime: str) -> Optional[str]:
     """Спрашивает LLM, какие строки файла наиболее полезны, и сохраняет только их.
 
-    Модель отвечает одной строкой 'most_important_lines: [1, 3, 5:8, 12:14]' —
+    Модель отвечает одной строкой 'relevant_lines: [1, 3, 5:8, 12:14]' —
     выбранные строки вырезаются. К ним докидывается скелет от субагента
     (_summarize_file). None — если модель не дала пригодного ответа.
     """
@@ -257,12 +257,14 @@ def _interactive_file_extract(agent, path: str, content: str, mtime: str) -> Opt
 
     prompt = (
         f"{ENVIRONMENT_PREFIX} The file '{path}' is {total} lines.\n"
-        f"File content (line-numbered):\n{numbered}"
-        "The file is too large to keep fully in memory. You need to "
-        f"decide which lines are MOST useful for you now! Other ones will be REMOVED."
-        f" right after your reply.\n"
-        f"Reply just with a line in format:\n"
-        f"`most_important_lines: [1, 3, 5:8, 12:14]` (just an example) \n"
+        f"Line-numbered content:\n{numbered}"
+        "Your task is to determine the most relevant lines for the current task."
+        f"The syntax for `relevant_lines`:\n"
+        f"Use 1-based indexing. Separate single lines and ranges with commas. "
+        f"Use colon `:` for inclusive ranges (both ends kept). "
+        f"Example: `[1, 3, 5:8, 12:14]` keeps lines 1, 3, 5,6,7,8, 12,13,14."
+        f"Reply exactly in strict format:\n"
+        f"\"REASONING: '...' relevant_lines: '[...]'\"\n---"
         f"Do NOT call tools or write any other free text.{ENVIRONMENT_PREFIX_END}"
     )
     if truncated:
@@ -275,7 +277,7 @@ def _interactive_file_extract(agent, path: str, content: str, mtime: str) -> Opt
     reply = None
     for attempt in range(Config.ERROR_RECOVERY_RETRIES + 1):
         msg_obj, err, usage = LLMClient.call(
-            msgs, prefill="<short_think> Let's", temp=0.2, timeout=60, tools=(agent.tools if agent.tools else None)
+            msgs, prefill="REASONING:", temp=0.2, timeout=60, tools=(agent.tools if agent.tools else None)
         )
         if err:
             break
@@ -286,7 +288,7 @@ def _interactive_file_extract(agent, path: str, content: str, mtime: str) -> Opt
         # основном цикле: инжектим запрет инструментов и просим перегенерировать.
         correction = (
             f"{ENVIRONMENT_PREFIX} You tried to call a tool, but tools are FORBIDDEN in this "
-            f"extraction step. Answer in PLAIN TEXT only, in the form 'most_important_lines: [...]'."
+            f"extraction step. Answer in PLAIN TEXT only, in the form 'relevant_lines: [...]'."
         )
         agent.on_system_msg("[READ EXTRACT] Model returned a tool call instead of text; retrying with a tool ban...")
         msgs = msgs + [{"role": "user", "content": correction}]
@@ -296,14 +298,14 @@ def _interactive_file_extract(agent, path: str, content: str, mtime: str) -> Opt
 
     lower = reply.lower()
     lines_text = None
-    if "most_important_lines" in lower:
-        _, _, lines_text = reply.partition("most_important_lines:")
+    if "relevant_lines" in lower:
+        _, _, lines_text = reply.partition("relevant_lines:")
     elif "lines:" in lower:
         _, _, lines_text = reply.partition("lines:")
     if lines_text is None:
         return None
 
-    kept = _parse_important_lines(lines, lines_text)
+    kept = _parse_relevant_lines(lines, lines_text)
     if not kept:
         return None
 
