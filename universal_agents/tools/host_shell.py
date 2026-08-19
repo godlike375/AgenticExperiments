@@ -18,7 +18,7 @@ import sys
 import time
 
 from universal_agents.tool import tool
-from universal_agents.constants import ENVIRONMENT_PREFIX
+from universal_agents.constants import ENVIRONMENT_PREFIX, ENVIRONMENT_PREFIX_END
 from universal_agents.config import Config
 
 
@@ -127,7 +127,7 @@ def _build_bash_command(command: str) -> list[str]:
 def run_powershell(command: str, timeout: int = 60) -> str:
     pwsh = shutil.which("pwsh") or shutil.which("powershell")
     if not pwsh:
-        return f"{ENVIRONMENT_PREFIX} Error PowerShell executable not found"
+        return f"{ENVIRONMENT_PREFIX} Error PowerShell executable not found{ENVIRONMENT_PREFIX_END}"
     # -NoProfile: без профилей пользователя; -NonInteractive: без интерактива
     return _run([pwsh, "-NoProfile", "-NonInteractive", "-Command", command], timeout)
 
@@ -146,5 +146,5 @@ def run_bash_host(command: str, timeout: int = 60) -> str:
     try:
         argv = _build_bash_command(command)
     except RuntimeError as e:
-        return f"{ENVIRONMENT_PREFIX} Error {e}"
+        return f"{ENVIRONMENT_PREFIX} Error {e}{ENVIRONMENT_PREFIX_END}"
     return _run(argv, timeout)

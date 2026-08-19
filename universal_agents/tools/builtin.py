@@ -2,7 +2,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from universal_agents.tool import tool
-from universal_agents.constants import ENVIRONMENT_PREFIX
+from universal_agents.constants import ENVIRONMENT_PREFIX, ENVIRONMENT_PREFIX_END
 from universal_agents.config import Config
 from universal_agents.models import UserMessage, AssistantMessage, ToolResult, SystemMessage
 from universal_agents.sub_agent import MAX_SUB_AGENT_DEPTH
@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 def get_messages(agent: LLMAgent, chars_per_message: int = 30) -> str:
     history = agent.history
     if len(history) <= Config.AFTER_SYSTEM_PROMPT:
-        return f"{ENVIRONMENT_PREFIX} История пока пустая."
+        return f"{ENVIRONMENT_PREFIX} История пока пустая.{ENVIRONMENT_PREFIX_END}"
     lines = ["=== SHORT DIALOG ==="]
     for i in range(Config.AFTER_SYSTEM_PROMPT, len(history)):
         msg = history[i]
@@ -45,7 +45,7 @@ def get_messages(agent: LLMAgent, chars_per_message: int = 30) -> str:
         if len(content) > chars_per_message:
             content = content[:chars_per_message] + " ..."
         lines.append(f"{i}. {role}: {content.strip()}")
-    return f"{ENVIRONMENT_PREFIX} Your current history:\n" + "\n".join(lines)
+    return f"{ENVIRONMENT_PREFIX} Your current history:\n" + "\n".join(lines) + f"\n{ENVIRONMENT_PREFIX_END}"
 
 
 @tool(
@@ -91,20 +91,22 @@ def summarize_messages(agent: LLMAgent, start_id: int, end_id: int = -1) -> str:
         return (
             f"{ENVIRONMENT_PREFIX} Error Cannot summarize: range [{start_id}:{safe_end}] "
             f"is invalid or overlaps with protected last 2 messages."
+            f"{ENVIRONMENT_PREFIX_END}"
         )
 
     summary = summarize_dialogue(agent, start_id=safe_start, end_id=safe_end)
     if not summary:
-        return f"{ENVIRONMENT_PREFIX} Error Summarization failed (empty response or error)."
+        return f"{ENVIRONMENT_PREFIX} Error Summarization failed (empty response or error).{ENVIRONMENT_PREFIX_END}"
 
     original_len = history.content_len(safe_start, safe_end)
     if len(summary) >= original_len:
         return (
             f"{ENVIRONMENT_PREFIX} Error Summarization produced text longer than original "
             f"({len(summary)} >= {original_len}). Nothing to compress."
+            f"{ENVIRONMENT_PREFIX_END}"
         )
 
-    summary_content = f"{ENVIRONMENT_PREFIX} [SUMMARY of messages {safe_start}-{safe_end}]: {summary}"
+    summary_content = f"{ENVIRONMENT_PREFIX} [SUMMARY of messages {safe_start}-{safe_end}]: {summary}\n{ENVIRONMENT_PREFIX_END}"
     history.replace_range(safe_start, safe_end, [UserMessage(content=summary_content)])
     history.normalize()
 
@@ -112,6 +114,7 @@ def summarize_messages(agent: LLMAgent, start_id: int, end_id: int = -1) -> str:
     return (
         f"{ENVIRONMENT_PREFIX} Successfully summarized "
         f"{safe_end - safe_start + 1} messages into 1. Freed ~{freed} chars."
+        f"{ENVIRONMENT_PREFIX_END}"
     )
 
 @tool(
@@ -125,7 +128,7 @@ def summarize_messages(agent: LLMAgent, start_id: int, end_id: int = -1) -> str:
 def delegate_to_subagent(agent: LLMAgent, task: str, max_iter: int = None) -> str:
     depth = getattr(agent, '_depth', 0)
     if depth >= MAX_SUB_AGENT_DEPTH:
-        return f"{ENVIRONMENT_PREFIX} Error Sub-agent depth limit ({MAX_SUB_AGENT_DEPTH}) reached. You can't delegate to sub-agent. Do it yourself."
+        return f"{ENVIRONMENT_PREFIX} Error Sub-agent depth limit ({MAX_SUB_AGENT_DEPTH}) reached. You can't delegate to sub-agent. Do it yourself.{ENVIRONMENT_PREFIX_END}"
 
     sub_plugins = {}
     for name, tool_info in agent._all_tools.items():
@@ -153,8 +156,8 @@ def delegate_to_subagent(agent: LLMAgent, task: str, max_iter: int = None) -> st
     agent.on_system_msg(f"[DELEGATE] Completed. Tokens spent by sub-agent: {sub.tokens_spent}")
 
     if not result.strip():
-        return f"{ENVIRONMENT_PREFIX} Error Sub-agent returned empty result."
-    return f"{ENVIRONMENT_PREFIX} Sub-agent result:\n{result}"
+        return f"{ENVIRONMENT_PREFIX} Error Sub-agent returned empty result.{ENVIRONMENT_PREFIX_END}"
+    return f"{ENVIRONMENT_PREFIX} Sub-agent result:\n{result}{ENVIRONMENT_PREFIX_END}"
 
 
 @tool(

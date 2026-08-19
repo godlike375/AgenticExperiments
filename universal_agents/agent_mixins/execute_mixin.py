@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from universal_agents.constants import ENVIRONMENT_PREFIX
+from universal_agents.constants import ENVIRONMENT_PREFIX, ENVIRONMENT_PREFIX_END
 from universal_agents.compressors import auto_compress_tool_result
 from universal_agents.models import ToolCall, ToolResult
 from universal_agents.task_tracker import DONE_TOOL, validate_task_mark_call
@@ -11,7 +11,7 @@ from universal_agents.tool_parsing import parse_tool_args, is_error_content
 
 def _read_result_already_compressed(content: str) -> bool:
     """True, если результат read уже обработан логикой больших файлов
-    (интерактивная выемка relevant_lines со скелетом либо её фолбэк —
+    (интерактивная выемка most_relevant_lines со скелетом либо её фолбэк —
     усечённый префикс) и не должен повторно суммаризироваться
     пер-сообщенческой суммаризацией."""
     return (
@@ -37,6 +37,7 @@ class ExecuteMixin:
                     f"This tool was just called with the exact same parameters in the previous step. "
                     f"Do NOT call it again in the current moment even if user asked to. Try a different approach, use other parameters, "
                     f"or complete your response with the final answer."
+                    f"{ENVIRONMENT_PREFIX_END}"
                 )
                 self.on_system_msg(f"[LOOP PREVENTED] Blocked repeated call to '{name}' during execution.")
                 results.append(ToolResult.error(tc.id, name, warning_msg))
@@ -57,7 +58,7 @@ class ExecuteMixin:
                 )
                 if order_err:
                     self.on_system_msg(f"[TASK ORDER] Rejected out-of-order have_done call: {order_err}")
-                    results.append(ToolResult.error(tc.id, name, f"{ENVIRONMENT_PREFIX} {order_err}"))
+                    results.append(ToolResult.error(tc.id, name, f"{ENVIRONMENT_PREFIX} {order_err}{ENVIRONMENT_PREFIX_END}"))
                     continue
 
             if tool_info.get('requires_confirmation', False) or tool_info.get('path_safety', False):
@@ -87,7 +88,7 @@ class ExecuteMixin:
                     if name == 'read' and self._read_registrations:
                         self.file_states.mark_tool_call(self._read_registrations.pop(0), tr.tool_call_id)
                     # Обработка больших файлов уже вернула сжатый результат
-                    # (relevant_lines со скелетом либо усечённый префикс при
+                    # (most_relevant_lines со скелетом либо усечённый префикс при
                     # провале выемки) — не даём пер-сообщенческой суммаризации
                     # сжимать его повторно.
                     if name == 'read' and _read_result_already_compressed(content):

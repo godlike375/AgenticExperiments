@@ -1,6 +1,6 @@
 import json
 from typing import Optional, Any, Iterable
-from universal_agents.constants import ENVIRONMENT_PREFIX, SUMMARY_MARKER
+from universal_agents.constants import ENVIRONMENT_PREFIX, ENVIRONMENT_PREFIX_END, SUMMARY_MARKER
 from universal_agents.config import Config
 from universal_agents.models import SystemMessage, UserMessage, AssistantMessage, ToolResult, ToolCall, Message
 
@@ -52,7 +52,7 @@ class ChatHistory:
         safe_start = max(start_id, Config.AFTER_SYSTEM_PROMPT)
         safe_end = end_id
         if safe_start > safe_end:
-            return f"{ENVIRONMENT_PREFIX} Error Nothing to delete"
+            return f"{ENVIRONMENT_PREFIX} Error Nothing to delete{ENVIRONMENT_PREFIX_END}"
         for msg in self._messages[safe_start:]:
             if isinstance(msg, UserMessage):
                 msg._cached_header = None
@@ -61,17 +61,17 @@ class ChatHistory:
         has_user_message = any(isinstance(m, UserMessage) for m in self._messages)
         if not has_user_message:
             self._messages.append(UserMessage(
-                content=f"{ENVIRONMENT_PREFIX} All user messages were deleted. Shortly introduce yourself in Russian."
+                content=f"{ENVIRONMENT_PREFIX} All user messages were deleted. Shortly introduce yourself in Russian.{ENVIRONMENT_PREFIX_END}"
             ))
         
-        return f'{ENVIRONMENT_PREFIX} Successfully deleted messages {start_id} - {end_id}'
+        return f'{ENVIRONMENT_PREFIX} Successfully deleted messages {start_id} - {end_id}{ENVIRONMENT_PREFIX_END}'
 
     def edit_message(self, idx: int, new_text: str, old_text: str = '') -> str:
         if not (0 <= idx < len(self._messages)):
-            return f"{ENVIRONMENT_PREFIX} Error: Invalid message index {idx}"
+            return f"{ENVIRONMENT_PREFIX} Error: Invalid message index {idx}{ENVIRONMENT_PREFIX_END}"
         msg = self._messages[idx]
         if isinstance(msg, SystemMessage):
-            return f"{ENVIRONMENT_PREFIX} Error: Cannot edit system prompt"
+            return f"{ENVIRONMENT_PREFIX} Error: Cannot edit system prompt{ENVIRONMENT_PREFIX_END}"
         if not old_text.strip():
             msg.content = new_text
         else:
@@ -83,7 +83,7 @@ class ChatHistory:
         if not msg.content.strip() and idx >= Config.AFTER_SYSTEM_PROMPT:
             self.delete_range(idx, idx)
             return 'Replacing to empty text led to deleting the message block.'
-        return f'{ENVIRONMENT_PREFIX} Success'
+        return f'{ENVIRONMENT_PREFIX} Success{ENVIRONMENT_PREFIX_END}'
 
     def normalize(self, is_error_recovery: bool = False):
         if len(self._messages) <= Config.AFTER_SYSTEM_PROMPT:
@@ -129,7 +129,7 @@ class ChatHistory:
         # Добавляем заглушку ассистента ТОЛЬКО при восстановлении после сбоя
         if is_error_recovery and isinstance(valid[-1], ToolResult):
             valid.append(AssistantMessage(
-                content=f"{ENVIRONMENT_PREFIX} This is a message from system because a sequence of failed tool calls was detected and pruned. The system gave control to the user."
+                content=f"{ENVIRONMENT_PREFIX} This is a message from system because a sequence of failed tool calls was detected and pruned. The system gave control to the user.{ENVIRONMENT_PREFIX_END}"
             ))
 
         self._messages = valid
@@ -237,15 +237,17 @@ class ChatHistory:
         self._messages[start:end + 1] = replacement
 
     def compress_old_messages(self, summary: str, preserve_last: int = 2) -> None:
-        """Заменяет старые сообщения summary-сообщением (UserMessage),
-        сохраняя system prompt и последние preserve_last сообщений."""
+        """Заменяет старые сообщения summary-сообщением (одно UserMessage,
+        помеченное ENVIRONMENT_PREFIX), сохраняя system prompt и последние
+        preserve_last сообщений. Всё (включая выводы инструментов) сворачивается
+        в единственное пользовательское сообщение."""
         safe_end = len(self._messages) - preserve_last
 
         if Config.AFTER_SYSTEM_PROMPT > safe_end:
             return
 
         summary_msg = UserMessage(
-            content=f"{SUMMARY_MARKER}: Your past dialog summary with user:\n{summary}"
+            content=f"{SUMMARY_MARKER}: Your past dialog summary with user:\n{summary}\n{ENVIRONMENT_PREFIX_END}"
         )
 
         preserved = self._messages[safe_end:]

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from universal_agents.config import Config
-from universal_agents.constants import ENVIRONMENT_PREFIX
+from universal_agents.constants import ENVIRONMENT_PREFIX, ENVIRONMENT_PREFIX_END
 from universal_agents.llm_client import LLMClient
 from universal_agents.models import UserMessage
 from universal_agents.context_builder import prepare_messages_for_api, get_effective_prefill
@@ -55,6 +55,7 @@ class ConsistencyMixin:
             f"{ENVIRONMENT_PREFIX} Here are drafts from multiple reasoning paths:\n"
             + "\n".join(draft_texts)
             + "\n\n Analyse them and synthesize the finishing correct answer, paying attention to suggested tools. Output only the final synthesized answer."
+            + f"\n{ENVIRONMENT_PREFIX_END}"
         )
         synthesis_messages = messages_base + [{"role": "user", "content": synthesis_prompt}]
         current_prefill = get_effective_prefill(prefill)

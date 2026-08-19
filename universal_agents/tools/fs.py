@@ -69,7 +69,7 @@ def cwd(path: str = None):
     if path:
         try:
             os.chdir(path)
-            return f'{ENVIRONMENT_PREFIX} Successfully set cwd to {path}'
+            return f'{ENVIRONMENT_PREFIX} Successfully set cwd to {path}{ENVIRONMENT_PREFIX_END}'
         except Exception as e:
             raise RuntimeError(f"Error changing cwd: {e}")  # Было return, стало raise
     return os.getcwd()
@@ -210,10 +210,10 @@ def _read_text(path: str) -> tuple:
         with open(path, 'r', encoding='utf-8', errors='strict') as f:
             return f.read(), None
     except UnicodeDecodeError:
-        return None, f"{ENVIRONMENT_PREFIX} Error: Cannot read binary files (failed UTF-8 decode)"
+        return None, f"{ENVIRONMENT_PREFIX} Error: Cannot read binary files (failed UTF-8 decode){ENVIRONMENT_PREFIX_END}"
 
 
-def _parse_relevant_lines(lines: list[str], ranges_text: str) -> list[int]:
+def _parse_most_relevant_lines(lines: list[str], ranges_text: str) -> list[int]:
     """Разбирает '[1, 3, 5:8, 12:14]' или '1-20, 35-50' в список 1-based индексов.
 
     Диапазоны 'a:b'/'a-b' трактуются инклюзивно (конечная строка тоже сохраняется).
@@ -239,12 +239,54 @@ def _parse_relevant_lines(lines: list[str], ranges_text: str) -> list[int]:
     return sorted(k for k in kept if 1 <= k <= len(lines))
 
 
+def _extract_most_relevant_lines_text(reply: str) -> Optional[str]:
+    """Вытаскивает текст right-of-'most_relevant_lines:'/'lines:' из ответа модели."""
+    lower = reply.lower()
+    if "most_relevant_lines" in lower:
+        _, _, lines_text = reply.partition("most_relevant_lines:")
+        return lines_text
+    if "lines:" in lower:
+        _, _, lines_text = reply.partition("lines:")
+        return lines_text
+    return None
+
+
+def _ask_most_relevant_lines(agent, msgs: list) -> Optional[str]:
+    """Один вызов LLM за списком most_relevant_lines. Возвращает сырой ответ или None.
+
+    Если модель вместо текста выдаёт tool-call — инжектим запрет инструментов
+    и просим перегенерировать (до Config.ERROR_RECOVERY_RETRIES раз).
+    """
+    current = msgs
+    for _ in range(Config.ERROR_RECOVERY_RETRIES + 1):
+        msg_obj, err, usage = LLMClient.call(
+            current, prefill="REASONING:", temp=0.2, timeout=60, tools=(agent.tools if agent.tools else None)
+        )
+        if err:
+            break
+        if msg_obj and msg_obj.content and msg_obj.content.strip():
+            return msg_obj.content.strip()
+        # Модель вместо текста выдала tool-call (например пустой ?()) — как в
+        # основном цикле: инжектим запрет инструментов и просим перегенерировать.
+        correction = (
+            f"{ENVIRONMENT_PREFIX} You tried to call a tool, but tools are FORBIDDEN in this "
+            f"extraction step. Answer in PLAIN TEXT only, in the format 'most_relevant_lines: [...]'."
+            f"{ENVIRONMENT_PREFIX_END}"
+        )
+        agent.on_system_msg("[READ EXTRACT] Model returned a tool call instead of text; retrying with a tool ban...")
+        current = current + [{"role": "user", "content": correction}]
+    return None
+
+
 def _interactive_file_extract(agent, path: str, content: str, mtime: str) -> Optional[str]:
     """Спрашивает LLM, какие строки файла наиболее полезны, и сохраняет только их.
 
-    Модель отвечает одной строкой 'relevant_lines: [1, 3, 5:8, 12:14]' —
+    Модель отвечает одной строкой 'most_relevant_lines: [1, 3, 5:8, 12:14]' —
     выбранные строки вырезаются. К ним докидывается скелет от субагента
     (_summarize_file). None — если модель не дала пригодного ответа.
+
+    Если модель выбрала больше Config.RELEVANT_LINES_MAX_RATIO долей строк
+    файла — most_relevant_lines перегенерируются с инструкцией выбрать меньше.
     """
     lines = content.splitlines()
     total = len(lines)
@@ -259,12 +301,12 @@ def _interactive_file_extract(agent, path: str, content: str, mtime: str) -> Opt
         f"{ENVIRONMENT_PREFIX} The file '{path}' is {total} lines.\n"
         f"Line-numbered content:\n{numbered}"
         "Your task is to determine the most relevant lines for the current task."
-        f"The syntax for `relevant_lines`:\n"
+        f"The syntax for `most_most_relevant_lines`:\n"
         f"Use 1-based indexing. Separate single lines and ranges with commas. "
-        f"Use colon `:` for inclusive ranges (both ends kept). "
-        f"Example: `[1, 3, 5:8, 12:14]` keeps lines 1, 3, 5,6,7,8, 12,13,14."
+        f"Use `:` for inclusive ranges (both ends kept). "
+        f"Example: `most_most_relevant_lines: [1, 3, 5:8, 12:14]` means selecting lines [1,3,5,6,7,8,12,13,14].\n"
         f"Reply exactly in strict format:\n"
-        f"\"REASONING: '...' relevant_lines: '[...]'\"\n---"
+        f"\"REASONING: '...' most_most_relevant_lines: '[...]'\"\n---"
         f"Do NOT call tools or write any other free text.{ENVIRONMENT_PREFIX_END}"
     )
     if truncated:
@@ -274,38 +316,34 @@ def _interactive_file_extract(agent, path: str, content: str, mtime: str) -> Opt
     msgs = history_msgs + [{"role": "user", "content": prompt}]
     # Tools передаём ОБЯЗАТЕЛЬНО: они вшиваются в системный промпт/префикс, и без
     # них не совпадает KV-cache префикс (вызов не переиспользует кэш родителя).
-    reply = None
-    for attempt in range(Config.ERROR_RECOVERY_RETRIES + 1):
-        msg_obj, err, usage = LLMClient.call(
-            msgs, prefill="REASONING:", temp=0.2, timeout=60, tools=(agent.tools if agent.tools else None)
-        )
-        if err:
+
+    # Если модель выбрала слишком много строк — перегенерируем с инструкцией
+    # выбрать меньше, чтобы не терять выигрыш от выемки.
+    ratio_limit = Config.RELEVANT_LINES_MAX_RATIO
+    max_regen = Config.RELEVANT_LINES_REGENERATION_ATTEMPTS
+
+    kept: list[int] = []
+    for _ in range(max_regen + 1):
+        reply = _ask_most_relevant_lines(agent, msgs)
+        if reply is None:
+            return None
+        lines_text = _extract_most_relevant_lines_text(reply)
+        if lines_text is None:
+            return None
+        kept = _parse_most_relevant_lines(lines, lines_text)
+        if not kept:
+            return None
+        if len(kept) / total <= ratio_limit:
             break
-        if msg_obj and msg_obj.content and msg_obj.content.strip():
-            reply = msg_obj.content.strip()
-            break
-        # Модель вместо текста выдала tool-call (например пустой ?()) — как в
-        # основном цикле: инжектим запрет инструментов и просим перегенерировать.
-        correction = (
-            f"{ENVIRONMENT_PREFIX} You tried to call a tool, but tools are FORBIDDEN in this "
-            f"extraction step. Answer in PLAIN TEXT only, in the form 'relevant_lines: [...]'."
-        )
-        agent.on_system_msg("[READ EXTRACT] Model returned a tool call instead of text; retrying with a tool ban...")
-        msgs = msgs + [{"role": "user", "content": correction}]
+        msgs = msgs + [{"role": "user", "content": (
+            f"{ENVIRONMENT_PREFIX} You selected {len(kept)} of {total} lines "
+            f"({len(kept) / total:.0%}), exceeding the {ratio_limit:.0%} limit. "
+            f"Keep ONLY the most critical lines so the total stays at most "
+            f"{max(1, int(ratio_limit * total))} lines. "
+            f"Answer again in the same strict format: most_relevant_lines: [...]"
+            f"{ENVIRONMENT_PREFIX_END}"
+        )}]
 
-    if not reply:
-        return None
-
-    lower = reply.lower()
-    lines_text = None
-    if "relevant_lines" in lower:
-        _, _, lines_text = reply.partition("relevant_lines:")
-    elif "lines:" in lower:
-        _, _, lines_text = reply.partition("lines:")
-    if lines_text is None:
-        return None
-
-    kept = _parse_relevant_lines(lines, lines_text)
     if not kept:
         return None
 
@@ -320,6 +358,8 @@ def _interactive_file_extract(agent, path: str, content: str, mtime: str) -> Opt
         skeleton = _summarize_file(path, content, agent).strip()
         if skeleton:
             result += f"\n\n--- File skeleton ---\n{skeleton}"
+
+    result += f"\n{ENVIRONMENT_PREFIX_END}"
 
     agent.on_system_msg(f"[READ EXTRACT] Kept {len(kept)} of {total} lines from '{path}' (+ skeleton)")
     return result
@@ -391,7 +431,8 @@ def read(agent: 'LLMAgent', path: str = '.', start_line: int = None, end_line: i
                 content = (f"{ENVIRONMENT_PREFIX} File: {path}\n"
                            f"Modified: {mtime}\n"
                            f"Lines {start}-{end} of {len(lines)}:\n---\n"
-                           + ("\n".join(numbered) if numbered else ""))
+                           + ("\n".join(numbered) if numbered else "")
+                           + f"\n{ENVIRONMENT_PREFIX_END}")
                 return _read_or_skip(agent, path, raw, content)
             # Без диапазона: маленькие файлы — целиком, крупные — интерактивная выемка
             raw, read_err = _read_text(path)
@@ -400,7 +441,7 @@ def read(agent: 'LLMAgent', path: str = '.', start_line: int = None, end_line: i
             lines = raw.splitlines()
             if len(raw) <= _SUMMARY_THRESHOLD:
                 numbered = [f"{i+1} {line}" for i, line in enumerate(lines)]
-                content = f"{ENVIRONMENT_PREFIX} File: {path}\nModified: {mtime}\nContent:\n---\n" + ("\n".join(numbered) if numbered else "")
+                content = f"{ENVIRONMENT_PREFIX} File: {path}\nModified: {mtime}\nContent:\n---\n" + ("\n".join(numbered) if numbered else "") + f"\n{ENVIRONMENT_PREFIX_END}"
                 return _read_or_skip(agent, path, raw, content)
             # Интерактивная выемка: LLM сама выбирает, что сохранить, остальное удаляется
             extracted = _interactive_file_extract(agent, path, raw, mtime)
@@ -413,11 +454,12 @@ def read(agent: 'LLMAgent', path: str = '.', start_line: int = None, end_line: i
             prefix_lines = raw[:max_chars].split("\n")
             numbered = [f"{i + 1} {line}" for i, line in enumerate(prefix_lines)]
             return (f"{ENVIRONMENT_PREFIX} File: {path}\nModified: {mtime}\nTotal lines: {len(lines)}\n"
-                    f"Interactive extraction failed; showing truncated prefix. "
-                    f"To see exact code pass start_line/end_line:\n---\n"
-                    + "\n".join(numbered))
+                    f"Showing truncated prefix for memory saving. "
+                    f"To see full exact code pass start_line/end_line:\n---\n"
+                    + "\n".join(numbered)
+                    + f"\n{ENVIRONMENT_PREFIX_END}")
         elif os.path.isdir(path):
-            return f"{ENVIRONMENT_PREFIX} Directory Tree: {os.path.abspath(path)}\nModified: {mtime}\n\n{FS._build_tree(path)}"
+            return f"{ENVIRONMENT_PREFIX} Directory Tree: {os.path.abspath(path)}\nModified: {mtime}\n\n{FS._build_tree(path)}{ENVIRONMENT_PREFIX_END}"
         raise RuntimeError("Unexpected file type")
     except Exception as e:
         raise PermissionError(f"Error accessing {path}: {e}")
@@ -433,7 +475,8 @@ def _read_or_skip(agent: 'LLMAgent', path: str, raw: str, content: str) -> str:
     if agent.file_states.should_skip(path, disk_hash):
         return (f"{ENVIRONMENT_PREFIX} Error: re-reading file '{path}' is not allowed - it is unchanged "
                 f"since the last read in this session and its content is already in context. "
-                f"Do NOT call 'read' again on unchanged files; use the content you already have.")
+                f"Do NOT call 'read' again on unchanged files; use the content you already have."
+                f"{ENVIRONMENT_PREFIX_END}")
     agent.file_states.record(path, disk_hash, _content_hash(content))
     agent._read_registrations.append(path)
     return content
@@ -459,7 +502,7 @@ def search(pattern: str, path: str = ".", include: str = None, exclude: str = No
         try:
             compiled = _re.compile(pattern)
         except _re.error as e:
-            return f"{ENVIRONMENT_PREFIX} Error Invalid regex: {e}"
+            return f"{ENVIRONMENT_PREFIX} Error Invalid regex: {e}{ENVIRONMENT_PREFIX_END}"
         matcher = lambda text: compiled.search(text) is not None
     else:
         matcher = lambda text: pattern in text
@@ -482,7 +525,7 @@ def search(pattern: str, path: str = ".", include: str = None, exclude: str = No
                     continue
                 files.append(os.path.join(root, fn))
     else:
-        return f"{ENVIRONMENT_PREFIX} Error Path not found: {path}"
+        return f"{ENVIRONMENT_PREFIX} Error Path not found: {path}{ENVIRONMENT_PREFIX_END}"
 
     results = []
     total = 0
@@ -529,7 +572,7 @@ def search(pattern: str, path: str = ".", include: str = None, exclude: str = No
         results.append(f"\n{filepath}:\n" + "\n".join(formatted))
 
     if not results:
-        return f"{ENVIRONMENT_PREFIX} Error No matches found for '{pattern}'"
+        return f"{ENVIRONMENT_PREFIX} Error No matches found for '{pattern}'{ENVIRONMENT_PREFIX_END}"
 
     output = ENVIRONMENT_PREFIX + " " + f"Found {total} matches:\n" + "\n".join(results)
-    return output
+    return output + f"\n{ENVIRONMENT_PREFIX_END}"

@@ -2,8 +2,8 @@ from __future__ import annotations
 from typing import Optional, TYPE_CHECKING
 
 from universal_agents.config import Config, CHARS_PER_TOKEN, MIN_TOKENS_TO_SUMMARIZE
-from universal_agents.constants import ENVIRONMENT_PREFIX, SUMMARY_MARKER
-from universal_agents.models import UserMessage, ToolResult
+from universal_agents.constants import ENVIRONMENT_PREFIX, ENVIRONMENT_PREFIX_END, SUMMARY_MARKER
+from universal_agents.models import UserMessage, AssistantMessage, ToolResult
 from universal_agents.llm_client import LLMClient, TokenUsageTracker
 from universal_agents.context_builder import prepare_messages_for_api
 
@@ -56,6 +56,7 @@ def _dense_summarize_message(agent: LLMAgent, content: str) -> Optional[str]:
         "Try to group something if possible.\n"
         f"Remove reasoning chains and redundant filler. Do NOT generalize identifiers.\n"
         f"Output ONLY the dense structured summary.\n"
+        f"{ENVIRONMENT_PREFIX_END}"
     )
     history_msgs = [m.to_api_dict() for m in agent.history.get_all()]
     msgs = history_msgs + [{"role": "user", "content": prompt}]
@@ -87,6 +88,13 @@ def _build_from_per_message_summaries(
     for i in range(start_id, end_id):
         msg = messages[i]
         content = (msg.content or "").strip()
+        # Assistant-сообщение, которое является ЧИСТЫМ вызовом инструмента
+        # (пустой text-контент) — раньше терялось из-за `if not content: continue`.
+        # Сохраняем его, чтобы в саммари попадали и сами вызовы инструментов.
+        if isinstance(msg, AssistantMessage) and msg.has_tool_calls() and not content:
+            tcs = ", ".join(f"{tc.name}({tc.arguments})" for tc in msg.tool_calls)
+            parts.append(f"TOOL: {tcs}")
+            continue
         if not content:
             continue
         summary = agent._per_msg_summaries.get(id(msg))
@@ -97,12 +105,10 @@ def _build_from_per_message_summaries(
         if isinstance(msg, UserMessage):
             parts.append(f"USER: {content}")
         elif isinstance(msg, ToolResult):
-            parts.append(f"TOOL({msg.name}): {content}")
+            parts.append(f"RESULT: {content}")
         else:
             parts.append(f"AI: {content}")
 
-    if used_summaries == 0 or not parts:
-        return None
     return "\n\n".join(parts)
 
 
@@ -216,6 +222,7 @@ def _review_summary(
         f"Keep the summary dense, structured and complete. Do not add irrelevant noise. "
         f"Output ONLY the final summary.\n"
         f"\nDRAFT SUMMARY:\n{draft}"
+        f"\n{ENVIRONMENT_PREFIX_END}"
     )
     msgs = history_msgs + [{"role": "user", "content": review_prompt}]
     msg_obj, err, usage = LLMClient.call(msgs, temp=0.1, timeout=60, tools=(agent.tools if agent.tools else None))
@@ -257,6 +264,7 @@ def _build_draft_prompt(existing: Optional[dict] = None) -> str:
         f"KEY FACTS:\n"
         f"DECISIONS:\n"
         f"STATE / NEXT STEPS:"
+        f"\n{ENVIRONMENT_PREFIX_END}"
     )
     return prompt
 
@@ -277,6 +285,7 @@ def _draft_task_summary(
         f"Output ONLY the dense structured summary:\n"
         f"ACTIONS & DECISIONS MADE:\n"
         f"NEXT STEP:"
+        f"\n{ENVIRONMENT_PREFIX_END}"
     )
     msgs = history_msgs + [{"role": "user", "content": prompt}]
     msg_obj, err, usage = LLMClient.call(msgs, temp=0.1, timeout=60, tools=(agent.tools if agent.tools else None))
@@ -299,100 +308,13 @@ def _review_task_summary(
         f"DONE vs PENDING/next step.\n"
         f"Keep the summary dense, structured and complete. Output ONLY the final summary.\n"
         f"\nDRAFT SUMMARY:\n{draft}"
+        f"\n{ENVIRONMENT_PREFIX_END}"
     )
     msgs = history_msgs + [{"role": "user", "content": review_prompt}]
     msg_obj, err, usage = LLMClient.call(msgs, temp=0.1, timeout=60, tools=(agent.tools if agent.tools else None))
     if err or not msg_obj or not msg_obj.content:
         return None
     return msg_obj.content.strip()
-
-
-def _summarize_batch(agent: LLMAgent, full_history_msgs: list[dict], target_content: str,
-                     target_msg: Optional[dict] = None) -> Optional[str]:
-    """
-    Суммаризация одного длинного сообщения (до 2 попыток).
-    full_history_msgs + prompt(с содержимым целевого сообщения) → summary.
-    Если summary не короче оригинала после 2 попыток — возвращает None.
-    """
-    original_chars = len(target_content)
-
-    # Ограничиваем, чтобы не превратить ошибку модели в прогресс
-    cap = int(original_chars * 0.7)
-
-    for attempt in range(2):
-        # Включаем часть содержимого целевого сообщения прямо в промпт, чтобы
-        # модель точно видела, что сжимать (не полагаемся на поиск по сниппету).
-        sample = target_content[:cap]
-        prompt = (
-            f"{ENVIRONMENT_PREFIX} Summarize the single message below in a very dense detailed way. "
-            f"Preserve critical details verbatim: file paths, names, arguments, values, errors. "
-            f"Remove: reasoning chains / redundant info. "
-            f"Output ONLY the dense detailed version of the message below.\n"
-            f"\n--- TARGET MESSAGE (truncated to keep prompt short) ---\n"
-            f"{sample}\n--- END ---"
-        )
-
-        msgs = full_history_msgs + [{"role": "user", "content": prompt}]
-        msg_obj, err, usage = LLMClient.call(
-            msgs, temp=0.2 if attempt == 0 else 0.45, tools=(agent.tools if agent.tools else None),
-        )
-
-        if err or not msg_obj or not msg_obj.content:
-            if attempt == 1:
-                return None
-            continue
-
-        summary = msg_obj.content.strip()
-        if len(summary) < original_chars:
-            return summary
-
-    return None
-
-
-def _batch_summarize(
-    agent: LLMAgent, history_msgs: list[dict], full_history_msgs: list[dict],
-    existing: Optional[dict] = None,
-) -> Optional[str]:
-    """
-    Проходит по сообщениям, каждое длинное (> MIN_TOKENS_TO_SUMMARIZE)
-    суммаризирует отдельно через _summarize_batch.
-    Короткие сообщения оставляет как есть.
-    Результаты склеиваются в один текст через разделитель.
-    """
-    MIN_CHARS = int(MIN_TOKENS_TO_SUMMARIZE * CHARS_PER_TOKEN)
-
-    summarized = 0
-
-    parts: list[str] = []
-    for msg_dict in history_msgs:
-        content = msg_dict.get('content', '') or ''
-        if not content.strip():
-            continue
-
-        role = msg_dict.get('role', 'user')
-        role = role if role != 'assistant' else 'AI'
-
-        # Ранее сгенерированное авто-саммари не сжимаем повторно
-        if is_summary_message(content):
-            parts.append(f"SUMMARY: {content}")
-            continue
-
-        if len(content) >= MIN_CHARS:
-            batch = _summarize_batch(agent, full_history_msgs, content, msg_dict)
-            if batch:
-                parts.append(role + ': ' + batch)
-                summarized += 1
-                continue
-
-        parts.append(role + ': ' + content)
-
-    if summarized > 0 and parts:
-        merged = "\n\n".join(parts)
-        if existing and existing.get("body"):
-            merged = f"SUMMARY (existing, pruned): {existing['body']}\n\n{merged}"
-        return merged
-
-    return None
 
 
 def synthesize_task_goal(agent: LLMAgent, tool_name: str) -> str:
@@ -410,6 +332,7 @@ def synthesize_task_goal(agent: LLMAgent, tool_name: str) -> str:
         f"of '{tool_name}' tool for you because it's too large to fit in your memory. "
         f"After that you will only read the summary so you need to list concrete things sub-agent "
         f"must pay attention to. Output ONLY very short instruction for sub-agent."
+        f"\n{ENVIRONMENT_PREFIX_END}"
     )
 
     synthesis_messages = messages_base + [{"role": "user", "content": synthesis_prompt}]
@@ -461,6 +384,7 @@ def auto_compress_tool_result(agent: LLMAgent, tool_result: ToolResult) -> None:
         f"{ENVIRONMENT_PREFIX}\nTool result content was auto-summarized because of size. "
         f"Don't repeat call this tool with same args - you'll get same result.\n"
         f"Summary: \n{compressed_output}"
+        f"\n{ENVIRONMENT_PREFIX_END}"
     )
 
     if len(new_tool_result_content) < original_len * 0.95:

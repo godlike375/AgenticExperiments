@@ -20,7 +20,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Optional
 
 from universal_agents.config import Config
-from universal_agents.constants import ENVIRONMENT_PREFIX, SUMMARY_MARKER
+from universal_agents.constants import ENVIRONMENT_PREFIX, ENVIRONMENT_PREFIX_END, SUMMARY_MARKER
 from universal_agents.models import AssistantMessage, UserMessage, ToolResult
 from universal_agents.tool_parsing import parse_tool_args
 
@@ -44,16 +44,16 @@ def plan_leaf_sequence(plan_map: dict) -> list[str]:
 def set_plan(agent: LLMAgent, plan_list: list) -> str:
     """Обработчик make_plan. Сохраняет плоский план на агенте и возвращает порядок."""
     if not isinstance(plan_list, list) or not plan_list:
-        return f"{ENVIRONMENT_PREFIX} Error: make_plan expects a non-empty list of {{id, title}} tasks."
+        return f"{ENVIRONMENT_PREFIX} Error: make_plan expects a non-empty list of {{id, title}} tasks.{ENVIRONMENT_PREFIX_END}"
     meta: dict = {}
     for entry in plan_list:
         if not isinstance(entry, dict):
-            return f"{ENVIRONMENT_PREFIX} Error: each plan entry must be an object with 'id'."
+            return f"{ENVIRONMENT_PREFIX} Error: each plan entry must be an object with 'id'.{ENVIRONMENT_PREFIX_END}"
         tid = (str(entry.get("id", "")).strip())
         if not tid:
-            return f"{ENVIRONMENT_PREFIX} Error: each plan task needs a non-empty 'id'."
+            return f"{ENVIRONMENT_PREFIX} Error: each plan task needs a non-empty 'id'.{ENVIRONMENT_PREFIX_END}"
         if tid in meta:
-            return f"{ENVIRONMENT_PREFIX} Error: duplicate task id '{tid}' in plan."
+            return f"{ENVIRONMENT_PREFIX} Error: duplicate task id '{tid}' in plan.{ENVIRONMENT_PREFIX_END}"
         meta[tid] = {"title": str(entry.get("title", "") or "").strip()}
     agent.task_plan = list(meta.keys())
     agent.task_plan_map = meta
@@ -76,6 +76,7 @@ def set_plan(agent: LLMAgent, plan_list: list) -> str:
         f"{order_str}. Execute each task REALLY (with real tools: read/search/edit_file/run_bash "
         f"etc.) and only then mark it done with have_done, strictly in this order. "
         f"Do NOT mark a task done without actually doing it."
+        f"{ENVIRONMENT_PREFIX_END}"
     )
 
 
@@ -88,12 +89,13 @@ def mark_task_done(agent: LLMAgent, task_id: str) -> str:
     """Обработчик have_done. Информационное подтверждение (не блокирует)."""
     tid = (task_id or "").strip()
     if not tid:
-        return f"{ENVIRONMENT_PREFIX} Error: have_done requires a non-empty 'id'."
+        return f"{ENVIRONMENT_PREFIX} Error: have_done requires a non-empty 'id'.{ENVIRONMENT_PREFIX_END}"
     plan_map = getattr(agent, "task_plan_map", None) or {}
     if plan_map and tid not in plan_map:
-        return f"{ENVIRONMENT_PREFIX} Error: '{tid}' is not in the plan."
+        return f"{ENVIRONMENT_PREFIX} Error: '{tid}' is not in the plan.{ENVIRONMENT_PREFIX_END}"
     return (
         f"{ENVIRONMENT_PREFIX} Task '{tid}' marked done."
+        f"{ENVIRONMENT_PREFIX_END}"
     )
 
 
@@ -321,7 +323,7 @@ def _compact_one_group(agent: LLMAgent) -> Optional[str]:
         return None
 
     summary_msg = UserMessage(
-        content=f"{SUMMARY_MARKER} (subtask '{title}' [{leaf}] has been already done by you and marked as done so don't call have_done('{title}'):\n{summary}. Just take the next step if anything is remaining."
+        content=f"{SUMMARY_MARKER} (subtask '{title}' [{leaf}] has been already done by you and marked as done so don't call have_done('{title}'):\n{summary}. Just take the next step if anything is remaining.\n{ENVIRONMENT_PREFIX_END}"
     )
     agent.history.replace_range(start, end, [summary_msg])
     # Обрезаем раздутый summary в результате have_done: детальные факты уже
@@ -330,7 +332,7 @@ def _compact_one_group(agent: LLMAgent) -> Optional[str]:
     hd = history[done_idx] if done_idx is not None else None
     if hd is not None and not getattr(hd, 'is_error', False):
         if len(getattr(hd, 'content', '') or '') > Config.HAVE_DONE_TRIM_THRESHOLD:
-            hd.content = f"{ENVIRONMENT_PREFIX} Task '{leaf}' marked done (summary compacted)."
+            hd.content = f"{ENVIRONMENT_PREFIX} Task '{leaf}' marked done (summary compacted).{ENVIRONMENT_PREFIX_END}"
     agent.file_states.prune()
     compacted.add(leaf)
     agent.on_system_msg(

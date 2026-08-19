@@ -32,7 +32,7 @@ class Config:
     USE_RESPONSES_API = False
 
     # Автоматическая суммаризация диалога
-    AUTO_SUMMARY_THRESHOLD = 80  # процент контекста
+    AUTO_SUMMARY_THRESHOLD = 15  # процент контекста
     AUTO_SUMMARY_PRESERVE_LAST = 1  # сколько последних сообщений не трогать
     AUTO_SUMMARY_REVIEW_PASS = True  # отревьювить черновик саммари: подчистить устаревшее + добавить пропущенное
 
@@ -56,6 +56,12 @@ class Config:
     # В интерактивной выемке больших файлов к вырезанным строкам добавлять
     # структурный скелет файла (гибрид «скелет + важные строки»).
     INTERACTIVE_EXTRACT_WITH_SKELETON = True
+
+    # Максимальная доля строк файла, которую модель может выбрать в most_relevant_lines
+    # (от общего числа строк). Если модель выбрала больше — most_relevant_lines
+    # перегенерируется с инструкцией выбрать меньше.
+    RELEVANT_LINES_MAX_RATIO = 0.8
+    RELEVANT_LINES_REGENERATION_ATTEMPTS = 2
 
     # Отключает автоматическую суммаризацию большого вывода любых инструментов
     DISABLE_TOOL_AUTO_SUMMARIZATION = True
