@@ -6,6 +6,8 @@ class Config:
     BOOST_TEMP = 1.5
     ERROR_RECOVERY_TEMP = 1
     MAX_LOOP_RETRIES = 2  # попыток перегенерации при повторяющемся вызове/ответе
+    # Порог Jaccard-схожести по множеству слов для признания текстового ответа повтором.
+    DUPLICATE_SIMILARITY_THRESHOLD = 0.7
     ERROR_RECOVERY_RETRIES = 1  # попыток перегенерации после ошибки инструмента
     BROKEN_CALL_REGEN_RETRIES = 2  # попыток перегенерации при обнаружении сломанного вызова
     BROKEN_CALL_FIX_RETRIES = 2    # попыток «починить» вызов через промпт после неудачной регенерации

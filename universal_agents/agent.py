@@ -5,7 +5,7 @@ from typing import Union, Callable, Optional
 from universal_agents.constants import ENVIRONMENT_PREFIX, ENVIRONMENT_PREFIX_END
 from universal_agents.config import Config
 from universal_agents.models import UserMessage
-from universal_agents.llm_client import LLMClient, TokenUsageTracker, LoopDetector
+from universal_agents.llm_client import LLMClient, TokenUsageTracker, LoopDetector, jaccard_similarity
 from universal_agents.history import ChatHistory
 from universal_agents.generation import GenerationParams
 from universal_agents.tool_manager import ToolManager
@@ -229,7 +229,13 @@ class LLMAgent(
             else:
                 answer_text = (message_obj.content or "").strip()
                 prev_answer = self._get_last_answer_text()
-                if answer_text and prev_answer and answer_text == prev_answer:
+                is_duplicate = (
+                    answer_text
+                    and prev_answer
+                    and jaccard_similarity(answer_text, prev_answer)
+                    >= Config.DUPLICATE_SIMILARITY_THRESHOLD
+                )
+                if is_duplicate:
                     last_retry_warning = (
                         f"\n\n{ENVIRONMENT_PREFIX} Your previous answer was the same to the latest one. "
                         f"Please do NOT repeat it again and answer differently."

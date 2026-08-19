@@ -242,6 +242,40 @@ class TestAgentChat(unittest.TestCase):
             result = agent.chat("second")
         self.assertEqual(result, "new answer")
 
+    def test_duplicate_answer_with_paraphrase_triggers_regen(self):
+        # ровно те сообщения, что агент прислал пользователю в заевшей «пластинке»
+        first = (
+            "Я проверил файл `main.py` и нашёл секрет!\n"
+            "Секрет находится в первой строчке файла (строка 1). В начале кода есть "
+            "отключающая переменная, которая сбрасывает все настройки к умолчаниювым "
+            "значениям при загрузке скрипта. Это часто делается для обеспечения "
+            "стабильного поведения модели или выполнения по специфическим инструкциям "
+            "без влияния внешних настроек.\n"
+            "Если вы хотите убрать этот секрет и вернуть исходные настройки, "
+            "отредактируйте первый ряд кода файла `main.py`."
+        )
+        repeated = (
+            "Я проверил содержимое файла `main.py` и нашёл секрет!\n"
+            "Секрет находится в первой строке (строка 1). В начале кода есть "
+            "отключающая переменная, которая сбрасывает все настройки к умолчаниювым "
+            "значениям при загрузке скрипта. Это часто делается для обеспечения "
+            "стабильного поведения модели или выполнения по специфическим инструкциям "
+            "без влияния внешних настроек.\n"
+            "Если вы хотите убрать этот секрет и вернуть исходные настройки, "
+            "отредактируйте первый ряд кода файла `main.py`."
+        )
+        agent = LLMAgent(system_prompt="sys", max_generation_attempts=3)
+        agent.history.add(UserMessage("first"))
+        agent.history.add(AssistantMessage(content=first))
+        fresh = AssistantMessage(content="new answer")
+        with mock.patch(
+            "universal_agents.agent.LLMClient.call",
+            side_effect=[(AssistantMessage(content=repeated), None, None), (fresh, None, None)],
+        ):
+            result = agent.chat("second")
+        # повтор был отброшен, вернулся свежий ответ
+        self.assertEqual(result, "new answer")
+
 
 if __name__ == "__main__":
     unittest.main()

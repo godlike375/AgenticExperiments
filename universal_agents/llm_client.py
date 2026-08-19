@@ -5,6 +5,20 @@ from universal_agents.generation import GenerationParams
 from universal_agents.tool_parsing import normalize_args
 
 
+def jaccard_similarity(a: str, b: str) -> float:
+    """Доля пересечения множеств слов (Jaccard) двух текстов.
+
+    a == b (по словам) => 1.0; без общих слов => 0.0.
+    """
+    set_a = set(a.split())
+    set_b = set(b.split())
+    if not set_a and not set_b:
+        return 1.0
+    if not set_a or not set_b:
+        return 0.0
+    return len(set_a & set_b) / len(set_a | set_b)
+
+
 def build_usage_dict(prompt_tokens: int, completion_tokens: int, total_tokens: Optional[int] = None) -> dict:
     """Собирает usage-словарь в едином формате для агента."""
     if total_tokens is None:
