@@ -297,9 +297,16 @@ def _interactive_file_extract(agent, path: str, content: str, mtime: str) -> Opt
     snippet = content[:max_chars]
     numbered = "\n".join(f"{i + 1} {line}" for i, line in enumerate(snippet.split("\n")))
 
+    # Скелет строится ПЕРВЫМ (субагент) и затем используется как общий контекст
+    # при выборе most_relevant_lines — модель опирается на структуру файла.
+    skeleton = ""
+    if Config.INTERACTIVE_EXTRACT_WITH_SKELETON:
+        skeleton = _summarize_file(path, content, agent).strip()
+
     prompt = (
         f"{ENVIRONMENT_PREFIX} The file '{path}' is {total} lines.\n"
-        f"Line-numbered content:\n{numbered}"
+        f"File skeleton (structural overview):\n{skeleton}\n\n"
+        "Line-numbered content:\n{numbered}"
         "Your task is to determine the most relevant lines for the current task."
         f"The syntax for `most_most_relevant_lines`:\n"
         f"Use 1-based indexing. Separate single lines and ranges with commas. "
@@ -336,10 +343,11 @@ def _interactive_file_extract(agent, path: str, content: str, mtime: str) -> Opt
         if len(kept) / total <= ratio_limit:
             break
         msgs = msgs + [{"role": "user", "content": (
-            f"{ENVIRONMENT_PREFIX} You selected {len(kept)} of {total} lines "
-            f"({len(kept) / total:.0%}), exceeding the {ratio_limit:.0%} limit. "
-            f"Keep ONLY the most critical lines so the total stays at most "
-            f"{max(1, int(ratio_limit * total))} lines. "
+            f"{ENVIRONMENT_PREFIX} Your previous selection was: most_relevant_lines: {kept}. "
+            f"It selected {len(kept)} of {total} lines ({len(kept) / total:.0%}), exceeding the "
+            f"{ratio_limit:.0%} limit. Try to REDUCE the ranges or the number of most relevant lines "
+            f"so the total stays at most {max(1, int(ratio_limit * total))} lines. "
+            f"Keep ONLY the most critical lines. "
             f"Answer again in the same strict format: most_relevant_lines: [...]"
             f"{ENVIRONMENT_PREFIX_END}"
         )}]
@@ -353,11 +361,9 @@ def _interactive_file_extract(agent, path: str, content: str, mtime: str) -> Opt
               f"Kept lines ({len(kept)}/{total}):\n---\n"
               + "\n".join(kept_lines))
 
-    # Скелет от субагента — отдельный, качественный, склеиваем с важными строками.
-    if Config.INTERACTIVE_EXTRACT_WITH_SKELETON:
-        skeleton = _summarize_file(path, content, agent).strip()
-        if skeleton:
-            result += f"\n\n--- File skeleton ---\n{skeleton}"
+    # Скелет уже построен выше и участвовал в выборе строк; в итог добавляем его тоже.
+    if skeleton:
+        result += f"\n\n--- File skeleton ---\n{skeleton}"
 
     result += f"\n{ENVIRONMENT_PREFIX_END}"
 

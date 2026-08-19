@@ -60,7 +60,7 @@ class Config:
     # Максимальная доля строк файла, которую модель может выбрать в most_relevant_lines
     # (от общего числа строк). Если модель выбрала больше — most_relevant_lines
     # перегенерируется с инструкцией выбрать меньше.
-    RELEVANT_LINES_MAX_RATIO = 0.8
+    RELEVANT_LINES_MAX_RATIO = 0.85
     RELEVANT_LINES_REGENERATION_ATTEMPTS = 2
 
     # Отключает автоматическую суммаризацию большого вывода любых инструментов
