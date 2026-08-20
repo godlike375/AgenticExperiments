@@ -91,10 +91,12 @@ class ExecuteMixin:
                     # (most_relevant_lines со скелетом либо усечённый префикс при
                     # провале выемки) — не даём пер-сообщенческой суммаризации
                     # сжимать его повторно.
-                    if name == 'read' and _read_result_already_compressed(content):
+                    is_range_read = name == 'read' and (args_dict.get('start_line') is not None or args_dict.get('end_line') is not None)
+                    if name == 'read' and (_read_result_already_compressed(content) or is_range_read):
                         tr.skip_summarize = True
 
-                auto_compress_tool_result(self, tr)
+                if not getattr(tr, 'skip_summarize', False):
+                    auto_compress_tool_result(self, tr)
                 results.append(tr)
             except Exception as e:
                 self.on_system_msg(f"⚠️ [ERROR] Tool '{name}' FAILED: {e}")

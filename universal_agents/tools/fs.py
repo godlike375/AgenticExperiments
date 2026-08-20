@@ -69,23 +69,24 @@ def cwd(path: str = None):
     if path:
         try:
             os.chdir(path)
-            return f'{ENVIRONMENT_PREFIX} Successfully set cwd to {path}{ENVIRONMENT_PREFIX_END}'
+            return f'{ENVIRONMENT_PREFIX} Has set cwd to {path}{ENVIRONMENT_PREFIX_END}'
         except Exception as e:
             raise RuntimeError(f"Error changing cwd: {e}")  # Было return, стало raise
     return os.getcwd()
 
 @tool(
-    description="Exact-string replacer in file. Creates file with parent dirs if it doesn't exist",
+    description="Edits a file by line range: replaces the 1-based inclusive lines start_line..end_line with 'new'. Creates file with parent dirs if it doesn't exist",
     short_description="edit file text",
     requires_confirmation=True,
     path=("str", "File path. Will be auto-created if missing"),
-    old=("str", "Exact text to replace. Supports \\n for multiline blocks. If '' or nothing passed then replaces whole content. For new files use '' to set initial content"),
-    new=("str", "New text to replace the old with. Also supports \\n"),
-    mode=("str", "'one' for 1 exclusive match, otherwise 'all' (default 'one')")
+    #old=("str", "Exact text to replace. Supports \\n for multiline blocks. If '' or nothing passed then replaces whole content. For new files use '' to set initial content"),
+    new=("str", "New text to replace the range with. Supports \\n. Be careful with indentation in the range."),
+    #mode=("str", "'one' for 1 exclusive match, otherwise 'all' (default 'one')")
+    start_line=("int", "1-based inclusive start line of the range to replace with 'new'. Default 1"),
+    end_line=("int", "1-based inclusive end line of the range to replace with 'new'. If omitted: end of file when start_line omitted too, else a single line at start_line")
 )
-def edit_file(path: str, new: str, old: str = '', mode: str = "one"):
+def edit_file(path: str, new: str, start_line: int = None, end_line: int = None):
     created_file = False
-    m_mode = mode.strip().lower()
     if not os.path.isfile(path):
         # Создаём файл, если его нет
         try:
@@ -99,103 +100,143 @@ def edit_file(path: str, new: str, old: str = '', mode: str = "one"):
     with open(path, "r", encoding="utf-8") as f:
         content = f.read()
 
-    if old == '':
-        new_content = new
+    # Режим по номерам строк: заменяем строки [start_line..end_line] (1-based,
+    # инклюзивно) на 'new'. Конечные символы '\n' строк старого диапазона
+    # отбрасываются; 'new' записывается как есть (без автоматического '\n').
+    lines = content.splitlines()
+    start = max(1, start_line if start_line is not None else 1)
+    if end_line is None:
+        end = len(lines) if start_line is None else start
     else:
-        matches = []
-        idx = 0
-        search_len = max(len(old), 1)
-        while True:
-            pos = content.find(old, idx)
-            if pos == -1:
-                break
-            matches.append(pos)
-            idx = pos + search_len
+        end = end_line
+    if end < 0:
+        end = len(lines) + end
+    end = max(start, min(end, len(lines)))
 
-        if not matches:
-            raise ValueError("No matches found for old substring. Try again with different argument")
+    replaced_lines = lines[start - 1:end]
+    old_block = "\n".join(replaced_lines)
 
-        if m_mode == "one" and len(matches) > 1:
-            raise ValueError(
-                f"Found {len(matches)} matches. Make old substring more specific or use mode='all'."
-            )
+    head = lines[:start - 1]
+    tail = lines[end:]
 
-        new_content = content
-        for pos in reversed(matches):
-            new_content = new_content[:pos] + new + new_content[pos + len(old):]
+    new_clean = new.rstrip('\n')
+    if head or tail:
+        new_content = "\n".join(head + [new_clean] + tail)
+    else:
+        new_content = new_clean
 
-    try:
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(new_content)
-    except Exception as e:
-        raise RuntimeError(f"Write failed: {e}")
+    if new_content == content:
+        return f"Nothing changed: lines {start}..{end} already equal to '{new[:20]}...'"
 
-    # Дальше формирование красивого diff без изменений
-    if old == '' and not created_file:
-        return f"File fully replaced with '{new[:20]}...'"
-    elif old == '' and created_file:
-        return f"File created with content '{new[:20]}...'"
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(new_content)
 
-    if m_mode == "one":
-        old_lines = content.splitlines(keepends=True)
-        new_lines = new_content.splitlines(keepends=True)
+    result = [f"Replaced lines {start}-{end} with:"]
+    for line in old_block.splitlines():
+        result.append(f"   - {line}")
+    result.append("---")
+    for line in new_clean.splitlines():
+        result.append(f"   + {line}")
 
-        diff = list(difflib.unified_diff(
-            old_lines, new_lines,
-            fromfile='', tofile='',
-            lineterm="",
-            n=1
-        ))
+    return "\n".join(result)
 
-        diff_lines = [line for line in diff
-                      if not line.startswith('---')
-                      and not line.startswith('+++')
-                      and not line.startswith('@@')]
-
-        result = ["Successfully replaced:"]
-
-        pos = matches[0]
-        start_line = content[:pos].count('\n') - 1
-        if start_line < 0:
-            start_line = 0
-
-        current_line = start_line
-
-        for line in diff_lines:
-            stripped = line[2:].rstrip('\n') if len(line) > 2 else line.rstrip('\n')
-
-            if line.startswith('  '):
-                result.append(f"{current_line:2d}   {stripped}")
-            elif line.startswith('- '):
-                result.append(f"{current_line:2d} - {stripped}")
-                current_line += 1
-            elif line.startswith('+ '):
-                result.append(f"   + {stripped}")
-            else:
-                result.append(f"{current_line:2d}   {stripped}")
-                current_line += 1
-
-        return "\n".join(result)
-
-    # Режим 'all'
-    lines = content.splitlines(True)
-    display_limit = min(len(matches), 3)
-    preview = [f"Successfully replaced {len(matches)} matches:\n"]
-
-    for i, pos in enumerate(matches[:display_limit]):
-        safe = content[pos:pos+len(old)].replace('\n', '\\n').replace('\t', '\\t')[:40]
-        ls = content[:pos].count('\n')
-        ws, we = max(0, ls - 1), min(len(lines), ls + 2)
-
-        preview.append(f"{i+1}. `{safe}` in:")
-        for ln in range(ws, we):
-            preview.append(f"     {lines[ln].rstrip()}")
-        preview.append("---")
-
-    if len(matches) > display_limit:
-        preview.append(f"... and {len(matches) - display_limit} more matches.")
-
-    return "\n".join(preview)
+#     if old == '':
+#         new_content = new
+#     else:
+#         matches = []
+#         idx = 0
+#         search_len = max(len(old), 1)
+#         while True:
+#             pos = content.find(old, idx)
+#             if pos == -1:
+#                 break
+#             matches.append(pos)
+#             idx = pos + search_len
+#
+#         if not matches:
+#             raise ValueError("No matches found for old substring. Try again with different argument")
+#
+#         if m_mode == "one" and len(matches) > 1:
+#             raise ValueError(
+#                 f"Found {len(matches)} matches. Make old substring more specific or use mode='all'."
+#             )
+#
+#         new_content = content
+#         for pos in reversed(matches):
+#             new_content = new_content[:pos] + new + new_content[pos + len(old):]
+#
+#     try:
+#         with open(path, "w", encoding="utf-8") as f:
+#             f.write(new_content)
+#     except Exception as e:
+#         raise RuntimeError(f"Write failed: {e}")
+#
+#     # Дальше формирование красивого diff без изменений
+#     if old == '' and not created_file:
+#         return f"File fully replaced with '{new[:20]}...'"
+#     elif old == '' and created_file:
+#         return f"File created with content '{new[:20]}...'"
+#
+#     if m_mode == "one":
+#         old_lines = content.splitlines(keepends=True)
+#         new_lines = new_content.splitlines(keepends=True)
+#
+#         diff = list(difflib.unified_diff(
+#             old_lines, new_lines,
+#             fromfile='', tofile='',
+#             lineterm="",
+#             n=1
+#         ))
+#
+#         diff_lines = [line for line in diff
+#                       if not line.startswith('---')
+#                       and not line.startswith('+++')
+#                       and not line.startswith('@@')]
+#
+#         result = ["Successfully replaced:"]
+#
+#         pos = matches[0]
+#         start_line = content[:pos].count('\n') - 1
+#         if start_line < 0:
+#             start_line = 0
+#
+#         current_line = start_line
+#
+#         for line in diff_lines:
+#             stripped = line[2:].rstrip('\n') if len(line) > 2 else line.rstrip('\n')
+#
+#             if line.startswith('  '):
+#                 result.append(f"{current_line:2d}   {stripped}")
+#             elif line.startswith('- '):
+#                 result.append(f"{current_line:2d} - {stripped}")
+#                 current_line += 1
+#             elif line.startswith('+ '):
+#                 result.append(f"   + {stripped}")
+#             else:
+#                 result.append(f"{current_line:2d}   {stripped}")
+#                 current_line += 1
+#
+#         return "\n".join(result)
+#
+#     # Режим 'all'
+#     lines = content.splitlines(True)
+#     display_limit = min(len(matches), 3)
+#     preview = [f"Successfully replaced {len(matches)} matches:\n"]
+#
+#     for i, pos in enumerate(matches[:display_limit]):
+#         safe = content[pos:pos+len(old)].replace('\n', '\\n').replace('\t', '\\t')[:40]
+#         ls = content[:pos].count('\n')
+#         ws, we = max(0, ls - 1), min(len(lines), ls + 2)
+#
+#         preview.append(f"{i+1}. `{safe}` in:")
+#         for ln in range(ws, we):
+#             preview.append(f"     {lines[ln].rstrip()}")
+#         preview.append("---")
+#
+#     if len(matches) > display_limit:
+#         preview.append(f"... and {len(matches) - display_limit} more matches.")
+#
+#     return "\n".join(preview)
 
 
 CHARS_PER_TOKEN = Config.CHARS_PER_TOKEN
@@ -214,9 +255,10 @@ def _read_text(path: str) -> tuple:
 
 
 def _parse_most_relevant_lines(lines: list[str], ranges_text: str) -> list[int]:
-    """Разбирает '[1, 3, 5:8, 12:14]' или '1-20, 35-50' в список 1-based индексов.
+    """Разбирает '5:8, 12:14' или '5-8, 12-14' в список 1-based индексов.
 
-    Диапазоны 'a:b'/'a-b' трактуются инклюзивно (конечная строка тоже сохраняется).
+    Поддерживаются ТОЛЬКО диапазоны 'a:b'/'a-b' (инклюзивно — конечная строка
+    тоже сохраняется). Одиночные числа игнорируются.
     """
     inner = (ranges_text or "").replace('[', ',').replace(']', ',').replace(';', ',')
     kept: set[int] = set()
@@ -229,11 +271,6 @@ def _parse_most_relevant_lines(lines: list[str], ranges_text: str) -> list[int]:
             try:
                 a, b = token.split(sep, 1)
                 kept.update(range(int(a.strip()), int(b.strip()) + 1))
-            except ValueError:
-                continue
-        else:
-            try:
-                kept.add(int(token))
             except ValueError:
                 continue
     return sorted(k for k in kept if 1 <= k <= len(lines))
@@ -281,7 +318,7 @@ def _ask_most_relevant_lines(agent, msgs: list) -> Optional[str]:
 def _interactive_file_extract(agent, path: str, content: str, mtime: str) -> Optional[str]:
     """Спрашивает LLM, какие строки файла наиболее полезны, и сохраняет только их.
 
-    Модель отвечает одной строкой 'most_relevant_lines: [1, 3, 5:8, 12:14]' —
+    Модель отвечает одной строкой 'most_relevant_lines: [5:8, 12:14]' —
     выбранные строки вырезаются. К ним докидывается скелет от субагента
     (_summarize_file). None — если модель не дала пригодного ответа.
 
@@ -308,12 +345,11 @@ def _interactive_file_extract(agent, path: str, content: str, mtime: str) -> Opt
         f"File skeleton (structural overview):\n{skeleton}\n\n"
         "Line-numbered content:\n{numbered}"
         "Your task is to determine the most relevant lines for the current task."
-        f"The syntax for `most_most_relevant_lines`:\n"
-        f"Use 1-based indexing. Separate single lines and ranges with commas. "
-        f"Use `:` for inclusive ranges (both ends kept). "
-        f"Example: `most_most_relevant_lines: [1, 3, 5:8, 12:14]` means selecting lines [1,3,5,6,7,8,12,13,14].\n"
+        f"The syntax for `most_relevant_lines`:\n"
+        f"Use 1-based indexing. Specify inclusive ranges with `:` or `-` (both ends kept). Separate ranges with commas. "
+        f"Example: `most_relevant_lines: [5:7, 12-14]` means selecting lines [5,6,7,12,13,14].\n"
         f"Reply exactly in strict format:\n"
-        f"\"REASONING: '...' most_most_relevant_lines: '[...]'\"\n---"
+        f"\"REASONING: '...' most_relevant_lines: '[...]'\"\n---"
         f"Do NOT call tools or write any other free text.{ENVIRONMENT_PREFIX_END}"
     )
     if truncated:
@@ -436,7 +472,7 @@ def read(agent: 'LLMAgent', path: str = '.', start_line: int = None, end_line: i
                 numbered = [f"{start + i} {line}" for i, line in enumerate(selected)]
                 content = (f"{ENVIRONMENT_PREFIX} File: {path}\n"
                            f"Modified: {mtime}\n"
-                           f"Lines {start}-{end} of {len(lines)}:\n---\n"
+                           f"Lines {start}-{end}/{len(lines)}:\n---\n"
                            + ("\n".join(numbered) if numbered else "")
                            + f"\n{ENVIRONMENT_PREFIX_END}")
                 return _read_or_skip(agent, path, raw, content)
