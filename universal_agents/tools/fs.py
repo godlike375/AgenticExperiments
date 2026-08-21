@@ -347,7 +347,7 @@ def _interactive_file_extract(agent, path: str, content: str, mtime: str) -> Opt
         "Your task is to determine the most relevant lines for the current task."
         f"The syntax for `most_relevant_lines`:\n"
         f"Use 1-based indexing. Specify inclusive ranges with `:` or `-` (both ends kept). Separate ranges with commas. "
-        f"Example: `most_relevant_lines: [5:7, 12-14]` means selecting lines [5,6,7,12,13,14].\n"
+        f"Example: `most_relevant_lines: [5:7, 12-14]` means selecting lines 5-7, 12-14.\n"
         f"Reply exactly in strict format:\n"
         f"\"REASONING: '...' most_relevant_lines: '[...]'\"\n---"
         f"Do NOT call tools or write any other free text.{ENVIRONMENT_PREFIX_END}"
@@ -419,8 +419,8 @@ def _summarize_file(path: str, content: str, agent) -> str:
 
     specialist_instructions = (
         f"{ENVIRONMENT_PREFIX} NOW IGNORE previous instructions! Act as SkeletonGenerator agent. "
-        "Respond only in tags '<skeleton>' with a very short compact and concise skeleton with the most top-level identifiers and their EXACT "
-        "line numbered ranges. NO COMMS!"
+        "Respond only in tags '<skeleton>' with a very short, compact, concise skeleton with the most top-level identifiers and their EXACT "
+        "line numbered ranges (for example `def func() L1-10`. NO COMMS!"
     )
 
     task = (
