@@ -240,18 +240,35 @@ class ChatHistory:
         """Заменяет старые сообщения summary-сообщением (одно UserMessage,
         помеченное ENVIRONMENT_PREFIX), сохраняя system prompt и последние
         preserve_last сообщений. Всё (включая выводы инструментов) сворачивается
-        в единственное пользовательское сообщение."""
+        в единственное пользовательское сообщение.
+
+        Если граница режет пару «ассистент вызвал инструмент -> ToolResult»
+        (первое сохранённое сообщение — ToolResult, а вызвавший его ассистент
+        оказывается в свёрнутой области), границу сдвигаем назад, чтобы сохранить
+        ассистента вместе с его ToolResult. Иначе ToolResult остаётся без
+        предшествующего вызова (invalid для API и теряется в normalize())."""
         safe_end = len(self._messages) - preserve_last
 
         if Config.AFTER_SYSTEM_PROMPT > safe_end:
             return
 
+        msgs = self._messages
+        # Сдвигаем границу назад, пока первое сохраняемое сообщение — ToolResult,
+        # а непосредственно перед ним — ассистент с вызовами инструментов.
+        while (
+            safe_end > Config.AFTER_SYSTEM_PROMPT
+            and isinstance(msgs[safe_end], ToolResult)
+            and isinstance(msgs[safe_end - 1], AssistantMessage)
+            and msgs[safe_end - 1].has_tool_calls()
+        ):
+            safe_end -= 1
+
         summary_msg = UserMessage(
             content=f"{SUMMARY_MARKER}: Your past dialog summary with user:\n{summary}\n{ENVIRONMENT_PREFIX_END}"
         )
 
-        preserved = self._messages[safe_end:]
+        preserved = msgs[safe_end:]
         for msg in preserved:
             if isinstance(msg, UserMessage):
                 msg._cached_header = None
-        self._messages = [self._messages[0], summary_msg] + preserved
+        self._messages = [msgs[0], summary_msg] + preserved

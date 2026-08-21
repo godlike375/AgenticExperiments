@@ -255,30 +255,48 @@ def _read_text(path: str) -> tuple:
 
 
 def _parse_most_relevant_lines(lines: list[str], ranges_text: str) -> list[int]:
-    """Разбирает '5:8, 12:14' или '5-8, 12-14' в список 1-based индексов.
+    """Разбирает диапазоны строк в список 1-based индексов.
 
-    Поддерживаются ТОЛЬКО диапазоны 'a:b'/'a-b' (инклюзивно — конечная строка
-    тоже сохраняется). Одиночные числа игнорируются.
+    Поддерживаются ТОЛЬКО инклюзивные диапазоны 'a:b'/'a-b' (конечная строка
+    тоже сохраняется). Одиночные числа и прочий мусор игнорируются.
+    Диапазоны могут быть разделены запятыми, точками с запятой, пробелами
+    или переносами строк (как в формате одна строка = один диапазон).
     """
-    inner = (ranges_text or "").replace('[', ',').replace(']', ',').replace(';', ',')
+    inner = (ranges_text or "")
+    for ch in ('[', ']', ';', ',', '\n', '\r', '\t'):
+        inner = inner.replace(ch, ' ')
     kept: set[int] = set()
-    for token in inner.split(','):
+    for token in inner.split():
         token = token.strip()
         if not token:
             continue
         sep = ':' if ':' in token else ('-' if '-' in token else None)
-        if sep:
-            try:
+        try:
+            if sep:
                 a, b = token.split(sep, 1)
                 kept.update(range(int(a.strip()), int(b.strip()) + 1))
-            except ValueError:
+            else:
                 continue
+        except ValueError:
+            continue
     return sorted(k for k in kept if 1 <= k <= len(lines))
 
 
 def _extract_most_relevant_lines_text(reply: str) -> Optional[str]:
-    """Вытаскивает текст right-of-'most_relevant_lines:'/'lines:' из ответа модели."""
+    """Вытаскивает текст диапазонов из ответа модели.
+
+    Сначала ищет содержимое тега <most_relevant_lines>...</most_relevant_lines>;
+    если тега нет — берёт всё правее 'most_relevant_lines:'/'lines:' (обратная
+    совместимость со старым форматом).
+    """
     lower = reply.lower()
+    tag_open = "<most_relevant_lines>"
+    tag_close = "</most_relevant_lines>"
+    if tag_open in lower:
+        start = lower.index(tag_open) + len(tag_open)
+        rest = lower[start:]
+        end = start + rest.index(tag_close) if tag_close in rest else len(reply)
+        return reply[start:end]
     if "most_relevant_lines" in lower:
         _, _, lines_text = reply.partition("most_relevant_lines:")
         return lines_text
@@ -297,8 +315,10 @@ def _ask_most_relevant_lines(agent, msgs: list) -> Optional[str]:
     current = msgs
     for _ in range(Config.ERROR_RECOVERY_RETRIES + 1):
         msg_obj, err, usage = LLMClient.call(
-            current, prefill="REASONING:", temp=0.2, timeout=60, tools=(agent.tools if agent.tools else None)
+            current, prefill="<most_relevant_lines>", temp=Config.TEMP, timeout=Config.TIMEOUT, tools=(agent.tools if agent.tools else None)
         )
+        if usage:
+            agent.token_tracker.update_from_usage(usage)
         if err:
             break
         if msg_obj and msg_obj.content and msg_obj.content.strip():
@@ -307,10 +327,10 @@ def _ask_most_relevant_lines(agent, msgs: list) -> Optional[str]:
         # основном цикле: инжектим запрет инструментов и просим перегенерировать.
         correction = (
             f"{ENVIRONMENT_PREFIX} You tried to call a tool, but tools are FORBIDDEN in this "
-            f"extraction step. Answer in PLAIN TEXT only, in the format 'most_relevant_lines: [...]'."
+            f"extraction step. Answer in PLAIN TEXT only, in the required format."
             f"{ENVIRONMENT_PREFIX_END}"
         )
-        agent.on_system_msg("[READ EXTRACT] Model returned a tool call instead of text; retrying with a tool ban...")
+        agent.on_system_msg("[READ EXTRACT] Model returned a tool call instead of text; retrying with a tool ban prompt...")
         current = current + [{"role": "user", "content": correction}]
     return None
 
@@ -342,15 +362,14 @@ def _interactive_file_extract(agent, path: str, content: str, mtime: str) -> Opt
 
     prompt = (
         f"{ENVIRONMENT_PREFIX} The file '{path}' is {total} lines.\n"
-        f"File skeleton (structural overview):\n{skeleton}\n\n"
-        "Line-numbered content:\n{numbered}"
-        "Your task is to determine the most relevant lines for the current task."
-        f"The syntax for `most_relevant_lines`:\n"
-        f"Use 1-based indexing. Specify inclusive ranges with `:` or `-` (both ends kept). Separate ranges with commas. "
-        f"Example: `most_relevant_lines: [5:7, 12-14]` means selecting lines 5-7, 12-14.\n"
-        f"Reply exactly in strict format:\n"
-        f"\"REASONING: '...' most_relevant_lines: '[...]'\"\n---"
-        f"Do NOT call tools or write any other free text.{ENVIRONMENT_PREFIX_END}"
+        f"File content structure:\n{skeleton}\n\n"
+        f"Line-numbered content:\n{numbered}"
+        "Your task is to determine the most relevant lines for the current task. "
+        "Put the selected INCLUSIVE line ranges INSIDE an XML tag, one range per line "
+        "(use 'start-end', both ends kept; whitespace and commas between ranges are fine). Example:\n"
+        "<most_relevant_lines>\n5-7\n12-14\n</most_relevant_lines>\n"
+        "Do NOT call tools."
+        f"{ENVIRONMENT_PREFIX_END}"
     )
     if truncated:
         prompt += "\n\n(File is truncated due to remaining memory)"
@@ -379,12 +398,11 @@ def _interactive_file_extract(agent, path: str, content: str, mtime: str) -> Opt
         if len(kept) / total <= ratio_limit:
             break
         msgs = msgs + [{"role": "user", "content": (
-            f"{ENVIRONMENT_PREFIX} Your previous selection was: most_relevant_lines: {kept}. "
-            f"It selected {len(kept)} of {total} lines ({len(kept) / total:.0%}), exceeding the "
-            f"{ratio_limit:.0%} limit. Try to REDUCE the ranges or the number of most relevant lines "
-            f"so the total stays at most {max(1, int(ratio_limit * total))} lines. "
-            f"Keep ONLY the most critical lines. "
-            f"Answer again in the same strict format: most_relevant_lines: [...]"
+            f"{ENVIRONMENT_PREFIX} Your previous selection was too large "
+            f"({len(kept)} of {total} lines, {len(kept) / total:.0%} > {ratio_limit:.0%}). "
+            f"REDUCE to at most {max(1, int(ratio_limit * total))} lines, keep ONLY the most critical. "
+            f"Reply again with the same tag format, one range per line:\n"
+            f"<most_relevant_lines>\n5-7\n12-14\n</most_relevant_lines>"
             f"{ENVIRONMENT_PREFIX_END}"
         )}]
 
@@ -392,7 +410,7 @@ def _interactive_file_extract(agent, path: str, content: str, mtime: str) -> Opt
         return None
 
     kept_lines = [f"{i} {lines[i - 1]}" for i in kept]
-    result = (f"{ENVIRONMENT_PREFIX} Most important file lines (for memory saving): ...\n"
+    result = (f"{ENVIRONMENT_PREFIX} Most relevant file lines: ...\n"
               f"{ENVIRONMENT_PREFIX} File: {path}\nModified: {mtime}\nTotal lines: {total}\n"
               f"Kept lines ({len(kept)}/{total}):\n---\n"
               + "\n".join(kept_lines))
@@ -417,17 +435,10 @@ def _summarize_file(path: str, content: str, agent) -> str:
         temp=0.2,
     )
 
-    specialist_instructions = (
-        f"{ENVIRONMENT_PREFIX} NOW IGNORE previous instructions! Act as SkeletonGenerator agent. "
-        "Respond only in tags '<skeleton>' with a very short, compact, concise skeleton with the most top-level identifiers and their EXACT "
-        "line numbered ranges (for example `def func() L1-10`. NO COMMS!"
-    )
-
     task = (
-        f"{specialist_instructions}\n\n"
-        "The skeleton includes top-level elements (signatures of functions, classes, methods defined right in this file)"
-        " and precise line number ranges for each element\n"
-        f"Now skeletonize it!{ENVIRONMENT_PREFIX_END}"
+        f"{ENVIRONMENT_PREFIX} NOW IGNORE previous instructions! Act as file content structure summarizer. "
+        "Answer starting with tag <content_structure> with a very short compact content structure summary (like in books) of top-level items (signatures of classes, functions, etc) and their EXACT "
+        f"line numbered ranges (for example `L1-10 func()\\n` or `L8 class Some\\n`. NO COMMS!\n {ENVIRONMENT_PREFIX_END}"
     )
 
     max_tokens = agent.token_tracker.get_remaining() // Config.SUMMARIZATION_THRESHOLD_DIVIDER
@@ -442,7 +453,11 @@ def _summarize_file(path: str, content: str, agent) -> str:
     if truncated:
         task += "\n\n(File is truncated due to remaining memory)"
 
-    result = sub.run(task, '<sub_agent><skeleton>').strip()
+    result = sub.run(task, '<sub_agent><content_structure>L').strip()
+    # Субагент ведёт свой изолированный трекер; его последний замер относим к
+    # агенту, чтобы «Tokens spent» отражал самый свежий вызов (в т.ч. чтение файла).
+    if sub._own_tracker.last_usage:
+        agent.token_tracker.update_from_usage(sub._own_tracker.last_usage)
     if not result:
         return f"Error (Empty summary for {path}. It's probably an error, try one more time...)"
     return result

@@ -3,8 +3,8 @@ class Config:
     API_URL = "http://localhost:1234/v1"
     MODEL_NAME = ""
     AFTER_SYSTEM_PROMPT = 1  # Index after which dialog starts (0 = system)
-    BOOST_TEMP = 1.5
-    ERROR_RECOVERY_TEMP = 1
+    BOOST_TEMP = 1.75
+    ERROR_RECOVERY_TEMP = 1.25
     MAX_LOOP_RETRIES = 2  # попыток перегенерации при повторяющемся вызове/ответе
     # Порог Jaccard-схожести по множеству слов для признания текстового ответа повтором.
     DUPLICATE_SIMILARITY_THRESHOLD = 0.7
@@ -14,10 +14,10 @@ class Config:
     DUPLICATE_CONTINUATION_TEMP = round(BOOST_TEMP / 4, 2)  # спокойная достройка после расхождения
 
     # Параметры генерации
-    TEMP = 0.24
+    TEMP = 0.36
     TOP_P = 0.94
-    FREQUENCY_PENALTY = 0.0
-    PRESENCE_PENALTY = 0.0
+    FREQUENCY_PENALTY = 0.025
+    PRESENCE_PENALTY = 0.025
     MAX_CONTEXT_TOKENS = 33000
     MAX_OUTPUT_TOKENS = min(32000, int(MAX_CONTEXT_TOKENS / 1.5))
     TIMEOUT = 1800
@@ -34,9 +34,20 @@ class Config:
     USE_RESPONSES_API = False
 
     # Автоматическая суммаризация диалога
-    AUTO_SUMMARY_THRESHOLD = 15  # процент контекста
+    AUTO_SUMMARY_THRESHOLD = 60  # процент контекста
     AUTO_SUMMARY_PRESERVE_LAST = 1  # сколько последних сообщений не трогать
     AUTO_SUMMARY_REVIEW_PASS = True  # отревьювить черновик саммари: подчистить устаревшее + добавить пропущенное
+
+    # Если авто-суммаризация сжала контекст менее чем на эту долю
+    # (например 0.20 = 20%), сжатие считается слабым и поверх него дополнительно
+    # усекаются результаты выполнения инструментов, чтобы ещё сэкономить контекст.
+    AUTO_SUMMARY_MIN_REDUCTION_RATIO = 0.25
+    # Относительная мера усечения выводов инструментов при слабом сжатии:
+    # оставляем эту долю оригинала (0.5 = половину). Если от этой доли остаётся
+    # меньше TRUNCATE_TOOL_RESULT_CHARS символов — используем абсолютный пол
+    # TRUNCATE_TOOL_RESULT_CHARS (чтобы не резать слишком коротко).
+    TRUNCATE_TOOL_RESULT_KEEP_RATIO = 0.2
+    TRUNCATE_TOOL_RESULT_CHARS = 60
 
     # Структурная компактизация истории по завершённым подзадачам
     TASK_COMPACTION_ENABLED = True  # сжимать завершённые группы подзадач
@@ -62,7 +73,7 @@ class Config:
     # Максимальная доля строк файла, которую модель может выбрать в most_relevant_lines
     # (от общего числа строк). Если модель выбрала больше — most_relevant_lines
     # перегенерируется с инструкцией выбрать меньше.
-    RELEVANT_LINES_MAX_RATIO = 0.85
+    RELEVANT_LINES_MAX_RATIO = 0.8
     RELEVANT_LINES_REGENERATION_ATTEMPTS = 2
 
     # Отключает автоматическую суммаризацию большого вывода любых инструментов

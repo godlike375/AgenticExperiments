@@ -68,12 +68,20 @@ class TokenUsageTracker:
         return remaining
 
     def format_user_token_info(self) -> str:
-        """Информация о токенах для отображения пользователю."""
+        """Информация о токенах для отображения пользователю.
+
+        «Tokens spent» берётся из поля 'total_tokens' ПОСЛЕДНЕГО вызова LLM
+        (обновляется каждым вызовом, не накапливается). «Remaining» — оставшаяся
+        ёмкость контекст-окна (снимок prompt_tokens последнего вызова). Точный
+        размер текущего контекста, известный только постфактум, берётся из
+        last_usage; то, что заранее неизвестно, оценивается через CHARS_PER_TOKEN
+        (см. get_total_context_tokens).
+        """
         if not self.last_usage:
             return ""
-        total = self.last_usage.get("prompt_tokens", 0)
-        remaining = self.max_context_tokens - total
-        return f"Tokens spent: {total} (Remaining: {remaining})"
+        spent = self.last_usage.get("total_tokens", 0)
+        remaining = self.max_context_tokens - (self.last_usage.get("prompt_tokens", 0) or 0)
+        return f"Tokens spent: {spent} (Remaining: {remaining})"
 
 class LoopDetector:
     def __init__(self):

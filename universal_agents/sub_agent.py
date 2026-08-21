@@ -20,7 +20,7 @@ class SubAgent:
 
     def __init__(
             self,
-            system_prompt: str = 'You are a sub-agent. Always respond in "<sub-agent>" tags.',
+            system_prompt: str = 'You are a sub-agent. Always start your answers with "<sub-agent>" tag.',
             max_context_tokens: int = None,
             tools_config: Union[list[str], dict, None] = None,
             external_plugins: Optional[dict] = None,

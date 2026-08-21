@@ -20,7 +20,9 @@ class TestTokenUsageTracker(unittest.TestCase):
         self.assertEqual(tracker.format_user_token_info(), "")
         tracker.update_from_usage({"prompt_tokens": 300, "completion_tokens": 50, "total_tokens": 350})
         info = tracker.format_user_token_info()
-        self.assertIn("300", info)
+        # «Tokens spent» берётся из поля 'total_tokens' последнего вызова,
+        # «Remaining» — окно контекста (max - prompt_tokens последнего вызова).
+        self.assertIn("350", info)
         self.assertIn("700", info)
 
 

@@ -323,7 +323,7 @@ def _compact_one_group(agent: LLMAgent) -> Optional[str]:
         return None
 
     summary_msg = UserMessage(
-        content=f"{SUMMARY_MARKER} (subtask '{title}' [{leaf}] has been already done by you and marked as done so don't call have_done('{title}'):\n{summary}. Just take the next step if anything is remaining.\n{ENVIRONMENT_PREFIX_END}"
+        content=f"{ENVIRONMENT_PREFIX} ('{title}' [{leaf}] has been already marked as done so don't call have_done('{title}'):\n{summary} again. Just take next steps if anything remains undone.\n{ENVIRONMENT_PREFIX_END}"
     )
     agent.history.replace_range(start, end, [summary_msg])
     # Обрезаем раздутый summary в результате have_done: детальные факты уже

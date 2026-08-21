@@ -96,6 +96,34 @@ class MemoryMixin:
         """Автоматическая суммаризация диалога при превышении порога контекста."""
         preserve_last = Config.AUTO_SUMMARY_PRESERVE_LAST
 
+        # --- Точка срабатывания: только на «безопасных» границах ---
+        # Суммаризация допустима сразу после ToolResult либо после сообщения
+        # пользователя. Если последнее сообщение — ассистент с вызовом инструмента
+        # (незавершённый/висячий вызов), удаляем его из истории и суммаризируем
+        # всё ТОЛЬКО ДО него: ассистент перевызовет инструмент уже после
+        # суммаризации (так чище, чем тащить полу-вызов через сжатие).
+        msgs = self.history._messages
+        popped_calls = 0
+        while (
+            msgs
+            and isinstance(msgs[-1], AssistantMessage)
+            and msgs[-1].has_tool_calls()
+        ):
+            msgs.pop()
+            popped_calls += 1
+
+        last = msgs[-1] if msgs else None
+        if not (isinstance(last, ToolResult) or isinstance(last, UserMessage)):
+            # Небезопасная граница (ассистент дал текст, история пуста и т.п.) —
+            # откладываем суммаризацию до следующей безопасной точки.
+            return
+
+        if popped_calls:
+            self.on_system_msg(
+                f"[AUTO-SUMMARY] Removed {popped_calls} pending tool call(s) before "
+                f"summarizing; assistant will re-invoke after compression."
+            )
+
         total = len(self.history)
 
         end_id = total - 1 - preserve_last
@@ -113,9 +141,40 @@ class MemoryMixin:
         if not summary or len(summary) >= original_len:
             return
 
+        reduction = 1.0 - (len(summary) / original_len)
+        weak = reduction < Config.AUTO_SUMMARY_MIN_REDUCTION_RATIO
+
+        # Слабое сжатие — переформируем саммари заново, усекая выводы инструментов
+        # (блоки RESULT) прямо при сборке текста, без лишних вызовов LLM.
+        # В per-message режиме это просто дешёвая пересборка без вызова LLM.
+        truncated = False
+        if weak and not Config.DISABLE_PER_MESSAGE_SUMMARIZATION:
+            rerendered = summarize_dialogue(
+                self, start_id=start_id, end_id=end_id,
+                truncate_result_ratio=Config.TRUNCATE_TOOL_RESULT_KEEP_RATIO,
+                truncate_result_min_chars=Config.TRUNCATE_TOOL_RESULT_CHARS,
+            )
+            if rerendered:
+                summary = rerendered
+                truncated = True
+
+        # Итоговая степень сжатия — уже по финальному (возможно усечённому) саммари.
+        final_reduction = 1.0 - (len(summary) / original_len)
+
         self.history.compress_old_messages(summary, preserve_last=preserve_last)
         self.file_states.prune()
         self._prune_per_msg_summaries()
+
+
+        if truncated:
+            self.on_system_msg(
+                f"[AUTO-SUMMARY] Weak pre-truncation compression ({reduction:.0%} < "
+                f"{Config.AUTO_SUMMARY_MIN_REDUCTION_RATIO:.0%}); truncated RESULT payloads "
+                f"(kept {Config.TRUNCATE_TOOL_RESULT_KEEP_RATIO:.0%}, min {Config.TRUNCATE_TOOL_RESULT_CHARS} chars) "
+                f"(final -{final_reduction:.0%})"
+            )
+
+
         self.on_system_msg(
-            f"[AUTO-SUMMARY] Context compressed ({int(original_len / Config.CHARS_PER_TOKEN)} -> {int(len(summary) / Config.CHARS_PER_TOKEN)} tokens)"
+            f"[AUTO-SUMMARY] Context compressed ({int(original_len / Config.CHARS_PER_TOKEN)} -> {int(len(summary) / Config.CHARS_PER_TOKEN)} tokens, -{final_reduction:.0%})"
         )

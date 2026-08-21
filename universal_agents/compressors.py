@@ -67,7 +67,8 @@ def _dense_summarize_message(agent: LLMAgent, content: str) -> Optional[str]:
 
 
 def _build_from_per_message_summaries(
-    agent: LLMAgent, start_id: Optional[int], end_id: Optional[int]
+    agent: LLMAgent, start_id: Optional[int], end_id: Optional[int],
+    truncate_result_ratio: float = 0.0, truncate_result_min_chars: int = 0,
 ) -> Optional[str]:
     """
     Собирает новый (более короткий) диалог из маленьких саммари, накопленных
@@ -105,6 +106,12 @@ def _build_from_per_message_summaries(
         if isinstance(msg, UserMessage):
             parts.append(f"USER: {content}")
         elif isinstance(msg, ToolResult):
+            if truncate_result_ratio > 0 and len(content) > 0:
+                # Относительная обрезка: оставляем долю оригинала, но не меньше
+                # абсолютного пола truncate_result_min_chars.
+                limit = max(int(len(content) * truncate_result_ratio), truncate_result_min_chars)
+                if len(content) > limit:
+                    content = content[:limit] + f"...[truncated to {limit} chars]"
             parts.append(f"RESULT: {content}")
         else:
             parts.append(f"AI: {content}")
@@ -116,6 +123,8 @@ def summarize_dialogue(
     agent: LLMAgent,
     start_id: Optional[int] = None,
     end_id: Optional[int] = None,
+    truncate_result_ratio: float = 0.0,
+    truncate_result_min_chars: int = 0,
 ) -> Optional[str]:
     """
     Суммаризация диалога через LLM.
@@ -147,7 +156,7 @@ def summarize_dialogue(
     else:
         # Новый диалог собирается из маленьких саммари рабочей памяти
         summary = (
-            _build_from_per_message_summaries(agent, start_id, end_id)
+            _build_from_per_message_summaries(agent, start_id, end_id, truncate_result_ratio, truncate_result_min_chars)
             or _single_phase_summarize(agent, history_msgs, system_msg, existing)
         )
 
