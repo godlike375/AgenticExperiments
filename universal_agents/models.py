@@ -16,6 +16,13 @@ class Message(ABC):
     def to_api_dict(self) -> dict[str, Any]:
         pass
 
+    def to_persist_dict(self) -> dict[str, Any]:
+        """Словарь для сохранения в историю (JSON). По умолчанию совпадает с
+        API-представлением; подклассы могут добавить служебные метаданные
+        (например, флаг skip_summarize у ToolResult), которые НЕ должны уходить
+        в запрос к LLM, но должны переживать /save + /load."""
+        return self.to_api_dict()
+
 @dataclass
 class SystemMessage(Message):
     content: str
@@ -26,10 +33,16 @@ class SystemMessage(Message):
 @dataclass
 class UserMessage(Message):
     content: str
+    is_summary: bool = False
     _cached_header: Optional[str] = field(default=None, init=False, repr=False)
 
     def to_api_dict(self) -> dict[str, Any]:
         return {"role": "user", "content": self.content}
+
+    def to_persist_dict(self) -> dict[str, Any]:
+        d = self.to_api_dict()
+        d["_is_summary"] = self.is_summary
+        return d
 
 @dataclass
 class ToolCall:
@@ -83,6 +96,19 @@ class ToolResult(Message):
             "name": self.name,
             "content": self.content
         }
+
+    def to_persist_dict(self) -> dict[str, Any]:
+        d = self.to_api_dict()
+        # Служебные метаданные (через underscore-префикс, чтобы не конфликтовать
+        # с полями API и не уходить в запрос к модели).
+        d.update({
+            "_is_error": self.is_error,
+            "_is_user_denied": self.is_user_denied,
+            "_retry_count": self.retry_count,
+            "_execution_time_ms": self.execution_time_ms,
+            "_skip_summarize": self.skip_summarize,
+        })
+        return d
 
     @classmethod
     def success(cls, tool_call_id: str, name: str, content: str = "Tool executed successfully"):

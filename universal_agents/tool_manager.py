@@ -1,7 +1,7 @@
 """Управление инструментами агента: регистрация, фильтрация, доверенные папки."""
 
 import os
-from typing import Callable, Union, Optional
+from typing import Callable, Iterable, Union, Optional
 
 from universal_agents.constants import CORE_TOOLS
 from universal_agents.tool_registry import load_external_plugins, build_tool_dict
@@ -10,6 +10,12 @@ from universal_agents.tool_registry import load_external_plugins, build_tool_dic
 def _tools_directory() -> str:
     """Путь к директории с инструментами-плагинами."""
     return os.path.join(os.path.dirname(__file__), "tools")
+
+
+# Инструменты, управляемые системой: модель не может загрузить их сама через
+# load_tool — они подключаются автоматически в нужный момент (have_done —
+# только после успешного make_plan).
+MANAGED_TOOLS = {"have_done"}
 
 
 class ToolManager:
@@ -23,6 +29,15 @@ class ToolManager:
         self._tools_config = tools_config
         self._tools_map: dict[str, dict] = {}
         self._all_known_names: Optional[set[str]] = None
+        # Инструменты, по которым вызвали unload_tool, но которые ещё не выгружены
+        # физически: они остаются в префиксе (описание в системном промпте), чтобы не
+        # ломать KV-кэш, пока история не изменится. Вызов такого инструмента моделью
+        # возвращает ошибку «was unloaded». Реальное удаление — flush_pending_unloads().
+        self._pending_unload: set[str] = set()
+        # Запретительные конфиг (например, для суб-агентов): инструменты, чей вызов
+        # запрещён. Как и pending_unload — KV-cache safe: схемы остаются в префиксе,
+        # но попытка вызова возвращает ошибку «forbidden» (см. ExecuteMixin).
+        self._denied: set[str] = set()
         if external_plugins:
             for name, func in external_plugins.items():
                 self._tools_map[name] = build_tool_dict(func, is_instance_method=False)
@@ -72,8 +87,18 @@ class ToolManager:
 
     def load(self, name: str) -> str:
         """Включает ранее отключённый инструмент по имени."""
+        # Если инструмент был помечен на отложенную выгрузку — просто снимаем метку:
+        # он всё ещё в _tools_map (префикс не менялся), так что повторно не грузим.
+        if name in self._pending_unload:
+            self._pending_unload.discard(name)
+            return f"'{name}' re-enabled (unload cancelled)."
+
         if name in self._tools_map:
             return f"Error '{name}' is already loaded."
+
+        if name in MANAGED_TOOLS:
+            return (f"Error '{name}' is managed by the system and cannot be loaded manually. "
+                    f"It is attached automatically when needed.")
 
         if not self.is_tool_allowed(name):
             return f"Error '{name}' is not allowed by tools_config."
@@ -90,27 +115,99 @@ class ToolManager:
 
         return f"Error '{name}' not found in loadable tools"
 
-    def unload(self, name: str) -> str:
-        """Отключает инструмент по имени."""
-        if name not in self._tools_map:
-            return f"Error Tool '{name}' is not loaded yet."
+    def force_load(self, name: str) -> str:
+        """Внутренняя загрузка управляемого инструмента в обход allow-list.
 
+        Для инструментов, которые модель НЕ должна грузить сама через load_tool
+        (например, have_done подключается автоматически только после make_plan).
+        """
+        if name in self._tools_map:
+            return f"'{name}' is already loaded."
+        external_tools = load_external_plugins(_tools_directory())
+        if name in external_tools:
+            self._tools_map[name] = build_tool_dict(external_tools[name], is_instance_method=False)
+            non_core = [n for n in self._tools_map if n not in CORE_TOOLS]
+            if len(non_core) >= 1 and "unload_tool" not in self._tools_map and "unload_tool" in external_tools:
+                self._tools_map["unload_tool"] = build_tool_dict(external_tools["unload_tool"], is_instance_method=False)
+            return f"'{name}' loaded."
+        return f"Error '{name}' not found in loadable tools"
+
+    def unload(self, name: str) -> str:
+        """Откладывает отключение инструмента до следующего изменения истории.
+
+        Инструмент остаётся в префиксе (описание в системном промпте/схемах), чтобы не
+        ломать KV-кэш. Если модель попытается вызвать его до фактической выгрузки — вернётся
+        ошибка «was unloaded». Реальное удаление происходит в flush_pending_unloads().
+        """
         if name in CORE_TOOLS:
             return f"Error Cannot disable built-in tool '{name}'."
 
-        del self._tools_map[name]
+        if name not in self._tools_map:
+            return f"Error Tool '{name}' is not loaded yet."
+
+        if name in self._pending_unload:
+            return f"'{name}' is already marked for unload."
+
+        self._pending_unload.add(name)
+        return (f"'{name}' will be unloaded on the next history change (KV-cache safe). "
+                f"Until then it stays available but calling it returns an error; "
+                f"if you still need it, call load_tool('{name}') first.")
+
+    def is_pending_unload(self, name: str) -> bool:
+        """True, если по инструменту вызвали unload_tool, но он ещё не выгружен физически."""
+        return name in self._pending_unload
+
+    @property
+    def pending_unload(self) -> set[str]:
+        """Набор инструментов, ожидающих физической выгрузки при изменении истории."""
+        return set(self._pending_unload)
+
+    # --------------------------------------------------------
+    # Запретительный конфиг (denied tools)
+    # --------------------------------------------------------
+
+    def deny(self, names: Union[str, Iterable[str]]) -> None:
+        """Запрещает вызов инструментов по имени.
+
+        KV-cache safe: схемы запрещённых инструментов НЕ удаляются из контекста,
+        меняется только поведение при вызове — ExecuteMixin вернёт ошибку
+        «forbidden». Строка '*' или 'all' запрещает все загруженные инструменты.
+        """
+        if isinstance(names, str):
+            names = list(self._tools_map.keys()) if names in ("*", "all") else [names]
+        self._denied.update(names)
+
+    def is_denied(self, name: str) -> bool:
+        """True, если вызов инструмента запрещён запретительным конфигом."""
+        return name in self._denied
+
+    @property
+    def denied(self) -> set[str]:
+        """Текущий набор запрещённых инструментов."""
+        return set(self._denied)
+
+    def flush_pending_unloads(self) -> list[str]:
+        """Физически удаляет инструменты, помеченные unload_tool, и очищает метки.
+
+        Вызывается только при реальном изменении истории (сжатие/удаление/правка), когда
+        префикс и так пересобирается и KV-кэш всё равно инвалидируется.
+        """
+        flushed = [n for n in self._pending_unload if n in self._tools_map]
+        for name in flushed:
+            del self._tools_map[name]
+        self._pending_unload.clear()
 
         non_core = [n for n in self._tools_map if n not in CORE_TOOLS]
         if len(non_core) == 0 and "unload_tool" in self._tools_map:
             del self._tools_map["unload_tool"]
 
-        return f"'{name}' disabled successfully."
+        return flushed
 
     def list_available(self) -> str:
         """Список загружаемых (неактивных) инструментов из директории плагинов."""
         external_tools = load_external_plugins(_tools_directory())
         enabled = set(self._tools_map.keys())
-        available = set(external_tools.keys()) - enabled
+        available = set(external_tools.keys()) - enabled - MANAGED_TOOLS
         lines = ["LOADABLE TOOLS:\n"]
         for name in sorted(available):
             if not self.is_tool_allowed(name):
@@ -118,7 +215,7 @@ class ToolManager:
             func = external_tools[name]
             desc = getattr(func, '_short_description', '')
             lines.append(f'"{name}" ({desc});' if desc else name)
-        lines.append(f'\nTo load a concrete tool use "load_tools" + "name" arg')
+        lines.append(f'\nTo load a concrete tool use "load_tool" + "name" arg')
         return "\n".join(lines)
 
     # --------------------------------------------------------

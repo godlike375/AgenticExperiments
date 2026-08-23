@@ -8,6 +8,7 @@ from universal_agents.agent import LLMAgent
 class ConsoleUI:
     _reasoning_started = False
     _answer_header_shown = False
+    _service_stream_shown = False
 
     @staticmethod
     def render_message(msg: Message, label: str = "Agent"):
@@ -74,6 +75,29 @@ class ConsoleUI:
         """Завершение streaming вывода reasoning"""
         ConsoleUI._reasoning_started = False
 
+    @staticmethod
+    def start_service_stream():
+        """Начало стрима служебного вызова LLM (саммаризация, компактизация и т.п.).
+
+        Отдельный канал со своей меткой — чтобы служебный текст не выглядел
+        вторым ответом агента в диалоге. Метка печатается лениво, при первом
+        чанке: если вызов не дал текста (пустой ответ или откат на обычный
+        вызов), пустой строки-[llm-service] в консоли не будет.
+        """
+        ConsoleUI._service_stream_shown = False
+
+    @staticmethod
+    def service_stream_chunk(chunk: str):
+        if not ConsoleUI._service_stream_shown:
+            print("⚙️ [llm-service] ", end="", flush=True)
+            ConsoleUI._service_stream_shown = True
+        print(chunk, end="", flush=True)
+
+    @staticmethod
+    def end_service_stream():
+        if ConsoleUI._service_stream_shown:
+            print()
+
 class CLI:
     def __init__(self, agent: LLMAgent):
         self.agent = agent
@@ -95,7 +119,7 @@ class CLI:
         for _ in range(n - 1):
             self.agent.history.pop_until_user()
         user_msg = self.agent.history.pop_until_user()
-        self.agent.file_states.prune()
+        self.agent._on_history_changed()
         if not user_msg:
             ConsoleUI.system_msg("Cannot find a preceding user message to regenerate")
             return
@@ -118,7 +142,6 @@ class CLI:
                 filename,
                 loaded_tools=tool_names,
                 file_states=self.agent.file_states.to_dict(),
-                per_msg_summaries=self.agent._per_msg_summaries,
             )
             ConsoleUI.system_msg(f"History saved to '{filename}' (tools: {tool_names}, file_states: {len(self.agent.file_states)})")
         except Exception as e:
@@ -132,17 +155,10 @@ class CLI:
         try:
             loaded_tools, file_states, summaries = self.agent.history.load(filename)
             self.agent.file_states.from_dict(file_states)
-            # Перепривязываем сохранённые саммари рабочей памяти к пересозданным
-            # объектам сообщений (ключ id() меняется после загрузки).
-            self.agent._per_msg_summaries = {}
-            loaded_msgs = self.agent.history.get_all()
-            for i, s in enumerate(summaries):
-                if s and i < len(loaded_msgs):
-                    self.agent._per_msg_summaries[id(loaded_msgs[i])] = s
             self.agent.rebuild_tool_usage()
             for name in loaded_tools:
                 if name not in self.agent._all_tools:
-                    self.agent.load_tools(name)
+                    self.agent.load_tool(name)
             ConsoleUI.system_msg(f"History loaded. Total messages: {len(self.agent.history)}. Tools restored: {loaded_tools}")
             print("\n" + "="*40 + "\n🔄 LOADED HISTORY:\n" + "="*40)
             for msg in self.agent.history.get_all():

@@ -1,18 +1,49 @@
 import json
 from typing import Optional, Any, Iterable
-from universal_agents.constants import ENVIRONMENT_PREFIX, ENVIRONMENT_PREFIX_END, SUMMARY_MARKER
+from universal_agents.constants import ENVIRONMENT_PREFIX, ENVIRONMENT_PREFIX_END, err, ok
 from universal_agents.config import Config
 from universal_agents.models import SystemMessage, UserMessage, AssistantMessage, ToolResult, ToolCall, Message
 
 class ChatHistory:
     def __init__(self, system_prompt: str):
         self._messages: list[Message] = [SystemMessage(system_prompt)]
+        # Рабочая память (НЕ попадает в контекст): плотные саммари отдельных
+        # сообщений (ключ — id(Message)). Используются при сжатии диалога,
+        # чтобы из маленьких саммари собрать более короткий новый диалог.
+        self._per_msg_summaries: dict[int, str] = {}
+        # Dirty-флаг нормализации: normalize() пересобирает список сообщений,
+        # что дорого и сбрасывает кэш заголовков; запускаем его только когда
+        # история реально менялась с последней нормализации.
+        self._needs_normalize: bool = False
+
+    def _mark_dirty(self) -> None:
+        """Отмечает историю изменённой — следующая normalize() реально выполнится."""
+        self._needs_normalize = True
 
     def add(self, msg: Message):
         self._messages.append(msg)
+        self._mark_dirty()
+
+    # --------------------------------------------------------
+    # Рабочая память: плотные саммари отдельных сообщений
+    # --------------------------------------------------------
+    def set_per_msg_summary(self, msg: Message, summary: str) -> None:
+        self._per_msg_summaries[id(msg)] = summary
+
+    def get_per_msg_summary(self, msg: Message) -> Optional[str]:
+        return self._per_msg_summaries.get(id(msg))
+
+    def clear_per_msg_summary(self, msg: Message) -> None:
+        self._per_msg_summaries.pop(id(msg), None)
+
+    def prune_per_msg_summaries(self) -> None:
+        """Убирает из рабочей памяти саммари сообщений, которых больше нет в истории."""
+        alive = {id(m) for m in self._messages}
+        self._per_msg_summaries = {k: v for k, v in self._per_msg_summaries.items() if k in alive}
 
     def extend(self, msgs: list[Message]):
         self._messages.extend(msgs)
+        self._mark_dirty()
 
     def get_all_api(self) -> list[dict[str, Any]]:
         return [msg.to_api_dict() for msg in self._messages]
@@ -39,54 +70,62 @@ class ChatHistory:
             if isinstance(last, UserMessage):
                 user_content = last.content
                 self._messages.pop()
+                self._mark_dirty()
                 break
             else:
                 self._messages.pop()
+                self._mark_dirty()
         return user_content
 
     def delete_range(self, start_id: int, end_id: int = -1):
         if not (0 <= start_id < len(self._messages)):
-            return f"Error: Invalid start_id {start_id}"
+            return err(f": Invalid start_id {start_id}")
         if end_id == -1 or end_id >= len(self._messages):
             end_id = len(self._messages) - 1
         safe_start = max(start_id, Config.AFTER_SYSTEM_PROMPT)
         safe_end = end_id
         if safe_start > safe_end:
-            return f"{ENVIRONMENT_PREFIX} Error Nothing to delete{ENVIRONMENT_PREFIX_END}"
+            return err(" Nothing to delete")
         for msg in self._messages[safe_start:]:
             if isinstance(msg, UserMessage):
                 msg._cached_header = None
         del self._messages[safe_start:safe_end + 1]
-        
+        self._mark_dirty()
+
         has_user_message = any(isinstance(m, UserMessage) for m in self._messages)
         if not has_user_message:
             self._messages.append(UserMessage(
-                content=f"{ENVIRONMENT_PREFIX} All user messages were deleted. Shortly introduce yourself in Russian.{ENVIRONMENT_PREFIX_END}"
+                content=ok(" All user messages were deleted. Shortly introduce yourself in Russian.")
             ))
-        
-        return f'{ENVIRONMENT_PREFIX} Successfully deleted messages {start_id} - {end_id}{ENVIRONMENT_PREFIX_END}'
+
+        return ok(f" Successfully deleted messages {start_id} - {end_id}")
 
     def edit_message(self, idx: int, new_text: str, old_text: str = '') -> str:
         if not (0 <= idx < len(self._messages)):
-            return f"{ENVIRONMENT_PREFIX} Error: Invalid message index {idx}{ENVIRONMENT_PREFIX_END}"
+            return err(f": Invalid message index {idx}")
         msg = self._messages[idx]
         if isinstance(msg, SystemMessage):
-            return f"{ENVIRONMENT_PREFIX} Error: Cannot edit system prompt{ENVIRONMENT_PREFIX_END}"
+            return err(": Cannot edit system prompt")
         if not old_text.strip():
             msg.content = new_text
         else:
             if old_text not in msg.content:
-                return f"Error: Substr '{old_text}' not found in message {idx}"
+                return err(f": Substr '{old_text}' not found in message {idx}")
             msg.content = msg.content.replace(old_text, new_text, 1)
         if isinstance(msg, UserMessage):
             msg._cached_header = None
         if not msg.content.strip() and idx >= Config.AFTER_SYSTEM_PROMPT:
             self.delete_range(idx, idx)
             return 'Replacing to empty text led to deleting the message block.'
-        return f'{ENVIRONMENT_PREFIX} Success{ENVIRONMENT_PREFIX_END}'
+        return ok(" Success")
 
     def normalize(self, is_error_recovery: bool = False):
+        # Пересборка дорога — только если история менялась (или recovery).
+        if not self._needs_normalize and not is_error_recovery:
+            return
+
         if len(self._messages) <= Config.AFTER_SYSTEM_PROMPT:
+            self._needs_normalize = False
             return
 
         raw = self._messages
@@ -100,6 +139,7 @@ class ChatHistory:
         # Если сообщений пользователя нет вовсе — возвращаем историю к исходному системному промпту
         if first_user_idx >= len(raw):
             self._messages = valid
+            self._needs_normalize = False
             return
 
         valid.append(raw[first_user_idx])
@@ -133,17 +173,61 @@ class ChatHistory:
             ))
 
         self._messages = valid
+        self._needs_normalize = False
 
-    def save(self, path: str, loaded_tools: list[str] = None, file_states: dict = None,
-             per_msg_summaries: dict[int, str] = None):
+    def remove_failed_call_chains(self) -> int:
+        """Удаляет цепочки «неудачный вызов -> неудачный вызов» из истории.
+
+        Ошибочный вызов (AssistantMessage с tool_calls + его error-ToolResult)
+        удаляется только если сразу за ним следует ещё один неудачный вызов.
+        Сценарий «неудачный -> удачный» сохраняется: после удачного вызова может
+        идти большой вывод инструмента, и удаление неудачи перед ним сбросило бы
+        KV-кэш, тогда как ошибки обычно короткие.
+
+        Возвращает число удалённых сообщений. Вызывающий код сам решает, звать ли
+        normalize()/_on_history_changed().
+        """
+        n = len(self._messages)
+        if n <= Config.AFTER_SYSTEM_PROMPT + 1:
+            return 0
+
+        def is_failed_call(idx: int) -> bool:
+            if idx + 1 >= len(self._messages):
+                return False
+            msg = self._messages[idx]
+            if not isinstance(msg, AssistantMessage) or not msg.has_tool_calls():
+                return False
+            tool_result = self._messages[idx + 1]
+            return isinstance(tool_result, ToolResult) and tool_result.is_error and not tool_result.is_user_denied
+
+        indices_to_remove: set[int] = set()
+        i = Config.AFTER_SYSTEM_PROMPT
+        while i < len(self._messages):
+            if is_failed_call(i) and is_failed_call(i + 2):
+                indices_to_remove.add(i)
+                indices_to_remove.add(i + 1)
+                i += 2
+                continue
+            i += 1
+
+        if not indices_to_remove:
+            return 0
+
+        removed_count = len(indices_to_remove)
+        self.remove_at(indices_to_remove)
+        return removed_count
+
+    def save(self, path: str, loaded_tools: list[str] = None, file_states: dict = None):
         # Саммари рабочей памяти сохраняются списком, выровненным по индексам
         # сообщений (ключ id() при перезагрузке не переживёт — объекты создаются заново).
-        summaries: list[str] = []
-        if per_msg_summaries:
-            for m in self._messages:
-                summaries.append(per_msg_summaries.get(id(m)) or "")
+        # Если рабочая память пуста — пишем [], чтобы не засорять файл и сохранить
+        # обратно совместимый формат.
+        summaries: list[str] = (
+            [] if not self._per_msg_summaries
+            else [self._per_msg_summaries.get(id(m)) or "" for m in self._messages]
+        )
         payload = {
-            "messages": self.get_all_api(),
+            "messages": [m.to_persist_dict() for m in self._messages],
             "loaded_tools": loaded_tools or [],
             "file_states": file_states or {},
             "per_msg_summaries": summaries,
@@ -177,7 +261,10 @@ class ChatHistory:
             if role == "system":
                 self._messages.append(SystemMessage(d["content"]))
             elif role == "user":
-                self._messages.append(UserMessage(d["content"]))
+                self._messages.append(UserMessage(
+                    d["content"],
+                    is_summary=d.get("_is_summary", False),
+                ))
             elif role == "assistant":
                 tcs = []
                 for tc in d.get("tool_calls", []):
@@ -191,13 +278,26 @@ class ChatHistory:
                     tool_calls=tcs
                 ))
             elif role == "tool":
-                self._messages.append(ToolResult.success(
+                self._messages.append(ToolResult(
                     tool_call_id=d["tool_call_id"],
                     name=d.get("name", "unknown"),
-                    content=d["content"]
+                    content=d["content"],
+                    is_error=d.get("_is_error", False),
+                    is_user_denied=d.get("_is_user_denied", False),
+                    retry_count=d.get("_retry_count", 0),
+                    execution_time_ms=d.get("_execution_time_ms"),
+                    skip_summarize=d.get("_skip_summarize", False),
                 ))
             else:
                 raise ValueError(f"Unknown role: {role}")
+
+        # Перепривязываем сохранённые саммари рабочей памяти к пересозданным
+        # объектам сообщений (ключ id() меняется после загрузки).
+        self._per_msg_summaries = {}
+        for i, s in enumerate(summaries):
+            if s and i < len(self._messages):
+                self._per_msg_summaries[id(self._messages[i])] = s
+        self._needs_normalize = True
         return loaded_tools, file_states, summaries
 
     def get_last_user_message(self) -> Optional[UserMessage]:
@@ -211,6 +311,26 @@ class ChatHistory:
         for idx in sorted(indices, reverse=True):
             if 0 <= idx < len(self._messages):
                 del self._messages[idx]
+        self._mark_dirty()
+
+    def pop_pending_tool_calls(self) -> int:
+        """Удаляет висящие (pending) вызовы инструментов в конце истории —
+        AssistantMessage с tool_calls, у которых ещё нет результата. Возвращает
+        число удалённых сообщений.
+
+        Используется перед авто-суммаризацией: незавершённый вызов инструмента
+        чище перевызвать уже после сжатия, чем тащить через суммаризацию."""
+        popped = 0
+        while (
+            self._messages
+            and isinstance(self._messages[-1], AssistantMessage)
+            and self._messages[-1].has_tool_calls()
+        ):
+            self._messages.pop()
+            popped += 1
+        if popped:
+            self._mark_dirty()
+        return popped
 
     def _message_len(self, msg: Message) -> int:
         """Исчерпывающая длина сообщения: content + reasoning_content + tool_calls."""
@@ -235,6 +355,7 @@ class ChatHistory:
     def replace_range(self, start: int, end: int, replacement: list[Message]) -> None:
         """Заменяет сообщения [start..end] на replacement."""
         self._messages[start:end + 1] = replacement
+        self._mark_dirty()
 
     def compress_old_messages(self, summary: str, preserve_last: int = 2) -> None:
         """Заменяет старые сообщения summary-сообщением (одно UserMessage,
@@ -264,7 +385,8 @@ class ChatHistory:
             safe_end -= 1
 
         summary_msg = UserMessage(
-            content=f"{SUMMARY_MARKER}: Your past dialog summary with user:\n{summary}\n{ENVIRONMENT_PREFIX_END}"
+            content=f"{ENVIRONMENT_PREFIX}: Your past dialog summary with user:\n{summary}\n{ENVIRONMENT_PREFIX_END}",
+            is_summary=True,
         )
 
         preserved = msgs[safe_end:]
@@ -272,3 +394,4 @@ class ChatHistory:
             if isinstance(msg, UserMessage):
                 msg._cached_header = None
         self._messages = [msgs[0], summary_msg] + preserved
+        self._mark_dirty()

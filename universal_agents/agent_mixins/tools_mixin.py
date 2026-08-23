@@ -30,13 +30,17 @@ class ToolsMixin:
     def trusted_dirs(self) -> set[str]:
         return self.tools_manager.trusted_dirs
 
-    def load_tools(self, name: str) -> str:
+    def load_tool(self, name: str) -> str:
         """Enable a previously disabled tool by name."""
         return self.tools_manager.load(name)
 
     def unload_tool(self, name: str) -> str:
         """Disable a tool by name, removing it from available tools."""
         return self.tools_manager.unload(name)
+
+    def is_tool_denied(self, name: str) -> bool:
+        """True, если вызов инструмента запрещён запретительным конфигом."""
+        return self.tools_manager.is_denied(name)
 
     def list_available_tools(self) -> str:
         """List all available (loadable) tools from plugins directory."""

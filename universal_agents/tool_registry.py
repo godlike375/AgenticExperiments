@@ -47,4 +47,5 @@ def build_tool_dict(func: Callable, is_instance_method: bool) -> dict:
         "has_agent_param": getattr(func, '_has_agent_param', False),
         "requires_confirmation": getattr(func, '_requires_confirmation', False),
         "path_safety": getattr(func, '_path_safety', False),
+        "safe_in_trusted": getattr(func, '_safe_in_trusted', False),
     }

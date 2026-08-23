@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-from universal_agents.config import Config
 from universal_agents.constants import ENVIRONMENT_PREFIX, ENVIRONMENT_PREFIX_END
-from universal_agents.llm_client import LLMClient
 from universal_agents.models import UserMessage
 from universal_agents.context_builder import prepare_messages_for_api, get_effective_prefill
 from universal_agents.tool_parsing import tc_name
@@ -17,9 +15,8 @@ class ConsistencyMixin:
         prefill_val = get_effective_prefill(prefill)
         params = self._gen_params.with_temp(draft_temp)
         for _ in range(3):
-            msg_obj, err, _ = LLMClient.call(
+            msg_obj, err, _ = self.service_llm_call(
                 draft_messages,
-                tools=self.tools if self.tools else None,
                 prefill=prefill_val,
                 params=params,
             )
@@ -30,7 +27,7 @@ class ConsistencyMixin:
     def _chat_self_consistent(self, message: str, prefill: str = None) -> str:
         user_message = UserMessage(content=message)
         self.history.add(user_message)
-        if not (Config.DISABLE_PER_MESSAGE_SUMMARIZATION or self._disable_per_msg_summarization):
+        if self._per_msg_enabled:
             self._maybe_summarize_user_message(user_message)
         messages_base = prepare_messages_for_api(self)
 
@@ -59,14 +56,13 @@ class ConsistencyMixin:
         )
         synthesis_messages = messages_base + [{"role": "user", "content": synthesis_prompt}]
         current_prefill = get_effective_prefill(prefill)
-        msg_obj, err, usage = LLMClient.call(
+        msg_obj, err, usage = self.service_llm_call(
             synthesis_messages,
-            tools=self.tools if self.tools else None,
             prefill=current_prefill,
             params=self._gen_params.with_temp(0.2),
         )
         if usage:
-            self.token_tracker.update_from_usage(usage)
+            self.record_usage(usage)
         if err or not msg_obj:
             error = f"⚠️ API Error during synthesis: {err}"
             self.on_system_msg(error)
@@ -86,13 +82,13 @@ class ConsistencyMixin:
             + [assistant_msg.to_api_dict()]
             + [tr.to_api_dict() for tr in tool_results]
         )
-        final_obj, final_err, final_usage = LLMClient.call(
+        final_obj, final_err, final_usage = self.service_llm_call(
             followup_dicts,
             tools=None,
             params=self._gen_params.with_temp(0.1),
         )
         if final_usage:
-            self.token_tracker.update_from_usage(final_usage)
+            self.record_usage(final_usage)
         if final_err or not final_obj:
             return msg_obj.content or "Tool executed successfully"
 

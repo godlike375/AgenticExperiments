@@ -16,7 +16,7 @@ class HistoryMixin:
         if msgs and isinstance(msgs[-1], AssistantMessage):
             self.history.remove_at({len(msgs) - 1})
             self.history.normalize()
-            self.file_states.prune()
+            self._on_history_changed()
 
     def _erase_last_failed_tool_call(self) -> int:
         """Удаляет из истории последний неудачный вызов инструмента (assistant + его error result)."""
@@ -34,7 +34,7 @@ class HistoryMixin:
         if removed:
             self.history.remove_at(removed)
             self.history.normalize()
-            self.file_states.prune()
+            self._on_history_changed()
         return len(removed)
 
     def _get_last_answer_text(self) -> Optional[str]:

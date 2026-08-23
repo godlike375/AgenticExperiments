@@ -18,7 +18,7 @@ class Config:
     TOP_P = 0.94
     FREQUENCY_PENALTY = 0.025
     PRESENCE_PENALTY = 0.025
-    MAX_CONTEXT_TOKENS = 33000
+    MAX_CONTEXT_TOKENS = 50000
     MAX_OUTPUT_TOKENS = min(32000, int(MAX_CONTEXT_TOKENS / 1.5))
     TIMEOUT = 1800
     MAX_ITER = 35
@@ -66,15 +66,19 @@ class Config:
     CHARS_PER_TOKEN = 2.35
     MIN_TOKENS_TO_SUMMARIZE = 180
 
-    # В интерактивной выемке больших файлов к вырезанным строкам добавлять
-    # структурный скелет файла (гибрид «скелет + важные строки»).
-    INTERACTIVE_EXTRACT_WITH_SKELETON = True
+    # Чтение больших файлов: вместо выгрузки всего файла в контекст — ровно один
+    # раз отдаём структурный скелет, а реальный код модель читает порциями через
+    # start_line/end_line. Повторные целиком-файловые чтения неизменённого файла
+    # запрещены (экономия контекста, см. REFACTORING_BASELINE §3.7).
+    BIG_FILE_SKELETON = True
 
-    # Максимальная доля строк файла, которую модель может выбрать в most_relevant_lines
-    # (от общего числа строк). Если модель выбрала больше — most_relevant_lines
-    # перегенерируется с инструкцией выбрать меньше.
-    RELEVANT_LINES_MAX_RATIO = 0.8
-    RELEVANT_LINES_REGENERATION_ATTEMPTS = 2
+    # Лимит одного чтения диапазона из файла: не более N символов за вызов;
+    # строка, на которой лимит превышен, включается целиком (порция всегда
+    # заканчивается концом строки). Дополнительно — не более
+    # MAX_READ_LINES_PER_CALL строк за вызов. Заставляет модель читать порциями,
+    # как человек, а не выгружать файл целиком.
+    MAX_READ_CHARS_PER_CALL = 2000
+    MAX_READ_LINES_PER_CALL = 150
 
     # Отключает автоматическую суммаризацию большого вывода любых инструментов
     DISABLE_TOOL_AUTO_SUMMARIZATION = True

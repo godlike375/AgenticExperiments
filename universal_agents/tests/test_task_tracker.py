@@ -10,7 +10,7 @@ from universal_agents.task_tracker import (
     mark_task_done,
     compact_completed_tasks,
 )
-from universal_agents.constants import SUMMARY_MARKER
+from universal_agents.constants import ENVIRONMENT_PREFIX
 from universal_agents.history import ChatHistory
 from universal_agents.models import UserMessage, AssistantMessage, ToolResult, ToolCall
 
@@ -70,6 +70,8 @@ def _make_agent():
         task_plan_map={},
         _compacted_task_ids=set(),
         file_states=SimpleNamespace(prune=lambda: None),
+        tools_manager=SimpleNamespace(flush_pending_unloads=lambda: None),
+        _on_history_changed=lambda: None,
         on_system_msg=lambda *a, **k: None,
     )
     set_plan(agent, [
@@ -112,18 +114,18 @@ class TestPlan(unittest.TestCase):
 class TestMarkDone(unittest.TestCase):
     def test_mark_done(self):
         agent = _make_agent()
-        res = mark_task_done(agent, "A1", "ok")
+        res = mark_task_done(agent, "A1")
         self.assertIn("marked done", res)
         self.assertIn("A1", res)
 
     def test_mark_unknown_id(self):
         agent = _make_agent()
-        res = mark_task_done(agent, "ZZZ", "x")
+        res = mark_task_done(agent, "ZZZ")
         self.assertIn("not in the plan", res)
 
     def test_mark_empty_id(self):
         agent = _make_agent()
-        res = mark_task_done(agent, "", "x")
+        res = mark_task_done(agent, "")
         self.assertIn("Error", res)
 
 
@@ -271,7 +273,7 @@ class TestCompaction(unittest.TestCase):
         self.assertGreater(n, 0)
         after = agent.history.content_len(0, len(agent.history) - 1)
         self.assertLess(after, before)
-        summary_msgs = [m for m in agent.history if isinstance(m, UserMessage) and SUMMARY_MARKER in m.content]
+        summary_msgs = [m for m in agent.history if isinstance(m, UserMessage) and ENVIRONMENT_PREFIX in m.content]
         self.assertTrue(summary_msgs)
         # маркеры make_plan и have_done сохраняются (не компактизируются)
         remaining = [m for m in agent.history if isinstance(m, AssistantMessage) and m.has_tool_calls()]
@@ -305,6 +307,8 @@ class TestCompaction(unittest.TestCase):
             task_plan_map={},
             _compacted_task_ids=set(),
             file_states=SimpleNamespace(prune=lambda: None),
+            tools_manager=SimpleNamespace(flush_pending_unloads=lambda: None),
+            _on_history_changed=lambda: None,
             on_system_msg=lambda *a, **k: None,
         )
         set_plan(agent, [{"id": "A1", "title": "A1"}, {"id": "B1", "title": "B1"}])

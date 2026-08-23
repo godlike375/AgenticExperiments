@@ -1,6 +1,7 @@
 import unittest
 from types import SimpleNamespace
 
+from universal_agents.constants import ENVIRONMENT_PREFIX
 from universal_agents.tool_parsing import (
     tc_name,
     tc_args,
@@ -32,8 +33,8 @@ class TestNameArgs(unittest.TestCase):
 class TestIsErrorContent(unittest.TestCase):
     def test_error_prefix(self):
         self.assertTrue(is_error_content("Error: boom"))
-        self.assertTrue(is_error_content("[[SYS ENV]] Error: boom"))
-        self.assertTrue(is_error_content("[[SYS ENV]] [[SYS ENV]] Error: x"))
+        self.assertTrue(is_error_content(f"{ENVIRONMENT_PREFIX} Error: boom"))
+        self.assertTrue(is_error_content(f"{ENVIRONMENT_PREFIX} {ENVIRONMENT_PREFIX} Error: x"))
 
     def test_normal_content(self):
         self.assertFalse(is_error_content("all good"))

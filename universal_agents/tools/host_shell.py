@@ -13,39 +13,13 @@ from __future__ import annotations
 
 import os
 import shutil
-import subprocess
 import sys
 import time
 
 from universal_agents.tool import tool
-from universal_agents.constants import ENVIRONMENT_PREFIX, ENVIRONMENT_PREFIX_END
+from universal_agents.constants import err
 from universal_agents.config import Config
-
-
-def _run(cmd_list: list[str], timeout: int, cwd: str = None) -> str:
-    """Выполняет команду и форматирует результат как текст."""
-    try:
-        result = subprocess.run(
-            cmd_list,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout,
-            cwd=cwd,
-        )
-    except subprocess.TimeoutExpired:
-        raise TimeoutError(f"Command timed out after {timeout}s")
-    except FileNotFoundError as e:
-        raise RuntimeError(f"Executable not found: {e}")
-
-    output = result.stdout or ""
-    if result.stderr:
-        output += f"\n[stderr]\n{result.stderr}"
-    output += f"\n[exit_code]: {result.returncode}"
-    if result.returncode != 0:
-        raise RuntimeError(output)
-    return output
+from universal_agents.subprocess_utils import run_capture
 
 
 def _git_bash_candidates() -> list[str]:
@@ -127,9 +101,9 @@ def _build_bash_command(command: str) -> list[str]:
 def run_powershell(command: str, timeout: int = 60) -> str:
     pwsh = shutil.which("pwsh") or shutil.which("powershell")
     if not pwsh:
-        return f"{ENVIRONMENT_PREFIX} Error PowerShell executable not found{ENVIRONMENT_PREFIX_END}"
+        return err(" PowerShell executable not found")
     # -NoProfile: без профилей пользователя; -NonInteractive: без интерактива
-    return _run([pwsh, "-NoProfile", "-NonInteractive", "-Command", command], timeout)
+    return run_capture([pwsh, "-NoProfile", "-NonInteractive", "-Command", command], timeout)
 
 
 @tool(
@@ -146,5 +120,5 @@ def run_bash_host(command: str, timeout: int = 60) -> str:
     try:
         argv = _build_bash_command(command)
     except RuntimeError as e:
-        return f"{ENVIRONMENT_PREFIX} Error {e}{ENVIRONMENT_PREFIX_END}"
-    return _run(argv, timeout)
+        return err(f" {e}")
+    return run_capture(argv, timeout)

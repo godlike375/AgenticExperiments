@@ -7,10 +7,10 @@ from universal_agents.compressors import (
     _build_draft_prompt,
     summarize_dialogue,
 )
-from universal_agents.constants import SUMMARY_MARKER
 from universal_agents.history import ChatHistory
 from universal_agents.models import UserMessage, AssistantMessage, ToolResult
 from universal_agents.config import Config
+from universal_agents.llm_client import LLMClient
 
 
 def _fake_msg(content="... summary ..."):
@@ -29,7 +29,7 @@ def _history():
 
 def _history_with_summary():
     h = ChatHistory("sys")
-    h.add(UserMessage(f"{SUMMARY_MARKER}: old facts\nKEY FACTS: src/main.py\nold decision X"))
+    h.add(UserMessage("old facts\nKEY FACTS: src/main.py\nold decision X", is_summary=True))
     h.add(UserMessage("new: fix bug in main.py"))
     h.add(AssistantMessage(content="fixed"))
     return h
@@ -37,25 +37,27 @@ def _history_with_summary():
 
 class TestSummaryHelpers(unittest.TestCase):
     def test_is_summary_message(self):
-        self.assertTrue(is_summary_message(f"{SUMMARY_MARKER}: xyz"))
-        self.assertTrue(is_summary_message("[SUMMARY of messages 1-5]: xyz"))
-        self.assertTrue(is_summary_message("It's an auto-generated text. Your past dialog summary"))
-        self.assertFalse(is_summary_message("normal user message"))
-        self.assertFalse(is_summary_message(""))
+        # Детекция только по метаданным объекта, без текстовых маркеров
+        self.assertFalse(is_summary_message(UserMessage("xyz")))
+        self.assertFalse(is_summary_message(UserMessage("[SUMMARY of messages 1-5]: xyz")))
+        self.assertFalse(is_summary_message(UserMessage("It's an auto-generated text. Your past dialog summary")))
+        self.assertTrue(is_summary_message(UserMessage("flagged", is_summary=True)))
+        self.assertFalse(is_summary_message(UserMessage("normal user message")))
+        self.assertFalse(is_summary_message(UserMessage("")))
 
     def test_find_existing_summary(self):
         msgs = _history().get_all()
         self.assertIsNone(_find_existing_summary(msgs, len(msgs) - 1))
 
         h = _history()
-        h.replace_range(2, 2, [UserMessage(f"{SUMMARY_MARKER}: earlier facts\npath /etc/x")])
+        h.replace_range(2, 2, [UserMessage("earlier facts\npath /etc/x", is_summary=True)])
         msgs = h.get_all()
         found = _find_existing_summary(msgs, len(msgs) - 1)
         self.assertIsNotNone(found)
         self.assertEqual(found["index"], 2)
-        # body — это текст после первой строки-заголовка (маркера)
+        # body — это текст после первой строки-заголовка
         self.assertIn("path /etc/x", found["body"])
-        self.assertIn(SUMMARY_MARKER, found["full_content"])
+        self.assertIn("earlier facts", found["full_content"])
 
     def test_build_draft_prompt_has_no_last_user_content(self):
         p = _build_draft_prompt(existing=None)
@@ -74,9 +76,17 @@ class TestSummarizeDialogue(unittest.TestCase):
         agent = mock.Mock()
         agent.history = history
         agent.token_tracker = mock.Mock()
-        # per-message режим читает рабочую память; по умолчанию она пуста,
-        # поэтому суммаризация падает на однофазный (draft+review) путь.
-        agent._per_msg_summaries = {}
+
+        # Реальный service_llm_call поверх мок-агента: патчится LLMClient.call,
+        # чтобы перехватывать транспорт (как это делает настоящий агент).
+        def _service(msgs, temp=None, timeout=None, tools=True, prefill=None, params=None):
+            return LLMClient.call(msgs, temp=temp, timeout=timeout,
+                                  prefill=prefill, params=params)
+
+        agent.service_llm_call.side_effect = _service
+        # per-message режим читает рабочую память (agent.history._per_msg_summaries);
+        # по умолчанию она пуста, поэтому суммаризация падает на однофазный
+        # (draft+review) путь.
         return agent
 
     def test_system_prompt_is_first_in_draft_and_review(self):

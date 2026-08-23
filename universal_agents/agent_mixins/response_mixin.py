@@ -2,14 +2,33 @@
 
 from __future__ import annotations
 
-from universal_agents.config import Config
-from universal_agents.history_repair import prune_all_failed_tool_calls_except_last
+from universal_agents.llm_client import apply_prefill
 from universal_agents.models import AssistantMessage, ToolCall, ToolResult
 from universal_agents.tool_parsing import tc_name, tc_args, detect_broken_call, args_are_valid
 
 
 class ResponseMixin:
     """Преобразует сырой ответ LLM в сообщение истории и управляет его добавлением/рендером."""
+
+    def _assemble_assistant_message(
+        self,
+        content: str,
+        tool_calls: list[ToolCall] = None,
+        reasoning_content: str = "",
+        prefill: str = None,
+        streamed: bool = False,
+    ) -> AssistantMessage:
+        """Единая точка сборки AssistantMessage (инвариант §2): строит сообщение
+        и применяет prefill к контенту. Раньше эта сборка дублировалась в 4 местах
+        (стриминг ×3 и обычная ветка)."""
+        message_obj = AssistantMessage(
+            content=content or "",
+            tool_calls=list(tool_calls or []),
+            reasoning_content=reasoning_content or "",
+            streamed=streamed,
+        )
+        message_obj.content = apply_prefill(message_obj.content, prefill)
+        return message_obj
 
     def _build_assistant_msg(self, msg_obj, clean_content: str) -> AssistantMessage:
         tool_calls = []
@@ -20,13 +39,12 @@ class ResponseMixin:
                     name=tc_name(tc),
                     arguments=tc_args(tc),
                 ))
-        result = AssistantMessage(
-            content=clean_content,
-            tool_calls=tool_calls,
-            reasoning_content=getattr(msg_obj, 'reasoning_content', ''),
+        return self._assemble_assistant_message(
+            clean_content,
+            tool_calls,
+            getattr(msg_obj, 'reasoning_content', ''),
             streamed=bool(getattr(msg_obj, 'streamed', False) or getattr(msg_obj, '_streamed', False)),
         )
-        return result
 
     def _emit_token_info(self):
         parts = []
@@ -45,7 +63,7 @@ class ResponseMixin:
     def _append_assistant(self, msg: AssistantMessage) -> None:
         """Добавляет сообщение ассистента в историю и рендерит его."""
         self.history.add(msg)
-        if not (Config.DISABLE_PER_MESSAGE_SUMMARIZATION or self._disable_per_msg_summarization):
+        if self._per_msg_enabled:
             self._summarize_assistant_message(msg)
         self.on_render(msg)
         self._emit_token_info()
@@ -54,7 +72,7 @@ class ResponseMixin:
         """Добавляет результаты инструментов в историю и рендерит их."""
         for tr in results:
             self.history.add(tr)
-            if not (Config.DISABLE_PER_MESSAGE_SUMMARIZATION or self._disable_per_msg_summarization):
+            if self._per_msg_enabled:
                 self._maybe_summarize_tool_result(tr)
             self.on_render(tr)
             self._emit_token_info()
@@ -98,7 +116,15 @@ class ResponseMixin:
 
         tool_results = self._execute_tools(assistant_msg.tool_calls)
         self._append_tool_results(tool_results)
-        prune_all_failed_tool_calls_except_last(self)
+
+        removed = self.history.remove_failed_call_chains()
+        if removed:
+            self.on_system_msg(
+                f"[CLEANUP] Removed {removed} messages "
+                f"({removed // 2} failed calls)"
+            )
+            self.history.normalize()
+            self._on_history_changed()
 
         tool_error_occurred = any(tr.is_error and not tr.is_user_denied for tr in tool_results)
         return clean_content, tool_error_occurred, False

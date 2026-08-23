@@ -2,22 +2,15 @@
 
 from __future__ import annotations
 
-from universal_agents.constants import ENVIRONMENT_PREFIX, ENVIRONMENT_PREFIX_END
+from universal_agents.constants import (
+    ENVIRONMENT_PREFIX,
+    ENVIRONMENT_PREFIX_END,
+    err,
+)
 from universal_agents.compressors import auto_compress_tool_result
 from universal_agents.models import ToolCall, ToolResult
 from universal_agents.task_tracker import DONE_TOOL, validate_task_mark_call
 from universal_agents.tool_parsing import parse_tool_args, is_error_content
-
-
-def _read_result_already_compressed(content: str) -> bool:
-    """True, если результат read уже обработан логикой больших файлов
-    (интерактивная выемка most_relevant_lines со скелетом либо её фолбэк —
-    усечённый префикс) и не должен повторно суммаризироваться
-    пер-сообщенческой суммаризацией."""
-    return (
-        "Most important file lines (for memory saving):" in content
-        or "Interactive extraction failed; showing truncated prefix" in content
-    )
 
 
 class ExecuteMixin:
@@ -30,6 +23,28 @@ class ExecuteMixin:
         for tc in tool_calls:
             name = tc.name
             args_str = tc.arguments or "{}"
+
+            # Инструмент запрещён запретительным конфигом (суб-агенту). Схема
+            # остаётся в префиксе ради KV-cache, но вызов явно отклоняется.
+            if self.tools_manager.is_denied(name):
+                err_msg = err(
+                    f": tool '{name}' is forbidden for this sub-agent. "
+                    f"Use other tools or answer yourself."
+                )
+                self.on_system_msg(f"[TOOL DENIED] Model tried to call forbidden tool '{name}'.")
+                results.append(ToolResult.error(tc.id, name, err_msg))
+                continue
+
+            # Инструмент помечен на отложенную выгрузку (unload_tool), но ещё не убран из
+            # префикса ради KV-кэша. Модель пытается его вызвать — возвращаем явную ошибку.
+            if self.tools_manager.is_pending_unload(name):
+                err_msg = err(
+                    f": tool '{name}' was unloaded. "
+                    f"If you still wanna use it then load_tool('{name}') first."
+                )
+                self.on_system_msg(f"[TOOL UNLOADED] Model tried to call unloaded tool '{name}'.")
+                results.append(ToolResult.error(tc.id, name, err_msg))
+                continue
 
             if self.loop_detector.check_duplicate_in_turn(name, args_str, history_before_current_turn):
                 warning_msg = (
@@ -62,7 +77,11 @@ class ExecuteMixin:
                     continue
 
             if tool_info.get('requires_confirmation', False) or tool_info.get('path_safety', False):
-                skip_confirm = (name == "edit_file" and "path" in args_dict and self.is_path_trusted(args_dict["path"]))
+                skip_confirm = bool(
+                    tool_info.get('safe_in_trusted')
+                    and "path" in args_dict
+                    and self.is_path_trusted(args_dict["path"])
+                )
                 external = self._check_external_paths(name, args_dict)
                 if not skip_confirm and (external or not tool_info.get('path_safety', False)):
                     if external:
@@ -87,12 +106,13 @@ class ExecuteMixin:
                     self._tool_usage[name] = self._tool_usage.get(name, 0) + 1
                     if name == 'read' and self._read_registrations:
                         self.file_states.mark_tool_call(self._read_registrations.pop(0), tr.tool_call_id)
-                    # Обработка больших файлов уже вернула сжатый результат
-                    # (most_relevant_lines со скелетом либо усечённый префикс при
-                    # провале выемки) — не даём пер-сообщенческой суммаризации
-                    # сжимать его повторно.
-                    is_range_read = name == 'read' and (args_dict.get('start_line') is not None or args_dict.get('end_line') is not None)
-                    if name == 'read' and (_read_result_already_compressed(content) or is_range_read):
+                    # Результат чтения (скелет большого файла, диапазон строк или
+                    # полный маленький файл) не пересжимаем в рабочую память:
+                    # либо он уже компактный (скелет), либо это сырые строки файла,
+                    # которые должны остаться в контексте как есть. Помечаем
+                    # метаданными объекта (ToolResult.skip_summarize) — никаких
+                    # текстовых маркеров в контенте не используем.
+                    if name == 'read':
                         tr.skip_summarize = True
 
                 if not getattr(tr, 'skip_summarize', False):

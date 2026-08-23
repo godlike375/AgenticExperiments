@@ -64,16 +64,34 @@ class TestToolManagerLoadUnload(unittest.TestCase):
         self.assertIn("Cannot disable", res)
         self.assertIn("unload_tool", tm.tools_map)
 
-    def test_unload_non_core_removes_unload_tool(self):
+    def test_unload_non_core_defers_removal(self):
         tm = ToolManager(
             ["alpha", "unload_tool"],
             external_plugins={"alpha": alpha, "beta": beta, "unload_tool": unload_tool},
         )
         self.assertIn("unload_tool", tm.tools_map)
         res = tm.unload("alpha")
-        self.assertIn("disabled", res)
+        self.assertIn("will be unloaded", res)
+        # ещё не удалён — остаётся в префиксе ради KV-кэша
+        self.assertIn("alpha", tm.tools_map)
+        self.assertIn("unload_tool", tm.tools_map)
+        self.assertTrue(tm.is_pending_unload("alpha"))
+        # реальная выгрузка только при изменении истории
+        flushed = tm.flush_pending_unloads()
+        self.assertEqual(flushed, ["alpha"])
         self.assertNotIn("alpha", tm.tools_map)
         self.assertNotIn("unload_tool", tm.tools_map)
+
+    def test_load_cancels_pending_unload(self):
+        tm = ToolManager(
+            ["alpha", "unload_tool"],
+            external_plugins={"alpha": alpha, "beta": beta, "unload_tool": unload_tool},
+        )
+        tm.unload("alpha")
+        self.assertTrue(tm.is_pending_unload("alpha"))
+        res = tm.load("alpha")
+        self.assertIn("re-enabled", res)
+        self.assertFalse(tm.is_pending_unload("alpha"))
 
     def test_unload_unknown(self):
         tm = ToolManager(["alpha"], external_plugins={"alpha": alpha})

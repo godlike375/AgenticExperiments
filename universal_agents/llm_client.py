@@ -1,8 +1,9 @@
 from typing import Optional
+from types import SimpleNamespace
 from openai import OpenAI
 from universal_agents.config import Config, CHARS_PER_TOKEN
 from universal_agents.generation import GenerationParams
-from universal_agents.tool_parsing import normalize_args
+from universal_agents.tool_parsing import normalize_args, build_tool_calls
 
 
 def jaccard_similarity(a: str, b: str) -> float:
@@ -139,6 +140,89 @@ class LoopDetector:
                             return True
         return False
 
+class StreamAccumulator:
+    """Собирает из чанков стрима финальный ответ: текст, reasoning, tool calls, usage.
+
+    Единая логика накопления для основного диалога (StreamingMixin) и служебных
+    вызовов (LLMClient.call с callbacks) — раньше она была только в миксине.
+    """
+
+    def __init__(self, prefill=None, on_stream_chunk=None,
+                 on_reasoning_start=None, on_reasoning_chunk=None):
+        self.content = ""
+        self.reasoning = ""
+        self.tool_calls_data: dict = {}
+        self.usage = None
+        self.reasoning_started = False
+        self._prefill_pending = prefill
+        self.on_stream_chunk = on_stream_chunk
+        self.on_reasoning_start = on_reasoning_start
+        self.on_reasoning_chunk = on_reasoning_chunk
+
+    def process(self, chunk) -> str:
+        """Применяет чанк (usage, reasoning, текст, tool calls); возвращает text-delta."""
+        usage = getattr(chunk, 'usage', None)
+        if usage:
+            self.usage = build_usage_dict(
+                usage.prompt_tokens,
+                usage.completion_tokens,
+                usage.total_tokens,
+            )
+        if not getattr(chunk, 'choices', None):
+            return ""
+        delta = chunk.choices[0].delta
+
+        rc = getattr(delta, 'reasoning_content', None)
+        if rc:
+            self.reasoning += rc
+            if not self.reasoning_started:
+                self.reasoning_started = True
+                if self.on_reasoning_start:
+                    self.on_reasoning_start()
+            if self.on_reasoning_chunk:
+                self.on_reasoning_chunk(rc)
+
+        added = ""
+        if delta.content:
+            if self._prefill_pending:
+                if self.on_stream_chunk:
+                    self.on_stream_chunk(self._prefill_pending)
+                self._prefill_pending = None
+            added = delta.content
+            self.content += added
+            if self.on_stream_chunk:
+                self.on_stream_chunk(added)
+
+        if delta.tool_calls:
+            for tc in delta.tool_calls:
+                idx = tc.index
+                if idx not in self.tool_calls_data:
+                    self.tool_calls_data[idx] = {
+                        "id": tc.id or "",
+                        "type": "function",
+                        "function": {
+                            "name": tc.function.name if tc.function and tc.function.name else "",
+                            "arguments": tc.function.arguments if tc.function and tc.function.arguments else ""
+                        }
+                    }
+                else:
+                    if tc.id:
+                        self.tool_calls_data[idx]["id"] = tc.id
+                    if tc.function:
+                        if tc.function.name:
+                            self.tool_calls_data[idx]["function"]["name"] += tc.function.name
+                        if tc.function.arguments:
+                            self.tool_calls_data[idx]["function"]["arguments"] += tc.function.arguments
+        return added
+
+    def build_message(self, prefill=None):
+        return SimpleNamespace(
+            content=apply_prefill(self.content, prefill),
+            tool_calls=build_tool_calls(self.tool_calls_data) or None,
+            reasoning_content=self.reasoning or None,
+        )
+
+
 class LLMClient:
     _client = None
 
@@ -161,14 +245,35 @@ class LLMClient:
         max_tokens: int = None,
         previous_response_id: str = None,
         params: GenerationParams = None,
+        callbacks: Optional[dict] = None,
     ):
+        """Единая точка любого обращения к LLM.
+
+        callbacks (on_stream_start/on_stream_chunk/on_stream_end/on_reasoning_*):
+        если заданы стриминговые колбэки и стриминг поддерживается
+        (STREAM_ENABLED и не Responses API) — вызов идёт через стриминг и вывод
+        показывается живьём, включая служебные/отладочные вызовы. Как и в основном
+        диалоге, previous_response_id при стриминге игнорируется.
+        """
         temp, timeout, top_p, frequency_penalty, presence_penalty, max_tokens = LLMClient._resolve_params(
             params, temp, timeout, top_p, frequency_penalty, presence_penalty, max_tokens
         )
 
-        messages_to_send = list(messages)
-        if prefill:
-            messages_to_send.append({"role": "assistant", "content": prefill})
+        messages_to_send = LLMClient._prepare_messages(messages, prefill)
+
+        cb = callbacks or {}
+        want_stream = (
+            Config.STREAM_ENABLED
+            and not Config.USE_RESPONSES_API
+            and bool(cb.get("on_stream_chunk") or cb.get("on_reasoning_chunk"))
+        )
+        if want_stream:
+            streamed = LLMClient._call_via_chat_stream(
+                messages_to_send, temp, timeout, tools, prefill, top_p,
+                frequency_penalty, presence_penalty, max_tokens, cb
+            )
+            if streamed is not None:
+                return streamed
 
         result = None
         if Config.USE_RESPONSES_API:
@@ -180,7 +285,7 @@ class LLMClient:
                 if not err and msg and (msg.content or msg.tool_calls):
                     result = (msg, err, usage)
             if result is None:
-                msg, err, usage = LLMClient._call_responses_api_full(
+                msg, err, usage = LLMClient._call_responses_api(
                     messages_to_send, temp, timeout, tools, top_p,
                     frequency_penalty, presence_penalty, max_tokens
                 )
@@ -194,6 +299,13 @@ class LLMClient:
 
         LLMClient._debug_log(messages_to_send, result)
         return result
+
+    @staticmethod
+    def _prepare_messages(messages: list[dict], prefill: Optional[str]) -> list[dict]:
+        messages_to_send = list(messages)
+        if prefill:
+            messages_to_send.append({"role": "assistant", "content": prefill})
+        return messages_to_send
 
     @staticmethod
     def _debug_log(messages_to_send, result):
@@ -236,21 +348,29 @@ class LLMClient:
         return temp, timeout, top_p, frequency_penalty, presence_penalty, max_tokens
 
     @staticmethod
+    def _chat_kwargs(temp, timeout, tools, top_p, frequency_penalty, presence_penalty, max_tokens) -> dict:
+        """Общий конструктор параметров chat.completions (для обычного вызова и стрима)."""
+        return {
+            "model": Config.MODEL_NAME,
+            "temperature": temp if temp is not None else Config.TEMP,
+            "max_tokens": max_tokens if max_tokens is not None else Config.MAX_OUTPUT_TOKENS,
+            "tools": tools,
+            "parallel_tool_calls": False,
+            "timeout": timeout if timeout is not None else Config.TIMEOUT,
+            "reasoning_effort": "none",
+            "frequency_penalty": frequency_penalty if frequency_penalty is not None else Config.FREQUENCY_PENALTY,
+            "presence_penalty": presence_penalty if presence_penalty is not None else Config.PRESENCE_PENALTY,
+            "top_p": top_p if top_p is not None else Config.TOP_P,
+        }
+
+    @staticmethod
     def _call_chat_completions(messages_to_send, temp, timeout, tools, prefill, top_p,
                                frequency_penalty, presence_penalty, max_tokens):
         try:
             response = LLMClient.get_client().chat.completions.create(
-                model=Config.MODEL_NAME,
                 messages=messages_to_send,
-                temperature=temp if temp is not None else Config.TEMP,
-                max_tokens=max_tokens if max_tokens is not None else Config.MAX_OUTPUT_TOKENS,
-                tools=tools,
-                parallel_tool_calls=False,
-                timeout=timeout if timeout is not None else Config.TIMEOUT,
-                reasoning_effort="none",
-                frequency_penalty=frequency_penalty if frequency_penalty is not None else Config.FREQUENCY_PENALTY,
-                presence_penalty=presence_penalty if presence_penalty is not None else Config.PRESENCE_PENALTY,
-                top_p=top_p if top_p is not None else Config.TOP_P,
+                **LLMClient._chat_kwargs(temp, timeout, tools, top_p,
+                                         frequency_penalty, presence_penalty, max_tokens),
             )
             msg = response.choices[0].message
             msg.content = apply_prefill(msg.content, prefill)
@@ -267,43 +387,73 @@ class LLMClient:
             return None, str(e), None
 
     @staticmethod
-    def _call_responses_api_full(messages_to_send, temp, timeout, tools, top_p,
-                                 frequency_penalty, presence_penalty, max_tokens):
-        try:
-            kwargs = {
-                "model": Config.MODEL_NAME,
-                "input": messages_to_send,
-                "temperature": temp if temp is not None else Config.TEMP,
-                "max_output_tokens": max_tokens if max_tokens is not None else Config.MAX_OUTPUT_TOKENS,
-                "timeout": timeout if timeout is not None else Config.TIMEOUT,
-                "reasoning_effort": "none",
-            }
-            if tools:
-                kwargs["tools"] = tools
-            if top_p is not None:
-                kwargs["top_p"] = top_p
+    def _call_via_chat_stream(messages_to_send, temp, timeout, tools, prefill, top_p,
+                              frequency_penalty, presence_penalty, max_tokens, cb):
+        """Блокирующе потребляет стрим и собирает финальный ответ.
 
-            response = LLMClient.get_client().responses.create(**kwargs)
-            msg = LLMClient._parse_responses_output(response)
-            if msg and prefill:
-                msg.content = apply_prefill(msg.content, prefill)
-            return msg, None, LLMClient._extract_responses_usage(response)
+        Возвращает (msg, err, usage) или None, если создать стрим не удалось
+        (тогда вызывающий код откатывается на обычный вызов).
+        """
+        try:
+            raw = LLMClient.get_client().chat.completions.create(
+                messages=messages_to_send,
+                **LLMClient._chat_kwargs(temp, timeout, tools, top_p,
+                                         frequency_penalty, presence_penalty, max_tokens),
+                stream=True,
+                stream_options={"include_usage": True},
+            )
         except Exception as e:
+            def error_generator(err=str(e)):
+                yield {"error": err}
+            raw = error_generator()
+
+        acc = StreamAccumulator(
+            prefill=prefill,
+            on_stream_chunk=cb.get("on_stream_chunk"),
+            on_reasoning_start=cb.get("on_reasoning_start"),
+            on_reasoning_chunk=cb.get("on_reasoning_chunk"),
+        )
+        start_cb = cb.get("on_stream_start")
+        end_cb = cb.get("on_stream_end")
+        reasoning_end_cb = cb.get("on_reasoning_end")
+        try:
+            if start_cb:
+                start_cb()
+            first = next(raw, None)
+            if isinstance(first, dict) and "error" in first:
+                if end_cb:
+                    end_cb()
+                return None
+            acc.process(first)
+            for chunk in raw:
+                acc.process(chunk)
+        except Exception as e:
+            if end_cb:
+                end_cb()
+            if acc.reasoning_started and reasoning_end_cb:
+                reasoning_end_cb()
             return None, str(e), None
+        if end_cb:
+            end_cb()
+        if acc.reasoning_started and reasoning_end_cb:
+            reasoning_end_cb()
+        return acc.build_message(prefill), None, acc.usage
 
     @staticmethod
     def _call_responses_api(messages_to_send, temp, timeout, tools, top_p,
-                            frequency_penalty, presence_penalty, max_tokens, previous_response_id):
+                            frequency_penalty, presence_penalty, max_tokens,
+                            previous_response_id=None):
         try:
             kwargs = {
                 "model": Config.MODEL_NAME,
                 "input": messages_to_send,
-                "previous_response_id": previous_response_id,
                 "temperature": temp if temp is not None else Config.TEMP,
                 "max_output_tokens": max_tokens if max_tokens is not None else Config.MAX_OUTPUT_TOKENS,
                 "timeout": timeout if timeout is not None else Config.TIMEOUT,
                 "reasoning_effort": "none",
             }
+            if previous_response_id is not None:
+                kwargs["previous_response_id"] = previous_response_id
             if tools:
                 kwargs["tools"] = tools
             if top_p is not None:
@@ -380,23 +530,13 @@ class LLMClient:
             params, temp, timeout, top_p, frequency_penalty, presence_penalty, max_tokens
         )
 
-        messages_to_send = list(messages)
-        if prefill:
-            messages_to_send.append({"role": "assistant", "content": prefill})
-        
+        messages_to_send = LLMClient._prepare_messages(messages, prefill)
+
         try:
             stream = LLMClient.get_client().chat.completions.create(
-                model=Config.MODEL_NAME,
                 messages=messages_to_send,
-                temperature=temp if temp is not None else Config.TEMP,
-                max_tokens=max_tokens if max_tokens is not None else Config.MAX_OUTPUT_TOKENS,
-                tools=tools,
-                parallel_tool_calls=False,
-                timeout=timeout if timeout is not None else Config.TIMEOUT,
-                reasoning_effort="none",
-                frequency_penalty=frequency_penalty if frequency_penalty is not None else Config.FREQUENCY_PENALTY,
-                presence_penalty=presence_penalty if presence_penalty is not None else Config.PRESENCE_PENALTY,
-                top_p=top_p if top_p is not None else Config.TOP_P,
+                **LLMClient._chat_kwargs(temp, timeout, tools, top_p,
+                                         frequency_penalty, presence_penalty, max_tokens),
                 stream=True,
                 stream_options={"include_usage": True},
             )

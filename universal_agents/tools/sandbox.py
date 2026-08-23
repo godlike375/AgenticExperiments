@@ -1,6 +1,8 @@
 import os
 import subprocess
 from universal_agents.tool import tool
+from universal_agents.constants import err
+from universal_agents.subprocess_utils import run_capture
 
 
 class UnifiedDockerAgent:
@@ -21,7 +23,7 @@ class UnifiedDockerAgent:
         cls._current_repo_path = os.path.abspath(repo_path)
 
         if not os.path.isdir(cls._current_repo_path):
-            return f"Error: repo not found: {cls._current_repo_path}"
+            return err(f": repo not found: {cls._current_repo_path}")
 
         # Если контейнер уже запущен, просто возвращаем статус
         if cls._is_container_running():
@@ -62,7 +64,7 @@ class UnifiedDockerAgent:
 
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
-            return f"Error starting container: {result.stderr}"
+            return err(f" starting container: {result.stderr}")
 
         return f"Unified agent started. Workspace: {cls._current_repo_path}"
 
@@ -76,46 +78,13 @@ class UnifiedDockerAgent:
     def execute_bash(cls, command: str, timeout: int = 60) -> str:
         cls._ensure_container()
         cmd = ["docker", "exec", cls.CONTAINER_NAME, "bash", "-c", command]
-        return cls._run_cmd(cmd, timeout)
+        return run_capture(cmd, timeout)
 
     @classmethod
     def execute_python(cls, code: str, timeout: int = 60) -> str:
         cls._ensure_container()
         cmd = ["docker", "exec", "-i", cls.CONTAINER_NAME, "python3", "-"]
-        return cls._run_cmd(cmd, timeout, stdin_input=code)
-
-    @classmethod
-    def _run_cmd(cls, cmd: list, timeout: int, stdin_input: str = None) -> str:
-        try:
-            result = subprocess.run(
-                cmd,
-                input=stdin_input,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                timeout=timeout
-            )
-
-            output = result.stdout or ""
-
-            if result.returncode != 0:
-                error_msg = result.stderr or result.stdout or "Unknown error"
-                raise RuntimeError(
-                    f"Command failed with exit code {result.returncode}:\n{error_msg}"
-                )
-
-            if result.stderr:
-                output += f"\n[stderr]\n{result.stderr}"
-
-            output += f"\n[exit_code]: {result.returncode}"
-            return output
-
-        except subprocess.TimeoutExpired:
-            raise TimeoutError(f"Command timed out after {timeout}s")
-        except RuntimeError:
-            raise
-        except Exception as e:
-            raise RuntimeError(f"Unexpected error during command execution: {e}")
+        return run_capture(cmd, timeout, stdin=code)
 
     @classmethod
     def stop(cls) -> str:

@@ -6,7 +6,9 @@ from universal_agents.models import UserMessage
 
 class TestTokenUsageTracker(unittest.TestCase):
     def test_estimate_tokens(self):
-        self.assertEqual(TokenUsageTracker.estimate_tokens("x" * 46), 20)
+        # int(len / CHARS_PER_TOKEN): 46/2.35 = 19.57 -> 19, 47/2.35 = 20.0 -> 20
+        self.assertEqual(TokenUsageTracker.estimate_tokens("x" * 46), 19)
+        self.assertEqual(TokenUsageTracker.estimate_tokens("x" * 47), 20)
         self.assertEqual(TokenUsageTracker.estimate_tokens(""), 0)
 
     def test_remaining(self):

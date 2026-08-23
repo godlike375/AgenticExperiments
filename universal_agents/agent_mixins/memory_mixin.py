@@ -3,6 +3,11 @@
 from __future__ import annotations
 
 from universal_agents.config import Config, CHARS_PER_TOKEN, MIN_TOKENS_TO_SUMMARIZE
+from universal_agents.constants import (
+    SUMMARY_PREFIX_USER,
+    SUMMARY_PREFIX_AI,
+    SUMMARY_PREFIX_TOOL_NAMED,
+)
 from universal_agents.compressors import summarize_dialogue, _dense_summarize_message
 from universal_agents.models import UserMessage, AssistantMessage, ToolResult
 from universal_agents.task_tracker import compact_completed_tasks
@@ -19,9 +24,9 @@ class MemoryMixin:
         if len(content) < MIN_CHARS:
             return
         summary = _dense_summarize_message(self, content)
-        stored = f"AI: {summary}" if summary else None
+        stored = f"{SUMMARY_PREFIX_AI} {summary}" if summary else None
         if stored and len(stored) < len(content):
-            self._per_msg_summaries[id(msg)] = stored
+            self.history.set_per_msg_summary(msg, stored)
             self.on_system_msg(
                 f"[PER-MSG SUMMARY] Assistant message ({len(content)} chars) "
                 f"summarized into working memory ({len(summary)} chars)."
@@ -35,9 +40,9 @@ class MemoryMixin:
         if len(content) < MIN_CHARS:
             return
         summary = _dense_summarize_message(self, content)
-        stored = f"USER: {summary}" if summary else None
+        stored = f"{SUMMARY_PREFIX_USER} {summary}" if summary else None
         if stored and len(stored) < len(content):
-            self._per_msg_summaries[id(msg)] = stored
+            self.history.set_per_msg_summary(msg, stored)
             self.on_system_msg(
                 f"[PER-MSG SUMMARY] User message ({len(content)} chars) "
                 f"summarized into working memory ({len(summary)} chars)."
@@ -57,7 +62,7 @@ class MemoryMixin:
         if len(content) < MIN_CHARS:
             return
         summary = _dense_summarize_message(self, content)
-        stored = f"TOOL({tr.name}): {summary}" if summary else None
+        stored = SUMMARY_PREFIX_TOOL_NAMED.format(name=tr.name) + f" {summary}" if summary else None
         if stored and len(stored) < len(content):
             # Для read заменяем оригинальный контент на суммаризацию прямо в
             # результате инструмента: в контексте и истории остаётся суммаризация,
@@ -69,7 +74,7 @@ class MemoryMixin:
                     f"({len(content)} -> {len(summary)} chars)."
                 )
                 return
-            self._per_msg_summaries[id(tr)] = stored
+            self.history.set_per_msg_summary(tr, stored)
             self.on_system_msg(
                 f"[PER-MSG SUMMARY] Tool '{tr.name}' output ({len(content)} chars) "
                 f"summarized into working memory ({len(summary)} chars)."
@@ -77,8 +82,7 @@ class MemoryMixin:
 
     def _prune_per_msg_summaries(self) -> None:
         """Убирает из рабочей памяти саммари сообщений, которых больше нет в истории."""
-        alive = {id(m) for m in self.history.get_all()}
-        self._per_msg_summaries = {k: v for k, v in self._per_msg_summaries.items() if k in alive}
+        self.history.prune_per_msg_summaries()
 
     def _get_context_usage_percent(self) -> float:
         """Процент заполнения контекста по фактическому расходу из API (тот же
@@ -102,17 +106,9 @@ class MemoryMixin:
         # (незавершённый/висячий вызов), удаляем его из истории и суммаризируем
         # всё ТОЛЬКО ДО него: ассистент перевызовет инструмент уже после
         # суммаризации (так чище, чем тащить полу-вызов через сжатие).
-        msgs = self.history._messages
-        popped_calls = 0
-        while (
-            msgs
-            and isinstance(msgs[-1], AssistantMessage)
-            and msgs[-1].has_tool_calls()
-        ):
-            msgs.pop()
-            popped_calls += 1
+        popped_calls = self.history.pop_pending_tool_calls()
 
-        last = msgs[-1] if msgs else None
+        last = self.history._messages[-1] if self.history._messages else None
         if not (isinstance(last, ToolResult) or isinstance(last, UserMessage)):
             # Небезопасная граница (ассистент дал текст, история пуста и т.п.) —
             # откладываем суммаризацию до следующей безопасной точки.
@@ -162,7 +158,7 @@ class MemoryMixin:
         final_reduction = 1.0 - (len(summary) / original_len)
 
         self.history.compress_old_messages(summary, preserve_last=preserve_last)
-        self.file_states.prune()
+        self._on_history_changed()
         self._prune_per_msg_summaries()
 
 

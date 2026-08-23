@@ -2,10 +2,9 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from universal_agents.tool import tool
-from universal_agents.constants import ENVIRONMENT_PREFIX, ENVIRONMENT_PREFIX_END
+from universal_agents.constants import ENVIRONMENT_PREFIX, ENVIRONMENT_PREFIX_END, err, ok
 from universal_agents.config import Config
 from universal_agents.models import UserMessage, AssistantMessage, ToolResult, SystemMessage
-from universal_agents.sub_agent import MAX_SUB_AGENT_DEPTH
 from universal_agents.compressors import summarize_dialogue
 
 if TYPE_CHECKING:
@@ -17,7 +16,7 @@ if TYPE_CHECKING:
 def get_messages(agent: LLMAgent, chars_per_message: int = 30) -> str:
     history = agent.history
     if len(history) <= Config.AFTER_SYSTEM_PROMPT:
-        return f"{ENVIRONMENT_PREFIX} История пока пустая.{ENVIRONMENT_PREFIX_END}"
+        return ok(" История пока пустая.")
     lines = ["=== SHORT DIALOG ==="]
     for i in range(Config.AFTER_SYSTEM_PROMPT, len(history)):
         msg = history[i]
@@ -57,7 +56,11 @@ def get_messages(agent: LLMAgent, chars_per_message: int = 30) -> str:
     new=("str", "Text to insert in place of old"),
 )
 def edit_message(agent: LLMAgent, id: int, new: str, old: str = '') -> str:
-    return agent.history.edit_message(id, new, old)
+    result = agent.history.edit_message(id, new, old)
+    tm = getattr(agent, "tools_manager", None)
+    if tm is not None:
+        tm.flush_pending_unloads()
+    return result
 
 
 @tool(
@@ -68,7 +71,11 @@ def edit_message(agent: LLMAgent, id: int, new: str, old: str = '') -> str:
     end_id=("int", "Optional ending message ID (-1 for last)"),
 )
 def delete_messages(agent: LLMAgent, start_id: int, end_id: int = -1) -> str:
-    return agent.history.delete_range(start_id, end_id)
+    result = agent.history.delete_range(start_id, end_id)
+    tm = getattr(agent, "tools_manager", None)
+    if tm is not None:
+        tm.flush_pending_unloads()
+    return result
 
 
 @tool(
@@ -88,27 +95,28 @@ def summarize_messages(agent: LLMAgent, start_id: int, end_id: int = -1) -> str:
     safe_end = min(end_id, len(history) - 3)
 
     if safe_start > safe_end:
-        return (
-            f"{ENVIRONMENT_PREFIX} Error Cannot summarize: range [{start_id}:{safe_end}] "
+        return err(
+            f" Cannot summarize: range [{start_id}:{safe_end}] "
             f"is invalid or overlaps with protected last 2 messages."
-            f"{ENVIRONMENT_PREFIX_END}"
         )
 
     summary = summarize_dialogue(agent, start_id=safe_start, end_id=safe_end)
     if not summary:
-        return f"{ENVIRONMENT_PREFIX} Error Summarization failed (empty response or error).{ENVIRONMENT_PREFIX_END}"
+        return err(" Summarization failed (empty response or error).")
 
     original_len = history.content_len(safe_start, safe_end)
     if len(summary) >= original_len:
-        return (
-            f"{ENVIRONMENT_PREFIX} Error Summarization produced text longer than original "
+        return err(
+            f" Summarization produced text longer than original "
             f"({len(summary)} >= {original_len}). Nothing to compress."
-            f"{ENVIRONMENT_PREFIX_END}"
         )
 
-    summary_content = f"{ENVIRONMENT_PREFIX} [SUMMARY of messages {safe_start}-{safe_end}]: {summary}\n{ENVIRONMENT_PREFIX_END}"
+    summary_content = ok(f" [SUMMARY of messages {safe_start}-{safe_end}]: {summary}\n")
     history.replace_range(safe_start, safe_end, [UserMessage(content=summary_content)])
     history.normalize()
+    tm = getattr(agent, "tools_manager", None)
+    if tm is not None:
+        tm.flush_pending_unloads()
 
     freed = original_len - len(summary_content)
     return (
@@ -126,13 +134,7 @@ def summarize_messages(agent: LLMAgent, start_id: int, end_id: int = -1) -> str:
     max_iter=("int", "Optional max tool calls for sub-agent"),
 )
 def delegate_to_subagent(agent: LLMAgent, task: str, max_iter: int = None) -> str:
-    depth = getattr(agent, '_depth', 0)
-    if depth >= MAX_SUB_AGENT_DEPTH:
-        return f"{ENVIRONMENT_PREFIX} Error Sub-agent depth limit ({MAX_SUB_AGENT_DEPTH}) reached. You can't delegate to sub-agent. Do it yourself.{ENVIRONMENT_PREFIX_END}"
-
-    sub_plugins = {}
-    for name, tool_info in agent._all_tools.items():
-        sub_plugins[name] = tool_info["handler"]
+    from universal_agents.sub_agent import run_subagent_once
 
     task_with_context = (
         "You are a sub-agent working on a specific subtask. "
@@ -140,24 +142,7 @@ def delegate_to_subagent(agent: LLMAgent, task: str, max_iter: int = None) -> st
         "Do NOT ever ask clarifying questions — work with what you have.\n\n"
         f"Task:\n{task}"
     )
-
-    sub = agent.make_sub_agent(
-        tools_config=agent._tools_config,
-        external_plugins=sub_plugins,
-        safe_only=False,
-        max_iter=max_iter,
-        temp=0.2,
-        on_log=agent.on_system_msg,
-        depth=depth + 1,
-    )
-
-    agent.on_system_msg(f"[DELEGATE] Starting sub-agent for: {task}...")
-    result = sub.run(task_with_context)
-    agent.on_system_msg(f"[DELEGATE] Completed. Tokens spent by sub-agent: {sub.tokens_spent}")
-
-    if not result.strip():
-        return f"{ENVIRONMENT_PREFIX} Error Sub-agent returned empty result.{ENVIRONMENT_PREFIX_END}"
-    return f"{ENVIRONMENT_PREFIX} Sub-agent result:\n{result}{ENVIRONMENT_PREFIX_END}"
+    return run_subagent_once(agent, task_with_context, temp=0.2, max_iter=max_iter)
 
 
 @tool(
@@ -165,8 +150,8 @@ def delegate_to_subagent(agent: LLMAgent, task: str, max_iter: int = None) -> st
     short_description="load/list tools",
     name=("str", "Specific tool name to load"),
 )
-def load_tools(agent: LLMAgent, name: str = "") -> str:
-    return agent.load_tools(name)
+def load_tool(agent: LLMAgent, name: str = "") -> str:
+    return agent.load_tool(name)
 
 
 @tool(

@@ -20,7 +20,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Optional
 
 from universal_agents.config import Config
-from universal_agents.constants import ENVIRONMENT_PREFIX, ENVIRONMENT_PREFIX_END, SUMMARY_MARKER
+from universal_agents.constants import ENVIRONMENT_PREFIX, ENVIRONMENT_PREFIX_END, err, ok
 from universal_agents.models import AssistantMessage, UserMessage, ToolResult
 from universal_agents.tool_parsing import parse_tool_args
 
@@ -44,16 +44,16 @@ def plan_leaf_sequence(plan_map: dict) -> list[str]:
 def set_plan(agent: LLMAgent, plan_list: list) -> str:
     """Обработчик make_plan. Сохраняет плоский план на агенте и возвращает порядок."""
     if not isinstance(plan_list, list) or not plan_list:
-        return f"{ENVIRONMENT_PREFIX} Error: make_plan expects a non-empty list of {{id, title}} tasks.{ENVIRONMENT_PREFIX_END}"
+        return err(": make_plan expects a non-empty list of {id, title} tasks.")
     meta: dict = {}
     for entry in plan_list:
         if not isinstance(entry, dict):
-            return f"{ENVIRONMENT_PREFIX} Error: each plan entry must be an object with 'id'.{ENVIRONMENT_PREFIX_END}"
+            return err(": each plan entry must be an object with 'id'.")
         tid = (str(entry.get("id", "")).strip())
         if not tid:
-            return f"{ENVIRONMENT_PREFIX} Error: each plan task needs a non-empty 'id'.{ENVIRONMENT_PREFIX_END}"
+            return err(": each plan task needs a non-empty 'id'.")
         if tid in meta:
-            return f"{ENVIRONMENT_PREFIX} Error: duplicate task id '{tid}' in plan.{ENVIRONMENT_PREFIX_END}"
+            return err(f": duplicate task id '{tid}' in plan.")
         meta[tid] = {"title": str(entry.get("title", "") or "").strip()}
     agent.task_plan = list(meta.keys())
     agent.task_plan_map = meta
@@ -61,14 +61,14 @@ def set_plan(agent: LLMAgent, plan_list: list) -> str:
     # предыдущего плана, чтобы переиспользуемые id не считались выполненными.
     agent._compacted_task_ids = set()
     # Динамически подключаем have_done: он доступен только после успешного
-    # make_plan (до этого в инструментарии его нет).
+    # make_plan (до этого в инструментарии его нет и load_tool его не выдаст).
     tm = getattr(agent, "tools_manager", None)
     if tm is not None:
         try:
             if "have_done" not in getattr(agent, "_all_tools", {}):
-                tm.load("have_done")
-        except Exception:
-            pass
+                tm.force_load("have_done")
+        except Exception as e:
+            agent.on_system_msg(f"[TASK PLAN] Failed to attach have_done tool: {e}")
     order = plan_leaf_sequence(meta)
     order_str = " -> ".join(order) or "(empty)"
     return (
@@ -89,13 +89,12 @@ def mark_task_done(agent: LLMAgent, task_id: str) -> str:
     """Обработчик have_done. Информационное подтверждение (не блокирует)."""
     tid = (task_id or "").strip()
     if not tid:
-        return f"{ENVIRONMENT_PREFIX} Error: have_done requires a non-empty 'id'.{ENVIRONMENT_PREFIX_END}"
+        return err(": have_done requires a non-empty 'id'.")
     plan_map = getattr(agent, "task_plan_map", None) or {}
     if plan_map and tid not in plan_map:
-        return f"{ENVIRONMENT_PREFIX} Error: '{tid}' is not in the plan.{ENVIRONMENT_PREFIX_END}"
+        return err(f": '{tid}' is not in the plan.")
     return (
-        f"{ENVIRONMENT_PREFIX} Task '{tid}' marked done."
-        f"{ENVIRONMENT_PREFIX_END}"
+        ok(f" Task '{tid}' marked done.")
     )
 
 
@@ -119,7 +118,7 @@ def _last_plan_position(history: list) -> int:
 
 
 # Инструменты-маркеры, которые НЕ считаются реальной работой.
-_META_TOOLS = {PLAN_TOOL, DONE_TOOL, "load_tools"}
+_META_TOOLS = {PLAN_TOOL, DONE_TOOL, "load_tool"}
 
 
 def _last_real_work_position(history: list, after: int) -> int:
@@ -272,7 +271,20 @@ def _leaf_block(history: list, leaf: str, leaves: list, plan_pos: int) -> tuple:
     have_done этой задачи (его результат на done[leaf])."""
     done = _done_marker_positions(history, leaves, after=plan_pos)
     done_idx = done[leaf]        # индекс результата have_done этой задачи
-    hd_call = done_idx
+
+    # Индекс самого вызова have_done: ассистент-сообщение с DONE_TOOL,
+    # чей tc.id совпадает с tool_call_id результата (обычно сразу перед ним).
+    result_msg = history[done_idx]
+    call_id = getattr(result_msg, 'tool_call_id', None)
+    hd_call = done_idx - 1
+    for j in range(done_idx - 1, plan_pos, -1):
+        m = history[j]
+        if (
+            isinstance(m, AssistantMessage) and m.has_tool_calls()
+            and any(tc.name == DONE_TOOL and tc.id == call_id for tc in m.tool_calls)
+        ):
+            hd_call = j
+            break
 
     # Последняя сохраняемая граница перед работой задачи: результат make_plan
     # (вызов на plan_pos) либо результат have_done последней размеченной предыдущей.
@@ -283,7 +295,7 @@ def _leaf_block(history: list, leaf: str, leaves: list, plan_pos: int) -> tuple:
         if prev is not None and prev > boundary:
             boundary = prev
     start = boundary + 1
-    end = hd_call
+    end = hd_call - 1
     return start, end
 
 
@@ -323,7 +335,7 @@ def _compact_one_group(agent: LLMAgent) -> Optional[str]:
         return None
 
     summary_msg = UserMessage(
-        content=f"{ENVIRONMENT_PREFIX} ('{title}' [{leaf}] has been already marked as done so don't call have_done('{title}'):\n{summary} again. Just take next steps if anything remains undone.\n{ENVIRONMENT_PREFIX_END}"
+        content=ok(f" ('{title}' [{leaf}] has been already marked as done so don't call have_done('{title}'):\n{summary} again. Just take next steps if anything remains undone.\n")
     )
     agent.history.replace_range(start, end, [summary_msg])
     # Обрезаем раздутый summary в результате have_done: детальные факты уже
@@ -332,8 +344,8 @@ def _compact_one_group(agent: LLMAgent) -> Optional[str]:
     hd = history[done_idx] if done_idx is not None else None
     if hd is not None and not getattr(hd, 'is_error', False):
         if len(getattr(hd, 'content', '') or '') > Config.HAVE_DONE_TRIM_THRESHOLD:
-            hd.content = f"{ENVIRONMENT_PREFIX} Task '{leaf}' marked done (summary compacted).{ENVIRONMENT_PREFIX_END}"
-    agent.file_states.prune()
+            hd.content = ok(f" Task '{leaf}' marked done (summary compacted).")
+    agent._on_history_changed()
     compacted.add(leaf)
     agent.on_system_msg(
         f"[TASK COMPACTION] Compressed subtask '{title}' [{leaf}] -> {len(summary)} chars "
@@ -350,10 +362,10 @@ def summarize_task_segment(agent: LLMAgent, segment_msgs: list, task_id: str, ta
     draft = _draft_task_summary(agent, history_msgs, task_id, task_title)
     if not draft:
         return None
-    #if Config.AUTO_SUMMARY_REVIEW_PASS:
-    #    final = _review_task_summary(agent, history_msgs, draft, task_id, task_title)
-    #    if final:
-    #        return final
+    if Config.AUTO_SUMMARY_REVIEW_PASS:
+        final = _review_task_summary(agent, history_msgs, draft, task_id, task_title)
+        if final:
+            return final
     return draft
 
 
