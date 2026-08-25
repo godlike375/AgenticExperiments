@@ -370,6 +370,27 @@ def summarize_task_segment(agent: LLMAgent, segment_msgs: list, task_id: str, ta
 
 
 # ---------------------------------------------------------------------------
+# Сериализация состояния плана (переживает /save + /load)
+# ---------------------------------------------------------------------------
+
+
+def plan_state_to_dict(agent: "LLMAgent") -> dict:
+    return {
+        "task_plan": list(getattr(agent, "task_plan", None) or []),
+        "task_plan_map": dict(getattr(agent, "task_plan_map", None) or {}),
+        "compacted_task_ids": sorted(getattr(agent, "_compacted_task_ids", None) or set()),
+    }
+
+
+def restore_plan_state(agent: "LLMAgent", data: dict | None) -> None:
+    if not isinstance(data, dict):
+        return
+    agent.task_plan = list(data.get("task_plan") or [])
+    agent.task_plan_map = dict(data.get("task_plan_map") or {})
+    agent._compacted_task_ids = set(data.get("compacted_task_ids") or [])
+
+
+# ---------------------------------------------------------------------------
 # Инструкции модели (встраиваются в системный промпт, см. main.py)
 # ---------------------------------------------------------------------------
 

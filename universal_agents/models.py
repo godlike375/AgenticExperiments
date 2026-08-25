@@ -8,6 +8,9 @@ from universal_agents.config import Config
 @dataclass
 class Message(ABC):
     timestamp: datetime = field(init=False)
+    # Стабильный монотонный идентификатор в рамках сессии. Назначается
+    # ChatHistory при добавлении; переживёт /save + /load, в API не уходит.
+    seq: Optional[int] = field(init=False, default=None, repr=False)
 
     def __post_init__(self):
         self.timestamp = datetime.now()
@@ -21,7 +24,10 @@ class Message(ABC):
         API-представлением; подклассы могут добавить служебные метаданные
         (например, флаг skip_summarize у ToolResult), которые НЕ должны уходить
         в запрос к LLM, но должны переживать /save + /load."""
-        return self.to_api_dict()
+        d = self.to_api_dict()
+        if self.seq is not None:
+            d["_seq"] = self.seq
+        return d
 
 @dataclass
 class SystemMessage(Message):
@@ -88,6 +94,10 @@ class ToolResult(Message):
     execution_time_ms: Optional[float] = None
     retry_count: int = 0
     skip_summarize: bool = False
+    # Эвристическая подсказка для сжатия: результат воспроизводим повторным
+    # запуском инструмента (чтение файла, поиск и т.п.) — при компакции его
+    # можно сворачивать агрессивнее, чем невосстановимые результаты.
+    recoverable_hint: bool = False
 
     def to_api_dict(self) -> dict[str, Any]:
         return {
@@ -107,6 +117,7 @@ class ToolResult(Message):
             "_retry_count": self.retry_count,
             "_execution_time_ms": self.execution_time_ms,
             "_skip_summarize": self.skip_summarize,
+            "_recoverable_hint": self.recoverable_hint,
         })
         return d
 

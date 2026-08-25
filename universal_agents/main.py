@@ -8,12 +8,19 @@ from universal_agents.constants import ENVIRONMENT_PREFIX, ENVIRONMENT_PREFIX_EN
 from universal_agents.project_root import find_project_root
 from universal_agents.task_tracker import TASK_MARK_INSTRUCTIONS
 
-TOOLS_CONFIG = ['load_tool', 'read', 'edit_file', 'cwd', 'search', 'get_messages', 'run_powershell', 'make_plan']
+TOOLS_CONFIG = [
+    'load_tool', 'read', 'edit_file', 'cwd', 'search', 'get_messages',
+    'run_powershell', 'make_plan',
+    'recall_search', 'recall_read',
+]
 
 if __name__ == "__main__":
     tools_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tools")
     all_tools = load_external_plugins(tools_dir)
-    startup_tools = {n: f for n, f in all_tools.items() if n in ("load_tool", "make_plan")}
+    startup_tools = {
+        n: f for n, f in all_tools.items()
+        if n in ("load_tool", "make_plan", "recall_search", "recall_read")
+    }
     print(f"Loaded startup tools: {list(startup_tools.keys())}")
     print("Use load_tool to load tools dynamically.")
 

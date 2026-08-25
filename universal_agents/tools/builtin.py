@@ -43,7 +43,9 @@ def get_messages(agent: LLMAgent, chars_per_message: int = 30) -> str:
             continue
         if len(content) > chars_per_message:
             content = content[:chars_per_message] + " ..."
-        lines.append(f"{i}. {role}: {content.strip()}")
+        seq = getattr(msg, "seq", None)
+        seq_label = f"seq={seq} " if seq is not None else ""
+        lines.append(f"{i}. {seq_label}{role}: {content.strip()}")
     return f"{ENVIRONMENT_PREFIX} Your current history:\n" + "\n".join(lines) + f"\n{ENVIRONMENT_PREFIX_END}"
 
 
@@ -111,8 +113,17 @@ def summarize_messages(agent: LLMAgent, start_id: int, end_id: int = -1) -> str:
             f"({len(summary)} >= {original_len}). Nothing to compress."
         )
 
+    # Оригиналы диапазона выселяем в архив (recall остаётся возможным),
+    # затем заменяем их summary-сообщением. is_summary=True обязателен,
+    # иначе последующие компакции не увидят этот блок как саммари.
+    if Config.MEMORY_ARCHIVE_ENABLED and hasattr(agent, "archive"):
+        agent.archive.append_messages(history.get_all()[safe_start:safe_end + 1])
+
     summary_content = ok(f" [SUMMARY of messages {safe_start}-{safe_end}]: {summary}\n")
-    history.replace_range(safe_start, safe_end, [UserMessage(content=summary_content)])
+    history.replace_range(
+        safe_start, safe_end,
+        [UserMessage(content=summary_content, is_summary=True)],
+    )
     history.normalize()
     tm = getattr(agent, "tools_manager", None)
     if tm is not None:

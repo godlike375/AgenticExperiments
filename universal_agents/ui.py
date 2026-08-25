@@ -137,13 +137,23 @@ class CLI:
     def cmd_save(self, parts: list[str]):
         filename = parts[1] if len(parts) > 1 else "default_history.json"
         try:
+            from universal_agents.task_tracker import plan_state_to_dict
             tool_names = list(self.agent._all_tools.keys())
+            extras = {
+                "archive": self.agent.archive.to_list(),
+                "plan_state": plan_state_to_dict(self.agent),
+                "pending_pins": list(getattr(self.agent, "_pending_pins", [])),
+            }
             self.agent.history.save(
                 filename,
                 loaded_tools=tool_names,
                 file_states=self.agent.file_states.to_dict(),
+                extras=extras,
             )
-            ConsoleUI.system_msg(f"History saved to '{filename}' (tools: {tool_names}, file_states: {len(self.agent.file_states)})")
+            ConsoleUI.system_msg(
+                f"History saved to '{filename}' (tools: {tool_names}, "
+                f"file_states: {len(self.agent.file_states)}, archive: {len(self.agent.archive)})"
+            )
         except Exception as e:
             ConsoleUI.system_msg(f"Error saving history: {e}")
 
@@ -153,13 +163,22 @@ class CLI:
             ConsoleUI.system_msg(f"File '{filename}' not found")
             return
         try:
+            from universal_agents.archive import HistoryArchive
+            from universal_agents.task_tracker import restore_plan_state
             loaded_tools, file_states, summaries = self.agent.history.load(filename)
+            extras = self.agent.history.last_loaded_extras
             self.agent.file_states.from_dict(file_states)
+            self.agent.archive = HistoryArchive.from_list(extras.get("archive") or [])
+            restore_plan_state(self.agent, extras.get("plan_state"))
+            self.agent._pending_pins = [str(x) for x in (extras.get("pending_pins") or [])]
             self.agent.rebuild_tool_usage()
             for name in loaded_tools:
                 if name not in self.agent._all_tools:
                     self.agent.load_tool(name)
-            ConsoleUI.system_msg(f"History loaded. Total messages: {len(self.agent.history)}. Tools restored: {loaded_tools}")
+            ConsoleUI.system_msg(
+                f"History loaded. Total messages: {len(self.agent.history)}. "
+                f"Tools restored: {loaded_tools}. Archive entries: {len(self.agent.archive)}"
+            )
             print("\n" + "="*40 + "\n🔄 LOADED HISTORY:\n" + "="*40)
             for msg in self.agent.history.get_all():
                 ConsoleUI.render_message(msg)

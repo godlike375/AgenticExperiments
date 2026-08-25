@@ -31,12 +31,15 @@ def prepare_messages_for_api(agent: LLMAgent) -> list[dict]:
     agent.history.normalize()
     api_messages: list[dict] = []
 
+    # «Последним user-сообщением» для токен-заголовка считаем живое сообщение
+    # пользователя, а не служебные блоки памяти (STATE/EPISODES).
     last_user_idx = None
     last_user_msg = None
     for i in range(len(agent.history) - 1, -1, -1):
-        if isinstance(agent.history[i], UserMessage):
+        msg = agent.history[i]
+        if isinstance(msg, UserMessage):
             last_user_idx = i
-            last_user_msg = agent.history[i]
+            last_user_msg = msg
             break
 
     for i, msg in enumerate(agent.history):

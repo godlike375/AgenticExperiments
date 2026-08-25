@@ -210,11 +210,17 @@ class SubAgent:
         return agent
 
     def run(self, task: str, prefill: str = None) -> str:
-        """Выполняет задачу и возвращает финальный текстовый ответ."""
+        """Выполняет задачу и возвращает финальный текстовый ответ.
+
+        Последний AssistantMessage ищем проходом с конца (а не строго последним
+        сообщением): после ответа могли отработать служебные механизмы
+        (пороговые проверки, системные вставки), и хвостом истории становится
+        не ответ — раньше из-за этого субагент «терял» готовый результат."""
         self._agent.chat(task, max_iter=self._max_iter, prefill=prefill)
-        last_msg = self._agent.history.get_last_message()
-        if isinstance(last_msg, AssistantMessage):
-            return last_msg.content or ""
+        messages = self._agent.history.get_all()
+        for msg in reversed(messages):
+            if isinstance(msg, AssistantMessage) and msg.content:
+                return msg.content
         return ""
 
     @property

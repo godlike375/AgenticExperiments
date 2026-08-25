@@ -2,15 +2,24 @@ import json
 from typing import Optional, Any, Iterable
 from universal_agents.constants import ENVIRONMENT_PREFIX, ENVIRONMENT_PREFIX_END, err, ok
 from universal_agents.config import Config
-from universal_agents.models import SystemMessage, UserMessage, AssistantMessage, ToolResult, ToolCall, Message
+from universal_agents.models import (
+    SystemMessage, UserMessage, AssistantMessage, ToolResult, ToolCall, Message
+)
+
 
 class ChatHistory:
     def __init__(self, system_prompt: str):
         self._messages: list[Message] = [SystemMessage(system_prompt)]
+        # Стабильные монотонные идентификаторы сообщений (переживают /load).
+        self._next_seq: int = 1
         # Рабочая память (НЕ попадает в контекст): плотные саммари отдельных
         # сообщений (ключ — id(Message)). Используются при сжатии диалога,
         # чтобы из маленьких саммари собрать более короткий новый диалог.
         self._per_msg_summaries: dict[int, str] = {}
+        # Extras последней загрузки (архив сессии, состояние плана) — читаются
+        # вызывающим кодом после load(); сам load сохраняет обратную совместимость
+        # и возвращает прежний кортеж.
+        self.last_loaded_extras: dict = {}
         # Dirty-флаг нормализации: normalize() пересобирает список сообщений,
         # что дорого и сбрасывает кэш заголовков; запускаем его только когда
         # история реально менялась с последней нормализации.
@@ -20,9 +29,23 @@ class ChatHistory:
         """Отмечает историю изменённой — следующая normalize() реально выполнится."""
         self._needs_normalize = True
 
+    def _assign_seq(self, msg: Message) -> None:
+        if getattr(msg, "seq", None) is None:
+            msg.seq = self._next_seq
+            self._next_seq += 1
+
+    @property
+    def next_seq(self) -> int:
+        return self._next_seq
+
     def add(self, msg: Message):
+        self._assign_seq(msg)
         self._messages.append(msg)
         self._mark_dirty()
+
+    def set_next_seq(self, value: int) -> None:
+        if isinstance(value, int) and value > 0:
+            self._next_seq = max(self._next_seq, value)
 
     # --------------------------------------------------------
     # Рабочая память: плотные саммари отдельных сообщений
@@ -42,6 +65,8 @@ class ChatHistory:
         self._per_msg_summaries = {k: v for k, v in self._per_msg_summaries.items() if k in alive}
 
     def extend(self, msgs: list[Message]):
+        for m in msgs:
+            self._assign_seq(m)
         self._messages.extend(msgs)
         self._mark_dirty()
 
@@ -144,7 +169,9 @@ class ChatHistory:
 
         valid.append(raw[first_user_idx])
 
-        # Фильтруем и объединяем оставшуюся историю
+        # Фильтруем и объединяем оставшуюся историю. Блоки гибридной памяти
+        # (STATE/EPISODES) не склеиваем ни между собой, ни с обычными user —
+        # их структура и порядок семантически значимы.
         for i in range(first_user_idx + 1, len(raw)):
             msg = raw[i]
             last = valid[-1]
@@ -156,7 +183,10 @@ class ChatHistory:
                         valid.append(msg)
                 continue
 
-            if type(msg) == type(last) and isinstance(msg, (UserMessage, AssistantMessage)):
+            if (
+                type(msg) == type(last)
+                and isinstance(msg, (UserMessage, AssistantMessage))
+            ):
                 last.content = (last.content or "") + "\n\n" + (msg.content or "")
                 if isinstance(last, UserMessage):
                     last._cached_header = None
@@ -217,7 +247,10 @@ class ChatHistory:
         self.remove_at(indices_to_remove)
         return removed_count
 
-    def save(self, path: str, loaded_tools: list[str] = None, file_states: dict = None):
+    def save(self, path: str, loaded_tools: list[str] = None, file_states: dict = None,
+             extras: dict = None):
+        """Сохраняет историю. extras — произвольные данные верхнего уровня
+        (архив сессии, состояние плана и т.п.), которые переживут /load."""
         # Саммари рабочей памяти сохраняются списком, выровненным по индексам
         # сообщений (ключ id() при перезагрузке не переживёт — объекты создаются заново).
         # Если рабочая память пуста — пишем [], чтобы не засорять файл и сохранить
@@ -231,6 +264,8 @@ class ChatHistory:
             "loaded_tools": loaded_tools or [],
             "file_states": file_states or {},
             "per_msg_summaries": summaries,
+            "next_seq": self._next_seq,
+            "extras": extras or {},
         }
         with open(path, 'w', encoding='utf-8') as f:
             json.dump(payload, f, ensure_ascii=False, indent=2)
@@ -238,7 +273,9 @@ class ChatHistory:
     def load(self, path: str) -> tuple[list[str], dict, list[str]]:
         with open(path, 'r', encoding='utf-8') as f:
             raw = json.load(f)
+        return self.load_from_payload(raw)
 
+    def load_from_payload(self, raw: dict) -> tuple[list[str], dict, list[str]]:
         if isinstance(raw, list):
             data_list = raw
             loaded_tools = []
@@ -287,9 +324,23 @@ class ChatHistory:
                     retry_count=d.get("_retry_count", 0),
                     execution_time_ms=d.get("_execution_time_ms"),
                     skip_summarize=d.get("_skip_summarize", False),
+                    recoverable_hint=d.get("_recoverable_hint", False),
                 ))
             else:
                 raise ValueError(f"Unknown role: {role}")
+
+        for i, m in enumerate(self._messages):
+            saved_seq = data_list[i].get("_seq")
+            if isinstance(saved_seq, int) and saved_seq > 0:
+                m.seq = saved_seq
+
+        max_seq = max((m.seq for m in self._messages if m.seq), default=0)
+        self._next_seq = max(max_seq + 1, int(raw.get("next_seq", 1) or 1)) if isinstance(raw, dict) else max_seq + 1
+
+        self.last_loaded_extras = {}
+        if isinstance(raw, dict):
+            extras = raw.get("extras")
+            self.last_loaded_extras = extras if isinstance(extras, dict) else {}
 
         # Перепривязываем сохранённые саммари рабочей памяти к пересозданным
         # объектам сообщений (ключ id() меняется после загрузки).
@@ -354,8 +405,24 @@ class ChatHistory:
 
     def replace_range(self, start: int, end: int, replacement: list[Message]) -> None:
         """Заменяет сообщения [start..end] на replacement."""
+        for m in replacement:
+            self._assign_seq(m)
         self._messages[start:end + 1] = replacement
         self._mark_dirty()
+
+    # --------------------------------------------------------
+    # Гибридная память: блоки STATE / EPISODES
+    # --------------------------------------------------------
+
+    def get_session_summary(self) -> Optional[str]:
+        """Текст текущего session summary без служебной обёртки (или None).
+
+        При повторной компакции подаётся модели как контекст для слияния
+        (см. compressors.summarize_history_plain)."""
+        for m in self._messages:
+            if isinstance(m, UserMessage) and m.is_summary:
+                return (m.content)
+        return None
 
     def compress_old_messages(self, summary: str, preserve_last: int = 2) -> None:
         """Заменяет старые сообщения summary-сообщением (одно UserMessage,
@@ -388,6 +455,9 @@ class ChatHistory:
             content=f"{ENVIRONMENT_PREFIX}: Your past dialog summary with user:\n{summary}\n{ENVIRONMENT_PREFIX_END}",
             is_summary=True,
         )
+        # Саммари живёт в истории и при следующих компакциях архивируется —
+        # ему нужен собственный стабильный seq.
+        self._assign_seq(summary_msg)
 
         preserved = msgs[safe_end:]
         for msg in preserved:

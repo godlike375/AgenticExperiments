@@ -10,12 +10,39 @@ from universal_agents.constants import (
     SUMMARY_PREFIX_TOOL_RESULT,
 )
 from universal_agents.models import UserMessage, AssistantMessage, ToolResult
-from universal_agents.llm_client import LLMClient, TokenUsageTracker
+from universal_agents.llm_client import TokenUsageTracker
 from universal_agents.context_builder import prepare_messages_for_api
 
 if TYPE_CHECKING:
     from universal_agents.agent import LLMAgent
-    from universal_agents.models import Message
+
+SECTION_GUIDE = """
+### 1. Постановка задачи и ожидания
+*   1.1 Ключевой контекст, главная задача, критерии завершения, ожидаемый конечный результат.
+*   1.2 Ограничения и требования задачи с разделением на строгие и нестрогие.
+*   1.3 Предпочтения пользователя включая язык, стиль и дополнительные инструкции.
+
+### 2. Ход работы и принятые решения
+*   2.1 Выполненные шаги с результатами, текущий и следующие шаги.
+*   2.2 Ключевые решения, неудачные попытки, отклонённые альтернативы. Причины принятых и непринятых решений и действий.
+
+### 3. Текущий статус, блокировки и черновики
+*   3.1 Незавершённые черновики (что это, где лежит, что осталось сделать), заблокированные задачи и зависимости, что блокирует и условия разблокировки.
+
+### 4. Знания, гипотезы и проверка
+*   4.1 Открытые вопросы, вещи требующие проверки. Подтвержденные вещи и чем подтверждены. Собственные наблюдения и выводы, текущие гипотезы.
+
+### 5. Проектная специфика и метаданные
+*   5.1 Мета-данные о задаче, проекте, пользователе.
+*   5.2 Внутренние специфические термины/сокращения в рамках проекта/задачи. Специфические договоренности. Связи между сущностями.
+
+### 6. Ресурсы и артефакты
+*   6.1 Задействованные ресурсы и артефакты (или подсказки как их найти). Для каждого ресурса: зачем нужен, где находится (путь/ссылка), актуальная версия (если применимо), что с ним делали, что можно/нужно делать с ним теперь.
+
+### 7. Инструкции для передачи контекста
+*   7.1 Подсказки для будущей версии себя продолжающей работу с конкретными инструкциями.
+*   7.2 Информация, которая не попала в предыдущие разделы, но может быть важна для продолжения.
+"""
 
 
 # ============================================================
@@ -147,12 +174,13 @@ def summarize_dialogue(
 ) -> Optional[str]:
     """
     Суммаризация диалога через LLM.
-    mode='per-message' (DISABLE_PER_MESSAGE_SUMMARIZATION=False) — новый диалог
-        собирается из маленьких саммари, накопленных в рабочей памяти агента
-        (по одному после каждого сообщения ассистента и длинного вывода
-        инструмента). Ничего не запрашивается у LLM на лету — только склейка.
-    mode='single' (DISABLE_PER_MESSAGE_SUMMARIZATION=True) — один вызов LLM со
-        всей историей (черновик + отревьюенная версия).
+
+    Единственный гейт per-message режима — Config.PER_MSG_SUMMARIES_ENABLED.
+    Когда он True, рабочая память агента (agent.history._per_msg_summaries)
+    наполняется плотными саммари отдельных сообщений, и здесь из них
+    собирается более короткий диалог (склейка, без LLM). Когда рабочая память
+    пуста (PER_MSG_SUMMARIES_ENABLED=False) — откат на single-shot режим: один
+    вызов LLM со всей историей (черновик + отревьюенная версия).
     """
     messages = agent.history.get_all()
 
@@ -169,15 +197,12 @@ def summarize_dialogue(
     # Ранее сгенерированное авто-саммари в обрезаемом диапазоне
     existing = _find_existing_summary(messages, end_id)
 
-    if Config.DISABLE_PER_MESSAGE_SUMMARIZATION:
-        # Сразу суммаризируем весь диалог целиком, не трогая отдельные сообщения
-        summary = _single_phase_summarize(agent, history_msgs, system_msg, existing)
-    else:
-        # Новый диалог собирается из маленьких саммари рабочей памяти
-        summary = (
-            _build_from_per_message_summaries(agent, start_id, end_id, truncate_result_ratio, truncate_result_min_chars)
-            or _single_phase_summarize(agent, history_msgs, system_msg, existing)
-        )
+    # Сначала пытаемся собрать диалог из накопленных per-message саммари;
+    # если рабочая память пуста — single-shot суммаризация всего диалога.
+    summary = (
+        _build_from_per_message_summaries(agent, start_id, end_id, truncate_result_ratio, truncate_result_min_chars)
+        or _single_phase_summarize(agent, history_msgs, system_msg, existing)
+    )
 
     return summary
 
@@ -537,3 +562,48 @@ def chunk_and_summarize_large_text(agent: LLMAgent, text: str, tool_name: str, t
     raw_accumulated_findings = "\n".join(findings_by_portion)
     agent.on_system_msg(f"[CHUNK ANALYZER] Synthesizing final response from all collected portions: {raw_accumulated_findings}")
     return raw_accumulated_findings
+
+
+# ============================================================
+# Транскрипция истории + single-shot session summary (7 разделов)
+# ============================================================
+
+
+def summarize_history_plain(
+    agent: LLMAgent,
+    history_msgs: list[dict],
+) -> Optional[str]:
+    """Сборка session summary в режиме single-shot (per-message выключен).
+
+    Подаётся ПОЛНАЯ история (включая system prompt) как структурированные
+    сообщения API — ровно в том же порядке, что и в реальном диалоге, чтобы
+    префикс совпадал и переиспользовался KV-cache. Инструкция суммаризации
+    (SECTION_GUIDE) добавляется последним user-сообщением.
+
+    Каждая компакция ПЕРЕПИСЫВАЕТ заметки с нуля. При повторной компакции
+    (current_summary задан) старые заметки подаются модели отдельным блоком
+    для слияния с полной историей — никакого инкрементального редактирования.
+
+    Возвращает готовый текст заметок или None при неудаче служебного вызова."""
+    prompt = _build_summary_prompt()
+    # history_msgs уже содержит system prompt первым сообщением — префикс
+    # совпадает с реальным диалогом, KV-cache переиспользуется.
+    msgs = list(history_msgs) + [{"role": "user", "content": prompt}]
+    msg_obj, err, usage = agent.service_llm_call(msgs, temp=0.1, timeout=Config.STATE_GEN_TIMEOUT)
+    if err or not msg_obj or not msg_obj.content:
+        _report_service_error(agent, "dialog plain summary", err, msg_obj)
+        return None
+    return msg_obj.content.strip()
+
+
+def _build_summary_prompt() -> str:
+    """Строит инструкцию суммаризации (SECTION_GUIDE), без самой истории —
+    история подаётся отдельно структурированными сообщениями для KV-cache."""
+    prompt = (
+        f"{ENVIRONMENT_PREFIX} Write detailed full session summary from the beginning using these sections:\n```"
+        f"{SECTION_GUIDE}\n```\n"
+        f"Output only the summary in this strict format. "
+        f"Fill sections if there is something to fill with don't hallucinate non-existing just to fill gaps."
+    )
+    prompt += f"{ENVIRONMENT_PREFIX_END}"
+    return prompt

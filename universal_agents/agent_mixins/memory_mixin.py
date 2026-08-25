@@ -1,4 +1,18 @@
-"""Mixin рабочей памяти и суммаризации LLMAgent (per-message summaries + авто-суммаризация диалога)."""
+"""Mixin рабочей памяти и компакции LLMAgent.
+
+Слои памяти:
+   1) session summary — обычное user-сообщение сразу после system prompt.
+      Каждая компакция ПЕРЕПИСЫВАЕТ заметки с нуля по схеме 7 разделов
+      (compressors.summarize_history_plain + SECTION_GUIDE); при повторной
+      компакции старые заметки подаются модели как контекст для слияния;
+   2) живой хвост истории;
+  3) архив полных оригиналов вне контекста (agent.archive), доступный модели
+     через recall_search / recall_read.
+
+Спарковано (код сохранён, не удаляется):
+  - XML-схема STATE-блока (memory_blocks.py + regenerate_state_block);
+  - per-message плотные саммари в рабочую память [PER_MSG_SUMMARIES_ENABLED].
+"""
 
 from __future__ import annotations
 
@@ -8,17 +22,26 @@ from universal_agents.constants import (
     SUMMARY_PREFIX_AI,
     SUMMARY_PREFIX_TOOL_NAMED,
 )
-from universal_agents.compressors import summarize_dialogue, _dense_summarize_message
+from universal_agents.compressors import (
+    _dense_summarize_message,
+    summarize_history_plain,
+)
 from universal_agents.models import UserMessage, AssistantMessage, ToolResult
 from universal_agents.task_tracker import compact_completed_tasks
 
 
 class MemoryMixin:
-    """Управляет рабочей памятью (плотные саммари сообщений) и сжатием диалога."""
+    """Управляет рабочей памятью и сжатием диалога в session summary.
+
+    Компакция: вытесняемый сегмент архивируется и заменяется одним
+    UserMessage-саммари сразу после system prompt. Повторные компакции не
+    переписывают саммари с нуля, а правят его точечными заменами текста."""
 
     def _summarize_assistant_message(self, msg: AssistantMessage) -> None:
         """Плотное саммари последнего сообщения ассистента в рабочую память
         (не попадает в контекст). Только для сообщений длиннее порога."""
+        if not Config.PER_MSG_SUMMARIES_ENABLED:
+            return
         content = (msg.content or "").strip()
         MIN_CHARS = int(MIN_TOKENS_TO_SUMMARIZE * CHARS_PER_TOKEN)
         if len(content) < MIN_CHARS:
@@ -35,6 +58,8 @@ class MemoryMixin:
     def _maybe_summarize_user_message(self, msg: UserMessage) -> None:
         """Плотное саммари длинного сообщения пользователя в рабочую память
         (не попадает в контекст). Только для сообщений длиннее порога."""
+        if not Config.PER_MSG_SUMMARIES_ENABLED:
+            return
         content = (msg.content or "").strip()
         MIN_CHARS = int(MIN_TOKENS_TO_SUMMARIZE * CHARS_PER_TOKEN)
         if len(content) < MIN_CHARS:
@@ -51,6 +76,8 @@ class MemoryMixin:
     def _maybe_summarize_tool_result(self, tr: ToolResult) -> None:
         """Длинные выводы инструментов (> MIN_TOKENS_TO_SUMMARIZE) сразу
         суммаризируются в рабочую память; при сжатии саммари встанет на их место."""
+        if not Config.PER_MSG_SUMMARIES_ENABLED:
+            return
         if tr.is_error or tr.is_user_denied:
             return
         # Уже сжатый результат (например DIGEST из выемки больших файлов) не
@@ -96,22 +123,33 @@ class MemoryMixin:
         задач нет. Применяется перед грубой суммаризацией по порогу токенов."""
         compact_completed_tasks(self)
 
+    # ------------------------------------------------------------------
+    # Порог срабатывания
+    # ------------------------------------------------------------------
+
+    def _current_summary_threshold(self) -> float:
+        """Порог авто-компакции в процентах заполнения контекста."""
+        return float(Config.AUTO_SUMMARY_THRESHOLD)
+
+    # ------------------------------------------------------------------
+    # Авто-компакция диалога
+    # ------------------------------------------------------------------
+
     def _auto_summarize_dialogue(self) -> None:
-        """Автоматическая суммаризация диалога при превышении порога контекста."""
+        """Компакция: архивируемый сегмент уходит в архив, а вместо него
+        остаётся session summary — UserMessage сразу после system prompt.
+
+        Первая компакция ПИШЕТ заметки с нуля (промпт 7 разделов); повторные
+        РЕДАКТИРУЮТ их по точному совпадению текста: блоки SEARCH/REPLACE от
+        модели применяются детерминированным парсером. Если служебный вызов
+        не удался, история НЕ трогается."""
         preserve_last = Config.AUTO_SUMMARY_PRESERVE_LAST
 
         # --- Точка срабатывания: только на «безопасных» границах ---
-        # Суммаризация допустима сразу после ToolResult либо после сообщения
-        # пользователя. Если последнее сообщение — ассистент с вызовом инструмента
-        # (незавершённый/висячий вызов), удаляем его из истории и суммаризируем
-        # всё ТОЛЬКО ДО него: ассистент перевызовет инструмент уже после
-        # суммаризации (так чище, чем тащить полу-вызов через сжатие).
         popped_calls = self.history.pop_pending_tool_calls()
 
         last = self.history._messages[-1] if self.history._messages else None
         if not (isinstance(last, ToolResult) or isinstance(last, UserMessage)):
-            # Небезопасная граница (ассистент дал текст, история пуста и т.п.) —
-            # откладываем суммаризацию до следующей безопасной точки.
             return
 
         if popped_calls:
@@ -120,57 +158,43 @@ class MemoryMixin:
                 f"summarizing; assistant will re-invoke after compression."
             )
 
-        total = len(self.history)
-
-        end_id = total - 1 - preserve_last
+        messages = self.history.get_all()
         start_id = Config.AFTER_SYSTEM_PROMPT
-
+        end_id = len(messages) - 1 - preserve_last
         if start_id > end_id:
             return
 
         original_len = self.history.content_len(start_id, end_id)
 
-        summary = summarize_dialogue(
-            self, start_id=start_id, end_id=end_id,
-        )
+        # --- 1. Архивация оригиналов ДО удаления (recall остаётся возможен) ---
+        if Config.MEMORY_ARCHIVE_ENABLED and hasattr(self, "archive"):
+            added = self.archive.append_messages(messages[start_id:end_id + 1])
+            self.on_system_msg(f"[ARCHIVE] Stored {added} original message(s) for recall.")
 
-        if not summary or len(summary) >= original_len:
+        # --- 2. Один вызов LLM: переписываем заметки с нуля.
+        # Подаём ПОЛНУЮ историю как структурированные сообщения API (включая
+        # system prompt первым сообщением) — префикс совпадает с реальным
+        # диалогом, поэтому KV-cache переиспользуется. Инструкция суммаризации
+        # (SECTION_GUIDE) добавляется последним сообщением в compressors.
+        history_msgs = [m.to_api_dict() for m in messages]
+        summary_text = summarize_history_plain(
+            self, history_msgs,
+        )
+        if not summary_text:
+            self.on_system_msg(
+                "[AUTO-SUMMARY] Compression call failed; history left unchanged."
+            )
             return
 
-        reduction = 1.0 - (len(summary) / original_len)
-        weak = reduction < Config.AUTO_SUMMARY_MIN_REDUCTION_RATIO
+        # --- 3. Удаляем сегмент из истории, оставляя текст как контекст ---
+        self.history.compress_old_messages(summary_text, preserve_last)
 
-        # Слабое сжатие — переформируем саммари заново, усекая выводы инструментов
-        # (блоки RESULT) прямо при сборке текста, без лишних вызовов LLM.
-        # В per-message режиме это просто дешёвая пересборка без вызова LLM.
-        truncated = False
-        if weak and not Config.DISABLE_PER_MESSAGE_SUMMARIZATION:
-            rerendered = summarize_dialogue(
-                self, start_id=start_id, end_id=end_id,
-                truncate_result_ratio=Config.TRUNCATE_TOOL_RESULT_KEEP_RATIO,
-                truncate_result_min_chars=Config.TRUNCATE_TOOL_RESULT_CHARS,
-            )
-            if rerendered:
-                summary = rerendered
-                truncated = True
-
-        # Итоговая степень сжатия — уже по финальному (возможно усечённому) саммари.
-        final_reduction = 1.0 - (len(summary) / original_len)
-
-        self.history.compress_old_messages(summary, preserve_last=preserve_last)
         self._on_history_changed()
         self._prune_per_msg_summaries()
 
-
-        if truncated:
-            self.on_system_msg(
-                f"[AUTO-SUMMARY] Weak pre-truncation compression ({reduction:.0%} < "
-                f"{Config.AUTO_SUMMARY_MIN_REDUCTION_RATIO:.0%}); truncated RESULT payloads "
-                f"(kept {Config.TRUNCATE_TOOL_RESULT_KEEP_RATIO:.0%}, min {Config.TRUNCATE_TOOL_RESULT_CHARS} chars) "
-                f"(final -{final_reduction:.0%})"
-            )
-
-
+        new_len = self.history.content_len(1, len(self.history) - 1)
+        final_reduction = 1.0 - (new_len / max(original_len, 1))
         self.on_system_msg(
-            f"[AUTO-SUMMARY] Context compressed ({int(original_len / Config.CHARS_PER_TOKEN)} -> {int(len(summary) / Config.CHARS_PER_TOKEN)} tokens, -{final_reduction:.0%})"
+            f"[AUTO-SUMMARY] Session summary written "
+            f"(-{final_reduction:.0%}); originals archived for recall."
         )

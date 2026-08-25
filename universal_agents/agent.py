@@ -69,6 +69,9 @@ class LLMAgent(
     ):
         self.history = ChatHistory(system_prompt)
         self.file_states = FileStateTracker(self.history)
+        from universal_agents.archive import HistoryArchive
+        self.archive = HistoryArchive()
+        self._pending_pins: list[str] = []
         self._read_registrations: list[str] = []
         self._gen_params = GenerationParams.from_overrides(
             temp=temp,
@@ -123,12 +126,10 @@ class LLMAgent(
 
     @property
     def _per_msg_enabled(self) -> bool:
-        """Гейт per-message суммаризации: выключена глобально (Config) или
-        локально (disable_per_msg_summarization)."""
-        return not (
-            Config.DISABLE_PER_MESSAGE_SUMMARIZATION
-            or self._disable_per_msg_summarization
-        )
+        """Гейт per-message суммаризации: выключена глобально
+        (Config.PER_MSG_SUMMARIES_ENABLED) или локально
+        (disable_per_msg_summarization)."""
+        return Config.PER_MSG_SUMMARIES_ENABLED and not self._disable_per_msg_summarization
 
     def _build_duplicate_warning(self, dup_name: str, dup_args: str) -> str:
         """ENVIRONMENT_PREFIX-обёртка предупреждения о повторном дубликате вызова."""
@@ -515,7 +516,7 @@ class LLMAgent(
                 continue
 
             self._compact_completed_tasks()
-            if self._get_context_usage_percent() >= Config.AUTO_SUMMARY_THRESHOLD:
+            if self._get_context_usage_percent() >= self._current_summary_threshold():
                 self._auto_summarize_dialogue()
 
             if tool_error_occurred:

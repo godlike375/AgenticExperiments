@@ -190,10 +190,13 @@ def _summarize_file(path: str, content: str, agent) -> str:
         task += "\n\n(File is truncated due to remaining memory)"
 
     result = sub.run(task, '<sub_agent><content_structure>L').strip()
-    # Субагент ведёт свой изолированный трекер; его последний замер относим к
-    # агенту, чтобы «Tokens spent» отражал самый свежий вызов (в т.ч. чтение файла).
-    if sub._own_tracker.last_usage:
-        agent.token_tracker.update_from_usage(sub._own_tracker.last_usage)
+    # Снимаем служебную обёртку субагента: в file_states и контекст должен
+    # попасть только чистый скелет.
+    if result.startswith("<sub_agent>"):
+        result = result[len("<sub_agent>"):]
+    if result.endswith("</sub_agent>"):
+        result = result[: -len("</sub_agent>")]
+    result = result.strip()
     if not result:
         return err(f" (Empty summary for {path}. It's probably an error, try one more time...)")
     return result
