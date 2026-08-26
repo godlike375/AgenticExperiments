@@ -616,14 +616,14 @@ def search(pattern: str, path: str = ".", include: str = None, exclude: str = No
     if not results:
         msg = f" No matches found for '{pattern}'"
         if skipped:
-            msg += f" (пропущено {skipped} бинарных/слишком больших файлов)"
-        return err(msg)
+            msg += f" (skipped {skipped} too big files)"
+        return ok(msg)
 
     output = ENVIRONMENT_PREFIX + " " + f"Found {total} matches"
     if skipped:
-        output += f" (пропущено {skipped} бинарных/больших файлов)"
+        output += f" (skipped {skipped} too big files)"
     if truncated:
-        output += (f" — результат усечён: показаны первые {file_count} файлов / "
-                   f"≤{SEARCH_MAX_OUTPUT_CHARS} символов")
+        output += (f" — result is truncated: shown first {file_count} files / "
+                   f"≤{SEARCH_MAX_OUTPUT_CHARS} chars")
     output += ":\n" + "\n".join(results)
     return output + f"\n{ENVIRONMENT_PREFIX_END}"

@@ -15,7 +15,7 @@ class Config:
     SUMMARY_DUPLICATE_TEMP = round(BOOST_TEMP / 2, 2)  # буст при тождественном повторе саммари (мягче полного BOOST_TEMP)
 
     # Параметры генерации
-    TEMP = 0.3
+    TEMP = 0.28
     TOP_P = 0.94
     MAX_CONTEXT_TOKENS = 50000
     FREQUENCY_PENALTY = 0.01
@@ -32,7 +32,7 @@ class Config:
     USE_RESPONSES_API = False
 
     # Автоматическая суммаризация диалога
-    AUTO_SUMMARY_THRESHOLD = 2  # процент контекста
+    AUTO_SUMMARY_THRESHOLD = 80  # процент контекста
     AUTO_SUMMARY_PRESERVE_LAST = 1  # сколько последних сообщений не трогать
     AUTO_SUMMARY_REVIEW_PASS = True  # отревьювить черновик саммари: подчистить устаревшее + добавить пропущенное
     # Попыток перегенерации саммари при неудаче; между ними температура чуть растёт, чтобы не повторять ту же ошибку.
