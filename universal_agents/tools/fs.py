@@ -179,16 +179,29 @@ def _summarize_file(content: str, agent) -> str:
         f"{i + 1} {line}" for i, line in enumerate(raw_lines) if line.strip()
     )
 
-    task = (
-        f"{ENVIRONMENT_PREFIX} NOW IGNORE previous instructions! Act as file structure analyzer. "
-        "Output ONLY the line ranges of top-level items (signatures of classes, functions, imports, "
-        "constants, etc) wrapped in <content_structure_lines> tags. Do NOT write any text of the lines "
-        "- just the numeric ranges, one per line, in the form `start-end`. "
-        "Note: blank/empty lines were removed from the file above, but the remaining line numbers "
-        "are the ORIGINAL file line numbers (with gaps), so use them exactly as shown. "
-        "(for example, don't write this directly:\n<content_structure_lines>\n1-7\n9-28\n30-64\n</content_structure_lines>\n). "
-        "Follow the existing order of items in the file.\n"
-    )
+    if Config.SKELETON_RANGES_MODE:
+        # Новый режим: модель возвращает ТОЛЬКО диапазоны строк, заголовки
+        # подставляются программно из файла (см. _ranges_to_structure).
+        task = (
+            f"{ENVIRONMENT_PREFIX} NOW IGNORE previous instructions! Act as file structure generator. "
+            "Output ONLY the line ranges of the most top-level items (signatures of classes, functions, "
+            "methods, headers]) "
+            "wrapped in <content_structure_lines> tags. Do NOT write any text of the lines "
+            "- just the precise numeric ranges, one per line, in the form `start-end` inclusively 1-based. "
+            "(an example for reference only: '<content_structure_lines>\na-b\nx-y\nm-n\n</content_structure_lines>)'. "
+            "Follow the order of items in the file.\n"
+        )
+        prefill = "<content_structure_lines>\n"
+    else:
+        # Старый fallback-режим: модель пишет таблицу целиком (тег <content_structure>).
+        task = (
+            f"{ENVIRONMENT_PREFIX} NOW IGNORE previous instructions! Act as file content structure writer. "
+            "Start with tag <content_structure> and write very short compact content structure table "
+            "(like table of content in books) (for example signatures of classes, functions, methods, headers) and "
+            "their precise line ranges (an example for reference only: `<content_structure>Lx-y example1()\nLa-b class Example2\n...`"
+        )
+        prefill = "<content_structure>\nL"
+
     file = '```\n' + numbered_text + '\n```\n\n'
     task = file + task
     if truncated:
@@ -201,7 +214,7 @@ def _summarize_file(content: str, agent) -> str:
         msgs,
         temp=Config.TEMP,
         timeout=Config.TIMEOUT,
-        prefill="<content_structure_lines>\n",
+        prefill=prefill,
     )
     if err or not msg_obj or not msg_obj.content:
         if err:
@@ -219,7 +232,10 @@ def _summarize_file(content: str, agent) -> str:
     result = result.strip()
     if not result:
         return None
-    return _ranges_to_structure(result, content)
+    if Config.SKELETON_RANGES_MODE:
+        return _ranges_to_structure(result, content)
+    # Старый режим: модель уже вернула готовую таблицу структуры.
+    return result
 
 
 def _ranges_to_structure(ranges_text: str, content: str) -> str | None:
@@ -238,8 +254,11 @@ def _ranges_to_structure(ranges_text: str, content: str) -> str | None:
         if start < 1 or end < start or start > total:
             continue
         end = min(end, total)
-        # Контент первой строки диапазона как заголовок.
-        head = lines[start - 1].strip()
+        # Заголовок берём с первой НЕпустой строки диапазона (пустые/пробельные
+        # строки после strip считаются пустыми). Если start пустая — пробуем
+        # start-1, затем start+1, затем ближайшую по обе стороны.
+        repr_idx = _pick_nonempty_line(start, end, lines)
+        head = lines[repr_idx - 1].strip()
         if len(head) > 120:
             head = head[:117] + "..."
         # Убираем лишние пробелы/табы внутри для компактности.
@@ -248,6 +267,34 @@ def _ranges_to_structure(ranges_text: str, content: str) -> str | None:
     if not out:
         return None
     return "\n".join(out)
+
+
+def _is_meaningful_line(line: str) -> bool:
+    """Строка годится для заголовка: непустая после strip() и содержит хотя бы 2
+    буквы (пробелы/табуляция/разделители/``` и т.п. не считаются содержательными)."""
+    s = line.strip()
+    return bool(s) and sum(1 for c in s if c.isalpha()) >= 2
+
+
+def _pick_nonempty_line(start: int, end: int, lines: list[str]) -> int:
+    """Выбирает номер строки (1-based) для заголовка диапазона: первая
+    содержательная строка (см. _is_meaningful_line). Порядок: start -> start-1
+    -> start+1 -> ближайшая по обе стороны от start. Если все не содержательные
+    — возвращает start (fallback)."""
+    total = len(lines)
+    if 1 <= start <= total and _is_meaningful_line(lines[start - 1]):
+        return start
+    if start - 1 >= 1 and _is_meaningful_line(lines[start - 2]):
+        return start - 1
+    if start + 1 <= total and _is_meaningful_line(lines[start]):
+        return start + 1
+    for d in range(1, total + 1):
+        lo, hi = start - d, start + d
+        if lo >= 1 and _is_meaningful_line(lines[lo - 1]):
+            return lo
+        if hi <= total and _is_meaningful_line(lines[hi - 1]):
+            return hi
+    return start
 
 
 def _limit_read_chunk(lines: list[str]) -> tuple[list[str], bool]:
@@ -260,6 +307,32 @@ def _limit_read_chunk(lines: list[str]) -> tuple[list[str], bool]:
         if total_chars >= Config.MAX_READ_CHARS_PER_CALL:
             break
     return out, len(out) < len(lines)
+
+
+def _peripheral_indices(near: int, far: int, total: int, growth: float = 2.0) -> list[int]:
+    """Периферийное (размытое) зрение: от границы `near` (сразу за фокусом) до края
+    файла `far` (1 или total) выбирает строки с экспоненциально растущим шагом —
+    плотно у границы фокуса, всё реже к краю файла. `growth` — во сколько раз растёт
+    шаг каждое кольцо (меньше → плотнее). Всегда добавляет крайний якорь `far`.
+    Возвращает отсортированный список номеров строк (1-based)."""
+    if near < 1 or near > total or far < 1 or far > total or near == far:
+        return []
+    direction = 1 if far > near else -1
+    out: list[int] = []
+    step = 1.0
+    cur = near
+    while True:
+        nxt = cur + direction * round(step)
+        if direction > 0 and nxt > far:
+            break
+        if direction < 0 and nxt < far:
+            break
+        out.append(nxt)
+        cur = nxt
+        step *= growth  # экспоненциальный рост «размытия»
+    if out and out[-1] != far:
+        out.append(far)
+    return sorted(out)
 
 
 @tool(description="Reads a file or shows a directory tree. Small files are returned fully. "
@@ -291,11 +364,51 @@ def read(agent: 'LLMAgent', path: str = '.', start_line: int = None, end_line: i
                     return err(f": start_line {start} is beyond the end of the file ({total} lines).")
                 selected, truncated = _limit_read_chunk(lines[start - 1:end])
                 actual_end = start + len(selected) - 1
-                # Реальные номера строк файла — чтобы модель могла точно редактировать.
-                numbered = [f"{start + i} {line}" for i, line in enumerate(selected)]
+                # «Центральное зрение»: запрошенный фокус-диапазон — чётко и целиком.
+                focus_idx = range(start, actual_end + 1)
+                # «Периферийное зрение»: вокруг фокуса до краёв файла, экспоненциально
+                # реже — даёт контекст, не выгружая весь файл.
+                peripheral: set[int] = set()
+                focus_size = actual_end - start + 1
+                peri_span = int(Config.PERIPHERAL_SIDE_FACTOR * focus_size)
+                if start - 1 >= 1:
+                    left_far = 1 if peri_span <= 0 else max(1, start - peri_span)
+                    peripheral.update(_peripheral_indices(start - 1, left_far, total, Config.PERIPHERAL_GAP_GROWTH))
+                if actual_end + 1 <= total:
+                    right_far = total if peri_span <= 0 else min(total, actual_end + peri_span)
+                    peripheral.update(_peripheral_indices(actual_end + 1, right_far, total, Config.PERIPHERAL_GAP_GROWTH))
+                peripheral -= set(focus_idx)
+                # Локальный контекст периферии: вокруг каждой выбранной строки
+                # добавляем ±N соседей (без строк фокуса).
+                if Config.PERIPHERAL_LINE_CONTEXT:
+                    ctx = int(Config.PERIPHERAL_LINE_CONTEXT)
+                    extra: set[int] = set()
+                    for p in peripheral:
+                        for d in range(-ctx, ctx + 1):
+                            j = p + d
+                            if 1 <= j <= total and not (start <= j <= actual_end):
+                                extra.add(j)
+                    peripheral |= extra
+                # Собираем строки: фокус + периферия, упорядоченно по номеру,
+                # чтобы сохранить пространственную картину файла. Периферийные
+                # строки (маркер '~') обрезаются по длине (только контекст).
+                included = sorted(set(focus_idx) | peripheral)
+                max_peri = Config.PERIPHERAL_MAX_LINE_CHARS
+                numbered = []
+                for i in included:
+                    is_focus = start <= i <= actual_end
+                    line = lines[i - 1]
+                    if not is_focus and max_peri and len(line) > max_peri:
+                        line = line[:max_peri] + "..."
+                    marker = "" if is_focus else "~"
+                    numbered.append(f"{marker}{i} {line}")
+                focus_note = (
+                    f"Full focus lines {start}-{actual_end}/{total}. "
+                    f"'~' marks sparse peripheral context lines (exponential vision)."
+                )
                 content = (
                     f"{ENVIRONMENT_PREFIX} File: {path}\nModified: {mtime}\n"
-                    f"Lines {start}-{actual_end}/{total}:\n---\n"
+                    f"{focus_note}\n---\n"
                     + ("\n".join(numbered) if numbered else "")
                     + (f"\n{ENVIRONMENT_PREFIX} Output limit is ~{Config.MAX_READ_CHARS_PER_CALL} chars. "
                        f"Use start_line={actual_end + 1} to continue.{ENVIRONMENT_PREFIX_END}"

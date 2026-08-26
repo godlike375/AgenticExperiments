@@ -15,11 +15,11 @@ class Config:
     SUMMARY_DUPLICATE_TEMP = round(BOOST_TEMP / 2, 2)  # буст при тождественном повторе саммари (мягче полного BOOST_TEMP)
 
     # Параметры генерации
-    TEMP = 0.4
+    TEMP = 0.3
     TOP_P = 0.94
     MAX_CONTEXT_TOKENS = 50000
-    FREQUENCY_PENALTY = 0.05
-    PRESENCE_PENALTY = 0.05
+    FREQUENCY_PENALTY = 0.01
+    PRESENCE_PENALTY = 0.01
     MAX_OUTPUT_TOKENS = min(32000, int(MAX_CONTEXT_TOKENS / 1.5))
     TIMEOUT = 1800
     MAX_ITER = 150
@@ -58,23 +58,35 @@ class Config:
     CHARS_PER_TOKEN = 2.35
     MIN_TOKENS_TO_SUMMARIZE = 180
 
-    # Чтение больших файлов: ровно один раз — структурный скелет, код модель
-    # читает порциями через start_line/end_line; повторные целиком-файловые
-    # чтения неизменённого файла запрещены (экономия контекста, см. REFACTORING_BASELINE §3.7).
+    # Большие файлы: 1 раз — скелет, далее чтение порциями start_line/end_line.
     BIG_FILE_SKELETON = True
 
-    # Единый лимит вывода ЛЮБОГО инструмента (символов за вызов). read/search уже
-    # сами режут вывод до этого лимита с подсказками; остальные усекаются «хвостом»
-    # в _execute_tools. MAX_READ_LINES_PER_CALL — доп. лимит строк порционного чтения (порция кончается концом строки).
-    MAX_READ_CHARS_PER_CALL = 6000
-    MAX_READ_LINES_PER_CALL = 120
+    # Скелет файла: True — модель возвращает только диапазоны (заголовки
+    # подставляем программно); False — старый режим (таблица целиком, может мусорить).
+    SKELETON_RANGES_MODE = False
+
+    # Периферийное зрение read: шаг между строками растёт в ^PERIPHERAL_GAP_GROWTH
+    # на каждом кольце от фокуса (меньше → плотнее).
+    PERIPHERAL_GAP_GROWTH = 1.35
+    # Периферийные строки обрезаются до N символов (фокус — без лимита). 0 = не резать.
+    PERIPHERAL_MAX_LINE_CHARS = 50
+    # Периферия в каждую сторону ≤ PERIPHERAL_SIDE_FACTOR × размер фокуса строк.
+    # 0 = без ограничения (до краёв файла).
+    PERIPHERAL_SIDE_FACTOR = 3.0
+    # Вокруг каждой выбранной периферийной строки захватывается ещё ±N соседних
+    # строк как локальный контекст (0 = выключено).
+    PERIPHERAL_LINE_CONTEXT = 1
+
+    # Лимит вывода любого инструмента (символов); read/search режут сами.
+    # MAX_READ_LINES_PER_CALL — доп. лимит строк порционного чтения.
+    MAX_READ_CHARS_PER_CALL = 4000
+    MAX_READ_LINES_PER_CALL = 100
 
     # Отключает авто-суммаризацию большого вывода любых инструментов.
     DISABLE_TOOL_AUTO_SUMMARIZATION = True
 
-    # per-message summarization (гейт — PER_MSG_SUMMARIES_ENABLED): True — плотное саммари каждого сообщения копится в память (НЕ контекст),
-    # длинные выводы (>MIN_TOKENS_TO_SUMMARIZE) тоже; при сжатии собирается короткий диалог. False — session summary одним single-shot вызовом.
-    # Локальный оверрайд агента — disable_per_msg_summarization.
+    # per-message саммари: True — плотное саммари каждого сообщения в память,
+    # False — session summary одним вызовом. Оверрайд: disable_per_msg_summarization.
 
     # Bash на Windows (run_bash_host): "wsl" — через WSL, "gitbash" — Git Bash, "auto" — gitbash при наличии иначе WSL, "system" — shutil.which("bash").
     BASH_BACKEND = "auto"
