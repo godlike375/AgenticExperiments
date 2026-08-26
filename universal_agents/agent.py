@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import os
+import threading
+from datetime import datetime
 from typing import Iterable, Union, Callable, Optional
 
 from universal_agents.constants import ENVIRONMENT_PREFIX, ENVIRONMENT_PREFIX_END
@@ -23,6 +26,7 @@ from universal_agents.agent_mixins import (
     ExecuteMixin,
     ConsistencyMixin,
 )
+from universal_agents.exceptions import GenerationInterrupted
 
 # Предел последовательных ошибок инструментов за один chat() до сдачи (§1)
 MAX_CONSECUTIVE_ERRORS = 5
@@ -66,6 +70,10 @@ class LLMAgent(
         streaming_enabled: bool = None,
         max_generation_attempts: int = None,
         disable_per_msg_summarization: bool = False,
+        autosave_enabled: bool = None,
+        autosave_dir: str = None,
+        autosave_keep: int = None,
+        on_interrupt_check: Callable[[], bool] = None,
     ):
         self.history = ChatHistory(system_prompt)
         self.file_states = FileStateTracker(self.history)
@@ -124,11 +132,22 @@ class LLMAgent(
         self.task_plan: list[str] = []
         self.task_plan_map: dict = {}
 
+        # Авто-сохранение (защита от сбоев): один файл на диалог с меткой времени
+        # запуска/сброса; перезаписывается при каждом снимке. Ротация оставляет
+        # AUTOSAVE_KEEP последних файлов (по одному на диалог/запуск).
+        self.autosave_enabled = Config.AUTOSAVE_ENABLED if autosave_enabled is None else autosave_enabled
+        self.autosave_dir = Config.AUTOSAVE_DIR if autosave_dir is None else autosave_dir
+        self.autosave_keep = Config.AUTOSAVE_KEEP if autosave_keep is None else autosave_keep
+        self._autosave_path = None
+        self.reset_autosave_path()
+        # Прерывание генерации: Event ставится из фонового монитора (CLI) или on_interrupt_check.
+        self.stop_event = threading.Event()
+        self.on_interrupt_check = on_interrupt_check if on_interrupt_check is not None else (lambda: False)
+        self._stop_check = lambda: self.stop_event.is_set() or bool(self.on_interrupt_check())
+
     @property
     def _per_msg_enabled(self) -> bool:
-        """Гейт per-message суммаризации: выключена глобально
-        (Config.PER_MSG_SUMMARIES_ENABLED) или локально
-        (disable_per_msg_summarization)."""
+        """Гейт per-message суммаризации: выключена глобально (Config.PER_MSG_SUMMARIES_ENABLED) или локально (disable_per_msg_summarization)."""
         return Config.PER_MSG_SUMMARIES_ENABLED and not self._disable_per_msg_summarization
 
     def _build_duplicate_warning(self, dup_name: str, dup_args: str) -> str:
@@ -159,20 +178,12 @@ class LLMAgent(
         depth: int = 0,
         disable_per_msg_summarization: bool = True,
         denied_tools: Union[str, Iterable[str], None] = None,
+        include_tools: bool = True,
     ) -> SubAgent:
-        """Создаёт SubAgent с ТОЧНО тем же набором схем инструментов, что у родителя.
-
-        Обработчики передаются как есть (в том же порядке) — рендер префикса
-        запроса суб-агента совпадает с родительским и KV-кэш переиспользуется.
-        Ограничения задаются запретительным конфигом denied_tools (имена или '*'
-        — запретить всё): запрещённые инструменты ОСТАЮТСЯ в схемах, но их вызов
-        возвращает ошибку «forbidden for this sub-agent».
-        safe_only=True дополнительно запрещает требующие подтверждения и
-        небезопасные по путям инструменты (схемы тоже остаются в префиксе).
-        """
+        """Создаёт SubAgent из текущего агента (наследует системный промпт и историю для KV-cache). denied_tools переопределяет запреты; safe_only запрещает инструменты requires_confirmation/path_safety; include_tools=False убирает схемы инструментов (чистый текстовый субагент)."""
         parent_system_prompt = self.history[0].content if len(self.history) else ""
         parent_history = self.history.get_all()[1:]
-        parent_tools = {name: info["handler"] for name, info in self._all_tools.items()}
+        parent_tools = {name: info["handler"] for name, info in self._all_tools.items()} if include_tools else {}
         effective_denied = self._resolve_denied_tools(denied_tools)
         if safe_only:
             effective_denied |= {
@@ -212,6 +223,109 @@ class LLMAgent(
         if usage:
             self.token_tracker.update_from_usage(usage)
 
+    # --------------------------------------------------------
+    # Авто-сохранение (защита от сбоев)
+    # --------------------------------------------------------
+    def _build_save_extras(self) -> dict:
+        """Собирает служебные данные верхнего уровня для сохранения (архив, план, cwd и т.п.)."""
+        from universal_agents.task_tracker import plan_state_to_dict
+        from universal_agents.project_root import get_project_root_override
+        return {
+            "archive": self.archive.to_list(),
+            "plan_state": plan_state_to_dict(self),
+            "pending_pins": list(getattr(self, "_pending_pins", [])),
+            "cwd": os.getcwd(),
+            "project_root": get_project_root_override(),
+        }
+
+    def save_history(self, path: str, extras: dict = None) -> None:
+        """Сохраняет историю (с архивом/планом/состоянием файлов) в файл path."""
+        self.history.save(
+            path,
+            loaded_tools=list(self._all_tools.keys()),
+            file_states=self.file_states.to_dict(),
+            extras=extras if extras is not None else self._build_save_extras(),
+        )
+
+    def _rotate_autosaves(self) -> None:
+        """Оставляет только AUTOSAVE_KEEP самых свежих файлов (имя сортируется по времени метки)."""
+        if self.autosave_keep <= 0:
+            return
+        try:
+            if not os.path.isdir(self.autosave_dir):
+                return
+            files = [
+                os.path.join(self.autosave_dir, f)
+                for f in os.listdir(self.autosave_dir)
+                if f.startswith("autosave_") and f.endswith(".json")
+            ]
+            files.sort()
+            excess = files[:-self.autosave_keep]
+            for old in excess:
+                try:
+                    os.remove(old)
+                except OSError:
+                    pass
+        except OSError:
+            pass
+
+    def reset_autosave_path(self) -> None:
+        """Берёт новую метку (дату/время) для файла авто-сохранения текущего диалога."""
+        ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        self._autosave_path = os.path.join(self.autosave_dir, f"autosave_{ts}.json")
+
+    def autosave(self) -> None:
+        """Снимает снимок истории в файл текущего диалога (перезапись). Безопасно к вызову из любого места."""
+        if not self.autosave_enabled:
+            return
+        try:
+            os.makedirs(self.autosave_dir, exist_ok=True)
+            path = self._autosave_path or os.path.join(
+                self.autosave_dir, f"autosave_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.json"
+            )
+            self.save_history(path)
+            self._rotate_autosaves()
+        except Exception as e:
+            self.on_system_msg(f"[Autosave] failed: {e}")
+
+    def reset_dialog(self) -> None:
+        """Сбрасывает диалог к началу (только системный промпт) и берёт новую метку авто-сохранения."""
+        system_prompt = self.history[0].content if len(self.history) else ""
+        self.history = ChatHistory(system_prompt)
+        from universal_agents.archive import HistoryArchive
+        self.archive = HistoryArchive()
+        self.task_plan = []
+        self.task_plan_map = {}
+        self._pending_pins = []
+        self.file_states = FileStateTracker(self.history)
+        self._tool_usage.clear()
+        self.loop_detector = LoopDetector()
+        self.token_tracker = TokenUsageTracker(
+            system_prompt,
+            self.token_tracker.max_context_tokens if self.token_tracker else Config.MAX_CONTEXT_TOKENS,
+        )
+        self._last_response_id = None
+        self._last_sent_msg_count = 0
+        self._compacted_task_ids = set()
+        self.reset_autosave_path()
+        self._on_history_changed()
+
+    def _autosave(self) -> None:
+        """Точка вызова авто-сохранения из цикла чата."""
+        self.autosave()
+
+    # --------------------------------------------------------
+    # Прерывание генерации (передача управления пользователю)
+    # --------------------------------------------------------
+    def request_stop(self) -> None:
+        """Запрашивает остановку текущей генерации (проверяется между шагами и внутри стрима)."""
+        self.stop_event.set()
+
+    def clear_stop(self) -> None:
+        self.stop_event.clear()
+
+    # --------------------------------------------------------
+
     def _call_llm(
         self,
         messages: list[dict],
@@ -220,9 +334,9 @@ class LLMAgent(
         params: GenerationParams = None,
         watch_prefix: Optional[str] = None,
         watch_continue_temp: Optional[float] = None,
+        stop_check: Callable[[], bool] = None,
     ) -> tuple:
-        """Единая точка транспорта LLM (§2): сама выбирает стриминг или обычный
-        вызов. Возвращает (message_obj, error, usage), как LLMClient.call()."""
+        """Единая точка транспорта LLM (§2): выбирает стриминг или обычный вызов; возвращает (message_obj, error, usage)."""
         tools = self.tools if self.tools else None
         if self.streaming_enabled and self.on_stream_chunk:
             return self._call_with_streaming(
@@ -233,6 +347,7 @@ class LLMAgent(
                 params=params,
                 watch_prefix=watch_prefix,
                 watch_continue_temp=watch_continue_temp,
+                stop_check=stop_check,
             )
         return LLMClient.call(
             messages,
@@ -240,6 +355,7 @@ class LLMAgent(
             prefill=prefill,
             previous_response_id=previous_response_id,
             params=params,
+            stop_check=stop_check,
         )
 
     def service_llm_call(
@@ -251,13 +367,7 @@ class LLMAgent(
         prefill: Optional[str] = None,
         params: GenerationParams = None,
     ) -> tuple:
-        """Служебный вызов LLM (саммаризация, компактизация, consistency и т.п.).
-
-        Идёт через тот же транспорт; если заданы колбэки служебного канала
-        (on_service_stream_*) — стримится в отдельный визуальный канал со своей
-        меткой, а не как ответ агента в диалоге.
-        tools=True означает текущий набор инструментов агента.
-        """
+        """Служебный вызов LLM (саммаризация, компактизация, consistency). При заданных on_service_stream_* колбэках стримится в отдельный канал со своей меткой. tools=True — текущий набор инструментов агента."""
         callbacks = None
         if self.streaming_enabled and self.on_service_stream_chunk:
             callbacks = {
@@ -279,9 +389,7 @@ class LLMAgent(
     # Главный цикл
     # --------------------------------------------------------
     def _detect_duplicate(self, message_obj) -> Optional[tuple]:
-        """Дефолтный детектор дубликатов (§1): повторный вызов инструмента или
-        повтор последнего текстового ответа. Возвращает None либо кортеж
-        ('tool_call', (name, args)) / ('answer', prev_answer)."""
+        """Дефолтный детектор дубликатов (§1): повторный вызов инструмента или повтор текстового ответа; возвращает None или ('tool_call', (name, args))/('answer', prev_answer)."""
         if message_obj.tool_calls:
             current_history = self.history.get_all()
             for tc in message_obj.tool_calls:
@@ -309,14 +417,7 @@ class LLMAgent(
         is_duplicate_fn: Callable = None,
         boost: bool = True,
     ) -> tuple:
-        """Проводит до max_generation_attempts попыток генерации (§1), отбрасывая
-        дубликаты и активируя буст температуры. Логика повторов/температуры
-        собрана здесь, а не размазана по вызывающему коду.
-
-        is_duplicate_fn(message_obj) -> None | ('tool_call', (name, args))
-        | ('answer', prev_answer); по умолчанию — self._detect_duplicate.
-        boost=False оставляет обнаружение дубликатов, но без буста температуры.
-        Возвращает (message_obj, api_error_occurred)."""
+        """До max_generation_attempts попыток генерации (§1), отбрасывая дубликаты и бустя температуру; логика повторов собрана здесь. is_duplicate_fn по умолчанию — self._detect_duplicate; boost=False оставляет детект без буста. Возвращает (message_obj, api_error_occurred)."""
         if is_duplicate_fn is None:
             is_duplicate_fn = self._detect_duplicate
         max_generation_attempts = (
@@ -348,6 +449,7 @@ class LLMAgent(
                 params=attempt_params,
                 watch_prefix=dup_watch_target,
                 watch_continue_temp=Config.DUPLICATE_CONTINUATION_TEMP if dup_watch_target is not None else None,
+                stop_check=self._stop_check,
             )
             dup_watch_target = None
 
@@ -386,8 +488,7 @@ class LLMAgent(
                 )
                 continue
 
-            # Ответ принят к обработке — фиксируем позицию контекста для
-            # возможного продолжения через previous_response_id.
+            # Ответ принят — фиксируем позицию контекста для возможного продолжения через previous_response_id.
             if hasattr(message_obj, '_response_id'):
                 self._last_response_id = message_obj._response_id
             self._last_sent_msg_count = all_messages_len
@@ -400,17 +501,7 @@ class LLMAgent(
         return message_obj, api_error_occurred
 
     def _recover(self, kind: str, retries_left: int = 0, erased_count: int = 0) -> None:
-        """Единая точка восстановления после сбоя (§1).
-
-        Сбрасывает позицию контекста (_last_response_id / _last_sent_msg_count),
-        чтобы следующая попытка ушла целиком без previous_response_id; для
-        'broken_call' и 'tool_error' дополнительно активирует буст температуры.
-        kind:
-          'broken_call'  — стёрт сломанный ответ ассистента, регенерация
-          'broken_fix'   — вставлен фикс-промпт
-          'tool_error'   — стёрт неудачный вызов инструмента
-          'api_error'    — сдача: нормализация истории и передача управления пользователю
-          'broken_giveup'/'error_limit' — сдача после исчерпания попыток"""
+        """Единая точка восстановления после сбоя (§1): сбрасывает позицию контекста (_last_response_id/_last_sent_msg_count), для 'broken_call'/'tool_error' активирует буст температуры. kind: 'broken_call'/'broken_fix'/'tool_error'/'api_error'/'giveup'/'error_limit' — см. код."""
         if kind == 'api_error':
             self.history.normalize(is_error_recovery=True)
             self.on_system_msg("⚠️ [RECOVERY] API error occurred. Role sequence restored. Handing control to user.")
@@ -461,9 +552,11 @@ class LLMAgent(
         self.history.add(user_msg)
         if self._per_msg_enabled:
             self._maybe_summarize_user_message(user_msg)
+        self._autosave()
         current_prefill = get_effective_prefill(prefill)
         self._last_response_id = None
         self._last_sent_msg_count = 0
+        self.clear_stop()
 
         consecutive_errors = 0
         tool_error_retries_left = Config.ERROR_RECOVERY_RETRIES
@@ -471,6 +564,11 @@ class LLMAgent(
         broken_fix_left = Config.BROKEN_CALL_FIX_RETRIES
 
         for i in range(max_iter):
+            if self.stop_event.is_set():
+                self.on_system_msg("⏹ Generation stopped by user — control returned to you.")
+                self.clear_stop()
+                self._autosave()
+                return ""
             step_prefill = current_prefill if i == 0 else None
             all_messages = prepare_messages_for_api(self)
 
@@ -492,7 +590,17 @@ class LLMAgent(
                 self._recover('api_error')
                 return ""
 
-            result_text, tool_error_occurred, broken_call = self._process_llm_response(message_obj)
+            try:
+                result_text, tool_error_occurred, broken_call = self._process_llm_response(message_obj)
+            except GenerationInterrupted:
+                # Пользователь прервал выполнение инструмента: убираем висящий вызов
+                # ассистента без результата, чтобы история осталась валидной для API.
+                self.history.pop_pending_tool_calls()
+                self.history.normalize()
+                self._on_history_changed()
+                self.on_system_msg("⏹ Generation stopped by user.")
+                self._autosave()
+                raise
 
             if broken_call:
                 if broken_regen_left > 0:
@@ -517,6 +625,11 @@ class LLMAgent(
 
             self._compact_completed_tasks()
             if self._get_context_usage_percent() >= self._current_summary_threshold():
+                if getattr(self, '_is_subagent', False):
+                    # Суб-агент: авто-суммаризация бессмысленна (история — клон родителя,
+                    # сжатие ломает извлечение ответа и тратит лишние вызовы LLM). При
+                    # превышении порога просто завершаемся, возвращая последнее сообщение.
+                    return result_text
                 self._auto_summarize_dialogue()
 
             if tool_error_occurred:
@@ -528,6 +641,14 @@ class LLMAgent(
             if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
                 self._recover('error_limit', retries_left=MAX_CONSECUTIVE_ERRORS)
                 return ""
+
+            self._autosave()
+
+            if self.stop_event.is_set():
+                self.on_system_msg("⏹ Generation stopped by user — control returned to you.")
+                self.clear_stop()
+                self._autosave()
+                return result_text
 
             if not message_obj.tool_calls and not tool_error_occurred:
                 return result_text

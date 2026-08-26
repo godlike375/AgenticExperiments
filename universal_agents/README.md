@@ -86,7 +86,7 @@ universal_agents/
    остальные инструменты агент подгружает динамически.
 2. CLI (`ui.py`) считывает ввод пользователя и вызывает `agent.chat(...)`.
    В каждое сообщение пользователя `context_builder.py` внедряет служебные
-   заголовки: «| Tokens spent: X (Remaining: Y)» и таймстемп вида
+   заголовки: «| Context size: X (Remaining: Y)» и таймстемп вида
    `<<[[SYS ENV]] === [datetime]`.
 3. `agent.chat` в цикле: собирает сообщения для API (`context_builder.py`),
    вызывает модель (`llm_client.py`), обрабатывает ответ, выполняет вызовы

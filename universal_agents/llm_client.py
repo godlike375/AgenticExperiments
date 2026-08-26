@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, Callable
 from types import SimpleNamespace
 from openai import OpenAI
 from universal_agents.config import Config, CHARS_PER_TOKEN
@@ -7,10 +7,7 @@ from universal_agents.tool_parsing import normalize_args, build_tool_calls
 
 
 def jaccard_similarity(a: str, b: str) -> float:
-    """Доля пересечения множеств слов (Jaccard) двух текстов.
-
-    a == b (по словам) => 1.0; без общих слов => 0.0.
-    """
+    """Доля пересечения множеств слов (Jaccard) двух текстов: 1.0 при равенстве, 0.0 без общих слов."""
     set_a = set(a.split())
     set_b = set(b.split())
     if not set_a and not set_b:
@@ -69,20 +66,12 @@ class TokenUsageTracker:
         return remaining
 
     def format_user_token_info(self) -> str:
-        """Информация о токенах для отображения пользователю.
-
-        «Tokens spent» берётся из поля 'total_tokens' ПОСЛЕДНЕГО вызова LLM
-        (обновляется каждым вызовом, не накапливается). «Remaining» — оставшаяся
-        ёмкость контекст-окна (снимок prompt_tokens последнего вызова). Точный
-        размер текущего контекста, известный только постфактум, берётся из
-        last_usage; то, что заранее неизвестно, оценивается через CHARS_PER_TOKEN
-        (см. get_total_context_tokens).
-        """
+        """Информация о токенах для пользователя: «Context size» из total_tokens последнего вызова, «Remaining» — из prompt_tokens; неизвестное заранее оценивается через CHARS_PER_TOKEN."""
         if not self.last_usage:
             return ""
         spent = self.last_usage.get("total_tokens", 0)
         remaining = self.max_context_tokens - (self.last_usage.get("prompt_tokens", 0) or 0)
-        return f"Tokens spent: {spent} (Remaining: {remaining})"
+        return f"Context size: {spent} (Remaining: {remaining})"
 
 class LoopDetector:
     def __init__(self):
@@ -94,22 +83,14 @@ class LoopDetector:
         return normalize_args(args_str)
 
     def check_duplicate_in_turn(self, tool_name: str, arguments: str, messages: list) -> bool:
-        """
-        Проверяет, вызывался ли уже этот инструмент с такими же параметрами
-        после последнего сообщения пользователя (в рамках текущего хода).
-
-        Вызов, завершившийся ошибкой или отклонением, дубликатом НЕ считается:
-        задача не была реально выполнена, поэтому повторный вызов после
-        корректирующих действий (например, have_done после реальной работы) легитимен.
-        """
+        """Проверяет повторный вызов того же инструмента с теми же аргументами после последнего сообщения пользователя. Ошибочные/отклонённые вызовы дубликатами не считаются."""
         from universal_agents.models import UserMessage, AssistantMessage, ToolResult
         norm_args = self.normalize_args(arguments)
         failed_call_ids = set()
 
         # Идем с конца истории сообщений
         for msg in reversed(messages):
-            # Если дошли до сообщения пользователя, значит этот ход начался здесь.
-            # Всё, что было до него, не считается повтором в текущем ходу.
+            # Дошли до сообщения пользователя — текущий ход начался здесь; всё до него не считаем.
             if isinstance(msg, UserMessage):
                 break
 
@@ -119,10 +100,7 @@ class LoopDetector:
                 continue
 
             if isinstance(msg, AssistantMessage):
-                # make_plan особый случай:
-                #  - повторный make_plan с ТЕМИ ЖЕ аргументами = зацикливание;
-                #  - make_plan с ДРУГИМИ аргументами = ревизия плана (граница
-                #    контекста): вызовы ПОСЛЕ него повтором не считаются.
+                # make_plan особый случай: повтор с теми же аргументами = зацикливание, с другими = ревизия плана (вызовы после него не повтор).
                 found_plan = False
                 for tc in msg.tool_calls:
                     if getattr(tc, "name", "") == "make_plan":
@@ -141,11 +119,7 @@ class LoopDetector:
         return False
 
 class StreamAccumulator:
-    """Собирает из чанков стрима финальный ответ: текст, reasoning, tool calls, usage.
-
-    Единая логика накопления для основного диалога (StreamingMixin) и служебных
-    вызовов (LLMClient.call с callbacks) — раньше она была только в миксине.
-    """
+    """Собирает из чанков стрима финальный ответ (текст, reasoning, tool calls, usage); единая логика для диалога и служебных вызовов."""
 
     def __init__(self, prefill=None, on_stream_chunk=None,
                  on_reasoning_start=None, on_reasoning_chunk=None):
@@ -246,15 +220,9 @@ class LLMClient:
         previous_response_id: str = None,
         params: GenerationParams = None,
         callbacks: Optional[dict] = None,
+        stop_check: Optional[Callable[[], bool]] = None,
     ):
-        """Единая точка любого обращения к LLM.
-
-        callbacks (on_stream_start/on_stream_chunk/on_stream_end/on_reasoning_*):
-        если заданы стриминговые колбэки и стриминг поддерживается
-        (STREAM_ENABLED и не Responses API) — вызов идёт через стриминг и вывод
-        показывается живьём, включая служебные/отладочные вызовы. Как и в основном
-        диалоге, previous_response_id при стриминге игнорируется.
-        """
+        """Единая точка обращения к LLM. При заданных стриминговых колбэках и STREAM_ENABLED (не Responses API) идёт через стриминг; previous_response_id при стриминге игнорируется."""
         temp, timeout, top_p, frequency_penalty, presence_penalty, max_tokens = LLMClient._resolve_params(
             params, temp, timeout, top_p, frequency_penalty, presence_penalty, max_tokens
         )
@@ -270,7 +238,7 @@ class LLMClient:
         if want_stream:
             streamed = LLMClient._call_via_chat_stream(
                 messages_to_send, temp, timeout, tools, prefill, top_p,
-                frequency_penalty, presence_penalty, max_tokens, cb
+                frequency_penalty, presence_penalty, max_tokens, cb, stop_check
             )
             if streamed is not None:
                 return streamed
@@ -388,12 +356,9 @@ class LLMClient:
 
     @staticmethod
     def _call_via_chat_stream(messages_to_send, temp, timeout, tools, prefill, top_p,
-                              frequency_penalty, presence_penalty, max_tokens, cb):
-        """Блокирующе потребляет стрим и собирает финальный ответ.
-
-        Возвращает (msg, err, usage) или None, если создать стрим не удалось
-        (тогда вызывающий код откатывается на обычный вызов).
-        """
+                              frequency_penalty, presence_penalty, max_tokens, cb,
+                              stop_check=None):
+        """Блокирующе потребляет стрим и собирает (msg, err, usage); None, если стрим не создался (откат на обычный вызов). stop_check — вызывается после каждого чанка; True прерывает стрим (возвращает накопленное)."""
         try:
             raw = LLMClient.get_client().chat.completions.create(
                 messages=messages_to_send,
@@ -427,6 +392,8 @@ class LLMClient:
             acc.process(first)
             for chunk in raw:
                 acc.process(chunk)
+                if stop_check and stop_check():
+                    break
         except Exception as e:
             if end_cb:
                 end_cb()

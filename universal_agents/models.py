@@ -8,8 +8,7 @@ from universal_agents.config import Config
 @dataclass
 class Message(ABC):
     timestamp: datetime = field(init=False)
-    # Стабильный монотонный идентификатор в рамках сессии. Назначается
-    # ChatHistory при добавлении; переживёт /save + /load, в API не уходит.
+    # Стабильный монотонный id сессии; назначается ChatHistory, переживает /save+/load, в API не уходит.
     seq: Optional[int] = field(init=False, default=None, repr=False)
 
     def __post_init__(self):
@@ -20,10 +19,7 @@ class Message(ABC):
         pass
 
     def to_persist_dict(self) -> dict[str, Any]:
-        """Словарь для сохранения в историю (JSON). По умолчанию совпадает с
-        API-представлением; подклассы могут добавить служебные метаданные
-        (например, флаг skip_summarize у ToolResult), которые НЕ должны уходить
-        в запрос к LLM, но должны переживать /save + /load."""
+        """Словарь для сохранения в историю (JSON). По умолчанию = API-представлению; подклассы добавляют служебные метаданные, которые не уходят в LLM, но переживают /save+/load."""
         d = self.to_api_dict()
         if self.seq is not None:
             d["_seq"] = self.seq
@@ -94,9 +90,7 @@ class ToolResult(Message):
     execution_time_ms: Optional[float] = None
     retry_count: int = 0
     skip_summarize: bool = False
-    # Эвристическая подсказка для сжатия: результат воспроизводим повторным
-    # запуском инструмента (чтение файла, поиск и т.п.) — при компакции его
-    # можно сворачивать агрессивнее, чем невосстановимые результаты.
+    # Подсказка сжатия: воспроизводимый результат (чтение/поиск) сворачивается агрессивнее, чем невосстановимый.
     recoverable_hint: bool = False
 
     def to_api_dict(self) -> dict[str, Any]:
@@ -109,8 +103,7 @@ class ToolResult(Message):
 
     def to_persist_dict(self) -> dict[str, Any]:
         d = self.to_api_dict()
-        # Служебные метаданные (через underscore-префикс, чтобы не конфликтовать
-        # с полями API и не уходить в запрос к модели).
+        # Служебные метаданные через underscore-префикс — не конфликтуют с API и не уходят в запрос к модели.
         d.update({
             "_is_error": self.is_error,
             "_is_user_denied": self.is_user_denied,

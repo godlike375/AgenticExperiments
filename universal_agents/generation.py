@@ -10,10 +10,7 @@ from universal_agents.config import Config
 
 @dataclass
 class GenerationParams:
-    """Параметры генерации с дефолтами из Config.
-
-    None означает «взять значение по умолчанию из Config».
-    """
+    """Параметры генерации; None означает дефолт из Config."""
 
     temp: Optional[float] = None
     timeout: Optional[int] = None

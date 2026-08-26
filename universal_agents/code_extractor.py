@@ -40,8 +40,7 @@ def dump_project(root_path, exclude_patterns=None):
 
     # Проходим рекурсивно по всем файлам
     for dirpath, dirnames, filenames in os.walk(root_path):
-        # Фильтруем директории "на лету", чтобы не спускаться в ненужные папки
-        # Это критично для производительности (не читать venv целиком)
+        # Фильтруем директории на лету — не спускаемся в ненужные (важно для производительности).
         dirnames[:] = [d for d in dirnames if not should_exclude(d, exclude_patterns)]
 
         # Сортируем файлы для предсказуемого порядка вывода

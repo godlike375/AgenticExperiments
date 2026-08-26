@@ -11,12 +11,7 @@ MAX_SUB_AGENT_DEPTH = 1
 
 
 def run_subagent_once(agent, prompt: str, temp: float = 0.2, max_iter: int = None) -> str:
-    """Запускает субагента для одной задачи и возвращает ok()/err() строку.
-
-    Централизует логику делегирования: проверка глубины, запуск суб-агента с
-    полным набором схем родителя (KV-cache safe) и пропуск повторного чтения
-    файлов (read-skip) — прочитанные субагентом пути наследуются родителем,
-    чтобы не перечитывать их и сохранять консистентность file_states."""
+    """Запускает субагента для задачи; проверка глубины, полный набор схем родителя (KV-cache safe) и наследование прочитанных файлов (read-skip)."""
     from universal_agents.constants import err, ok
 
     depth = getattr(agent, '_depth', 0)
@@ -36,7 +31,7 @@ def run_subagent_once(agent, prompt: str, temp: float = 0.2, max_iter: int = Non
 
     agent.on_system_msg(f"[DELEGATE] Starting sub-agent for: {prompt}...")
     result = sub.run(prompt)
-    agent.on_system_msg(f"[DELEGATE] Completed. Tokens spent by sub-agent: {sub.tokens_spent}")
+    agent.on_system_msg(f"[DELEGATE] Completed. Context size in sub-agent: {sub.tokens_spent}")
 
     # read-skip: наследуем прочитанные субагентом файлы родителем.
     parent_regs = getattr(agent, '_read_registrations', None)
@@ -52,16 +47,7 @@ def run_subagent_once(agent, prompt: str, temp: float = 0.2, max_iter: int = Non
 
 
 class SubAgent:
-    """
-    Субагент на базе LLMAgent.
-    - Наследует системный промпт, историю и ПОЛНЫЙ набор схем инструментов
-      родителя (в том же порядке) для побайтового совпадения префикса запроса
-      и переиспользования KV-cache. Ограничения задаются запретительным
-      конфигом denied_tools: запрещённые инструменты остаются в схемах, но их
-      вызов возвращает ошибку «forbidden».
-    - Изолированный трекер токенов.
-    - Рекурсия предотвращается через depth check.
-    """
+    """Субагент на базе LLMAgent: наследует системный промпт, историю и полный набор схем родителя (KV-cache safe, denied_tools => ошибка «forbidden»); изолированный трекер токенов; рекурсия блокируется depth check."""
 
     def __init__(
             self,
@@ -179,10 +165,7 @@ class SubAgent:
         on_reasoning_end: Callable[[], None],
         disable_per_msg_summarization: bool,
     ):
-        """Фабрика сборки LLMAgent для субагента: единое место конструирования
-        (трекер передаётся прямо в конструктор, без переприсваивания после).
-        tools_config=None + external_plugins=parent_tools дают ровно родительский
-        набор схем (в том же порядке) — префикс запроса совпадает с родительским."""
+        """Фабрика сборки LLMAgent для субагента: трекер передаётся в конструктор; tools_config=None + external_plugins=parent_tools дают родительский набор схем (префикс совпадает)."""
         from universal_agents.agent import LLMAgent
 
         agent = LLMAgent(
@@ -207,18 +190,24 @@ class SubAgent:
             disable_per_msg_summarization=disable_per_msg_summarization,
         )
         agent._depth = self._depth
+        agent._is_subagent = True
         return agent
 
     def run(self, task: str, prefill: str = None) -> str:
-        """Выполняет задачу и возвращает финальный текстовый ответ.
+        """Выполняет задачу и возвращает финальный ответ субагента.
 
-        Последний AssistantMessage ищем проходом с конца (а не строго последним
-        сообщением): после ответа могли отработать служебные механизмы
-        (пороговые проверки, системные вставки), и хвостом истории становится
-        не ответ — раньше из-за этого субагент «терял» готовый результат."""
-        self._agent.chat(task, max_iter=self._max_iter, prefill=prefill)
-        messages = self._agent.history.get_all()
-        for msg in reversed(messages):
+        Ответ берётся напрямую из возвращаемого значения ``chat`` (оно уже
+        содержит финальный текст ассистента, включая prefill) — это надёжнее,
+        чем извлечение из истории: история субагента клонирует родительский
+        префикс, и при срабатывании внутри ``chat`` auto-summary (компакции)
+        сообщения перестраиваются/сдвигаются, из-за чего поиск по истории
+        (даже по всей ``history[:]``) может не найти ответ. Поиск по истории
+        оставлен только как страховка, если ``chat`` вернул пустоту."""
+        result = self._agent.chat(task, max_iter=self._max_iter, prefill=prefill)
+        if result and result.strip():
+            return result
+        msgs = self._agent.history.get_all()
+        for msg in reversed(msgs):
             if isinstance(msg, AssistantMessage) and msg.content:
                 return msg.content
         return ""

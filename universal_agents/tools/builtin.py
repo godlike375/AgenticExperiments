@@ -5,7 +5,6 @@ from universal_agents.tool import tool
 from universal_agents.constants import ENVIRONMENT_PREFIX, ENVIRONMENT_PREFIX_END, err, ok
 from universal_agents.config import Config
 from universal_agents.models import UserMessage, AssistantMessage, ToolResult, SystemMessage
-from universal_agents.compressors import summarize_dialogue
 
 if TYPE_CHECKING:
     from universal_agents.agent import LLMAgent
@@ -113,9 +112,7 @@ def summarize_messages(agent: LLMAgent, start_id: int, end_id: int = -1) -> str:
             f"({len(summary)} >= {original_len}). Nothing to compress."
         )
 
-    # Оригиналы диапазона выселяем в архив (recall остаётся возможным),
-    # затем заменяем их summary-сообщением. is_summary=True обязателен,
-    # иначе последующие компакции не увидят этот блок как саммари.
+    # Оригиналы диапазона выселяем в архив (recall возможен), затем заменяем summary-сообщением с is_summary=True (иначе компакции не увидят блок).
     if Config.MEMORY_ARCHIVE_ENABLED and hasattr(agent, "archive"):
         agent.archive.append_messages(history.get_all()[safe_start:safe_end + 1])
 

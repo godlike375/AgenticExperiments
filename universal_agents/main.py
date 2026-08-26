@@ -1,3 +1,4 @@
+import argparse
 import os
 
 from universal_agents.agent import LLMAgent
@@ -5,7 +6,8 @@ from universal_agents.tool_registry import load_external_plugins
 from universal_agents.tool_manager import ToolManager
 from universal_agents.ui import ConsoleUI, CLI
 from universal_agents.constants import ENVIRONMENT_PREFIX, ENVIRONMENT_PREFIX_END
-from universal_agents.project_root import find_project_root
+from universal_agents.project_root import find_project_root, set_project_root
+from universal_agents.config import Config
 from universal_agents.task_tracker import TASK_MARK_INSTRUCTIONS
 
 TOOLS_CONFIG = [
@@ -14,15 +16,42 @@ TOOLS_CONFIG = [
     'recall_search', 'recall_read',
 ]
 
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Universal tool-calling LLM assistant."
+    )
+    parser.add_argument(
+        "--project-root", "-r",
+        default=None,
+        help="Явно задать директорию корня проекта (перекрывает авто-поиск по .git). "
+             "Можно также задать Config.PROJECT_ROOT в universal_agents/config.py.",
+    )
+    return parser.parse_args()
+
+
 if __name__ == "__main__":
+    args = parse_args()
+
+    # Приоритет: CLI --project-root > Config.PROJECT_ROOT > авто-поиск.
+    explicit_root = args.project_root or getattr(Config, "PROJECT_ROOT", None)
+    if explicit_root:
+        if not os.path.isdir(explicit_root):
+            print(f"WARNING: --project-root '{explicit_root}' не существует, "
+                  f"используется авто-поиск корня.")
+        else:
+            set_project_root(explicit_root)
+            os.chdir(explicit_root)
+            print(f"Рабочая директория установлена в корень проекта: {os.getcwd()}")
+
     tools_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tools")
     all_tools = load_external_plugins(tools_dir)
     startup_tools = {
         n: f for n, f in all_tools.items()
         if n in ("load_tool", "make_plan", "recall_search", "recall_read")
     }
-    print(f"Loaded startup tools: {list(startup_tools.keys())}")
-    print("Use load_tool to load tools dynamically.")
+    print(f"Loaded startup tools: {sorted(startup_tools.keys())}")
+    print("Use load_tool to load additional tools dynamically.")
 
     project_root = find_project_root() or '(not found - no .git upwards)'
     root_line = f"Current project root: {project_root}, current working dir: {os.getcwd()}"

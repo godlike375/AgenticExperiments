@@ -1,19 +1,4 @@
-"""План-ориентированная декомпозиция и структурная компактизация истории.
-
-Модель:
-   1) создаёт ПЛАН через `make_plan(plan=[...])` — плоский упорядоченный
-     список задач {id, title} (как bullet list).
-   2) выполняет задачи и помечает каждую выполненной через
-     `have_done(id, summary)` — строго по порядку плана.
-
-Система читает план из истории и заставляет `have_done` идти строго по
-порядку списка. При изменении плана (повторный `make_plan`) «следующий шаг»
-пересчитывается из нового плана, что позволяет начать с произвольного шага и
-далее идти по порядку.
-
-Инструмент `have_done` динамически подключается агентом только после УСПЕШНОГО
-создания плана через `make_plan` (до этого он отсутствует в инструментарии).
-"""
+"""План-ориентированная декомпозиция и структурная компактизация истории: make_plan задаёт упорядоченный список задач, have_done помечает выполнение строго по порядку плана (подключается только после успешного make_plan)."""
 
 from __future__ import annotations
 
@@ -57,11 +42,9 @@ def set_plan(agent: LLMAgent, plan_list: list) -> str:
         meta[tid] = {"title": str(entry.get("title", "") or "").strip()}
     agent.task_plan = list(meta.keys())
     agent.task_plan_map = meta
-    # Новый план — новый контекст выполнения: сбросить маркеры компактизации
-    # предыдущего плана, чтобы переиспользуемые id не считались выполненными.
+    # Новый план — сбросить маркеры компактизации предыдущего, чтобы переиспользуемые id не считались выполненными.
     agent._compacted_task_ids = set()
-    # Динамически подключаем have_done: он доступен только после успешного
-    # make_plan (до этого в инструментарии его нет и load_tool его не выдаст).
+    # Динамически подключаем have_done — доступен только после успешного make_plan.
     tm = getattr(agent, "tools_manager", None)
     if tm is not None:
         try:
@@ -159,9 +142,7 @@ def _success_result_by_id(history: list) -> dict:
 
 
 def _done_marker_positions(history: list, leaves: list, after: int = -1) -> dict:
-    """id задачи -> индекс УСПЕШНОГО ToolResult её have_done (первое вхождение).
-    Учитываются только маркеры с индексом > after (после текущего плана).
-    Ошибочные/отклонённые вызовы have_done НЕ считаются выполненными."""
+    """id задачи -> индекс УСПЕШНОГО ToolResult её have_done (первое вхождение, маркеры после `after`; ошибочные/отклонённые вызовы игнорируются)."""
     result_idx: dict = {}
     for i, msg in enumerate(history):
         if isinstance(msg, ToolResult) and not msg.is_error and not msg.is_user_denied:
@@ -184,10 +165,7 @@ def _done_marker_positions(history: list, leaves: list, after: int = -1) -> dict
 
 def validate_task_mark_call(history_before: list, args: dict, plan_map: dict,
                             compacted: set[str]) -> Optional[str]:
-    """Проверяет, что have_done вызывается для следующего по плану шага.
-
-    Возвращает None, если допустимо, иначе сообщение об ошибке (ведёт к
-    перегенерации ответа модели)."""
+    """Проверяет, что have_done вызван для следующего по плану шага; возвращает None или сообщение об ошибке (перегенерация)."""
     tid = (args.get("id") or "").strip()
     if not tid:
         return "have_done requires a non-empty 'id'."
@@ -201,8 +179,7 @@ def validate_task_mark_call(history_before: list, args: dict, plan_map: dict,
     if tid not in leaves:
         return f"CANNOT MARK '{tid}': not in the plan."
 
-    # Учитываем только выполнение ТЕКУЩЕГО плана: маркеры после последнего make_plan.
-    # Это исключает утечку done-маркеров/компактизации предыдущего плана.
+    # Учитываем только выполнение ТЕКУЩЕГО плана (маркеры после последнего make_plan), исключая утечку из предыдущего.
     plan_pos = _last_plan_position(history_before)
     done = set(compacted)
     done |= set(_done_marker_positions(history_before, leaves, after=plan_pos).keys())
@@ -218,9 +195,7 @@ def validate_task_mark_call(history_before: list, args: dict, plan_map: dict,
             f"Follow the plan order. To start from a different step, revise the plan with "
             f"make_plan(plan=[...])."
         )
-    # Защита от «фиктивного» выполнения: нельзя пометить задачу выполненной, если
-    # после последнего done-маркера (или создания плана) не было НИ ОДНОГО реального
-    # инструмента (read/search/edit/run и т.п.) для ЭТОЙ задачи.
+    # Защита от «фиктивного» выполнения: запрещаем have_done без реального инструмента после последнего done/создания плана.
     segment_after = max(plan_pos, _last_done_position(history_before, plan_pos))
     if _last_real_work_position(history_before, segment_after) == -1:
         return (
@@ -238,8 +213,7 @@ def validate_task_mark_call(history_before: list, args: dict, plan_map: dict,
 
 
 def compact_completed_tasks(agent: LLMAgent) -> int:
-    """Компактизирует завершённые задачи (по одной за проход, начиная с самой
-    поздней). Возвращает число компактизированных."""
+    """Компактизирует завершённые задачи (по одной за проход, с самой поздней); возвращает число."""
     if not Config.TASK_COMPACTION_ENABLED:
         return 0
     compacted = 0
@@ -261,14 +235,7 @@ def _earliest_done_leaf(history: list, leaves: list, compacted: set[str], plan_p
 
 
 def _leaf_block(history: list, leaf: str, leaves: list, plan_pos: int) -> tuple:
-    """Возвращает (start, end) компактизируемого сегмента задачи — только реальная
-    работа между сохраняемыми маркерами.
-
-    Маркеры make_plan и have_done (вызов + результат) в сегмент НЕ входят и
-    остаются в истории (чтобы модель всегда видела порядок плана и факт завершения).
-    start — сразу после последней сохраняемой границы (результата make_plan либо
-    результата have_done предыдущей задачи); end — непосредственно перед вызовом
-    have_done этой задачи (его результат на done[leaf])."""
+    """Возвращает (start, end) сегмента задачи — только реальная работа между сохраняемыми маркерами make_plan/have_done (сами маркеры остаются в истории)."""
     done = _done_marker_positions(history, leaves, after=plan_pos)
     done_idx = done[leaf]        # индекс результата have_done этой задачи
 
@@ -286,8 +253,7 @@ def _leaf_block(history: list, leaf: str, leaves: list, plan_pos: int) -> tuple:
             hd_call = j
             break
 
-    # Последняя сохраняемая граница перед работой задачи: результат make_plan
-    # (вызов на plan_pos) либо результат have_done последней размеченной предыдущей.
+    # Последняя сохраняемая граница перед работой: результат make_plan либо have_done предыдущей задачи.
     boundary = plan_pos + 1
     idx = leaves.index(leaf)
     for i in range(idx):
@@ -338,8 +304,7 @@ def _compact_one_group(agent: LLMAgent) -> Optional[str]:
         content=ok(f" ('{title}' [{leaf}] has been already marked as done so don't call have_done('{title}'):\n{summary} again. Just take next steps if anything remains undone.\n")
     )
     agent.history.replace_range(start, end, [summary_msg])
-    # Обрезаем раздутый summary в результате have_done: детальные факты уже
-    # сохранены в компактизационном summary, дублировать их в маркере не нужно.
+    # Обрезаем раздутый summary в have_done: детали уже в компактизационном summary, дублировать не нужно.
     done_idx = done.get(leaf)
     hd = history[done_idx] if done_idx is not None else None
     if hd is not None and not getattr(hd, 'is_error', False):

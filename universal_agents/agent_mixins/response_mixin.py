@@ -18,9 +18,7 @@ class ResponseMixin:
         prefill: str = None,
         streamed: bool = False,
     ) -> AssistantMessage:
-        """Единая точка сборки AssistantMessage (инвариант §2): строит сообщение
-        и применяет prefill к контенту. Раньше эта сборка дублировалась в 4 местах
-        (стриминг ×3 и обычная ветка)."""
+        """Единая точка сборки AssistantMessage (инвариант §2): строит сообщение и применяет prefill. Раньше дублировалась в 4 местах."""
         message_obj = AssistantMessage(
             content=content or "",
             tool_calls=list(tool_calls or []),

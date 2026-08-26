@@ -6,10 +6,7 @@ from typing import Callable
 
 
 def load_external_plugins(plugins_dir: str = "tools") -> dict[str, Callable]:
-    """
-    Загружает все функции, помеченные декоратором @tool, из .py-файлов
-    в указанной директории.
-    """
+    """Загружает все функции с декоратором @tool из .py-файлов указанной директории."""
     external_tools: dict[str, Callable] = {}
     if not os.path.exists(plugins_dir):
         return external_tools

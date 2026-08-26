@@ -4,6 +4,19 @@ import os
 
 GIT_MARKER = ".git"
 
+_OVERRIDE_ROOT: str | None = None
+
+
+def set_project_root(path: str | None) -> None:
+    """Явно задать корень проекта (перекрывает авто-поиск по .git); None снимает оверрайд. Используется из main.py."""
+    global _OVERRIDE_ROOT
+    _OVERRIDE_ROOT = os.path.abspath(path) if path else None
+
+
+def get_project_root_override() -> str | None:
+    """Текущий явно заданный корень проекта или None (авто-поиск)."""
+    return _OVERRIDE_ROOT
+
 
 def _is_real_git_dir(path: str) -> bool:
     """True, если `.git` — настоящий репозиторий: файл-указатель (gitdir: ...)
@@ -20,12 +33,9 @@ def _is_real_git_dir(path: str) -> bool:
 
 
 def find_project_root(start: str = None) -> str | None:
-    """Возвращает путь к корню проекта — ближайшей папке с валидным `.git`
-    при подъёме вверх от `start`. Пустые/невалидные каталоги `.git` пропускаются.
-
-    Если `start` не задан — используется текущая рабочая директория.
-    Если валидный `.git` не найден вплоть до корня ФС — возвращается None.
-    """
+    """Возвращает ближайший корень проекта (валидный .git при подъёме вверх от start; пустые .git пропускаются). Явный оверрайд set_project_root() имеет приоритет; None, если не найден."""
+    if _OVERRIDE_ROOT is not None:
+        return _OVERRIDE_ROOT
     current = os.path.abspath(start) if start else os.path.abspath(os.getcwd())
     while True:
         git_marker = os.path.join(current, GIT_MARKER)

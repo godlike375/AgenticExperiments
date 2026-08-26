@@ -12,9 +12,7 @@ def _tools_directory() -> str:
     return os.path.join(os.path.dirname(__file__), "tools")
 
 
-# Инструменты, управляемые системой: модель не может загрузить их сама через
-# load_tool — они подключаются автоматически в нужный момент (have_done —
-# только после успешного make_plan).
+# Инструменты, управляемые системой (модель не грузит их через load_tool): have_done подключается только после успешного make_plan.
 MANAGED_TOOLS = {"have_done"}
 
 
@@ -29,14 +27,9 @@ class ToolManager:
         self._tools_config = tools_config
         self._tools_map: dict[str, dict] = {}
         self._all_known_names: Optional[set[str]] = None
-        # Инструменты, по которым вызвали unload_tool, но которые ещё не выгружены
-        # физически: они остаются в префиксе (описание в системном промпте), чтобы не
-        # ломать KV-кэш, пока история не изменится. Вызов такого инструмента моделью
-        # возвращает ошибку «was unloaded». Реальное удаление — flush_pending_unloads().
+        # Инструменты, помеченные unload_tool, но ещё не выгруженные: остаются в префиксе (KV-cache safe), вызов возвращает ошибку «was unloaded»; реальное удаление — flush_pending_unloads().
         self._pending_unload: set[str] = set()
-        # Запретительные конфиг (например, для суб-агентов): инструменты, чей вызов
-        # запрещён. Как и pending_unload — KV-cache safe: схемы остаются в префиксе,
-        # но попытка вызова возвращает ошибку «forbidden» (см. ExecuteMixin).
+        # Запретительный конфиг denied_tools: схемы остаются в префиксе (KV-cache safe), вызов возвращает ошибку «forbidden» (см. ExecuteMixin).
         self._denied: set[str] = set()
         if external_plugins:
             for name, func in external_plugins.items():
@@ -57,7 +50,8 @@ class ToolManager:
 
     @property
     def schemas(self) -> list[dict]:
-        return [v["schema"] for v in self._tools_map.values()]
+        # Детерминированный порядок схем: KV-кэш переиспользуется только при байт-идентичном массиве, поэтому не меняем порядок присутствующих схем.
+        return [self._tools_map[n]["schema"] for n in sorted(self._tools_map)]
 
     @property
     def config(self):
@@ -87,8 +81,7 @@ class ToolManager:
 
     def load(self, name: str) -> str:
         """Включает ранее отключённый инструмент по имени."""
-        # Если инструмент был помечен на отложенную выгрузку — просто снимаем метку:
-        # он всё ещё в _tools_map (префикс не менялся), так что повторно не грузим.
+        # Если инструмент был на отложенной выгрузке — снимаем метку (он ещё в _tools_map, префикс не менялся), повторно не грузим.
         if name in self._pending_unload:
             self._pending_unload.discard(name)
             return f"'{name}' re-enabled (unload cancelled)."
@@ -116,11 +109,7 @@ class ToolManager:
         return f"Error '{name}' not found in loadable tools"
 
     def force_load(self, name: str) -> str:
-        """Внутренняя загрузка управляемого инструмента в обход allow-list.
-
-        Для инструментов, которые модель НЕ должна грузить сама через load_tool
-        (например, have_done подключается автоматически только после make_plan).
-        """
+        """Внутренняя загрузка управляемого инструмента в обход allow-list (например, have_done подключается только после make_plan)."""
         if name in self._tools_map:
             return f"'{name}' is already loaded."
         external_tools = load_external_plugins(_tools_directory())
@@ -133,12 +122,7 @@ class ToolManager:
         return f"Error '{name}' not found in loadable tools"
 
     def unload(self, name: str) -> str:
-        """Откладывает отключение инструмента до следующего изменения истории.
-
-        Инструмент остаётся в префиксе (описание в системном промпте/схемах), чтобы не
-        ломать KV-кэш. Если модель попытается вызвать его до фактической выгрузки — вернётся
-        ошибка «was unloaded». Реальное удаление происходит в flush_pending_unloads().
-        """
+        """Откладывает отключение до следующего изменения истории: инструмент остаётся в префиксе (KV-cache safe), вызов возвращает «was unloaded»; реальное удаление — flush_pending_unloads()."""
         if name in CORE_TOOLS:
             return f"Error Cannot disable built-in tool '{name}'."
 
@@ -167,12 +151,7 @@ class ToolManager:
     # --------------------------------------------------------
 
     def deny(self, names: Union[str, Iterable[str]]) -> None:
-        """Запрещает вызов инструментов по имени.
-
-        KV-cache safe: схемы запрещённых инструментов НЕ удаляются из контекста,
-        меняется только поведение при вызове — ExecuteMixin вернёт ошибку
-        «forbidden». Строка '*' или 'all' запрещает все загруженные инструменты.
-        """
+        """Запрещает вызов инструментов по имени (KV-cache safe: схемы не удаляются, ExecuteMixin вернёт «forbidden»). '*'/'all' запрещает все загруженные."""
         if isinstance(names, str):
             names = list(self._tools_map.keys()) if names in ("*", "all") else [names]
         self._denied.update(names)
@@ -187,11 +166,7 @@ class ToolManager:
         return set(self._denied)
 
     def flush_pending_unloads(self) -> list[str]:
-        """Физически удаляет инструменты, помеченные unload_tool, и очищает метки.
-
-        Вызывается только при реальном изменении истории (сжатие/удаление/правка), когда
-        префикс и так пересобирается и KV-кэш всё равно инвалидируется.
-        """
+        """Физически удаляет помеченные unload_tool инструменты и очищает метки; вызывается только при изменении истории (когда KV-кэш всё равно инвалидируется)."""
         flushed = [n for n in self._pending_unload if n in self._tools_map]
         for name in flushed:
             del self._tools_map[name]

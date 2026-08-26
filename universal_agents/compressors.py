@@ -10,38 +10,41 @@ from universal_agents.constants import (
     SUMMARY_PREFIX_TOOL_RESULT,
 )
 from universal_agents.models import UserMessage, AssistantMessage, ToolResult
-from universal_agents.llm_client import TokenUsageTracker
+from universal_agents.llm_client import TokenUsageTracker, LLMClient
 from universal_agents.context_builder import prepare_messages_for_api
 
 if TYPE_CHECKING:
     from universal_agents.agent import LLMAgent
 
 SECTION_GUIDE = """
-### 1. Постановка задачи и ожидания
-*   1.1 Ключевой контекст, главная задача, критерии завершения, ожидаемый конечный результат.
-*   1.2 Ограничения и требования задачи с разделением на строгие и нестрогие.
-*   1.3 Предпочтения пользователя включая язык, стиль и дополнительные инструкции.
+(Заполняй при наличии реального контента для заполнения и отмечай новое по сравнению с предыдущим)
+*   1.1 Ключевой контекст, связи между сущностями.
+*   1.2 Главная задача, критерии завершения, ожидаемый конечный результат.
+*   1.3 Ограничения и требования задачи (строгие и нестрогие отдельно).
+*   1.4 Предпочтения пользователя, язык и дополнительные инструкции.
 
-### 2. Ход работы и принятые решения
-*   2.1 Выполненные шаги с результатами, текущий и следующие шаги.
-*   2.2 Ключевые решения, неудачные попытки, отклонённые альтернативы. Причины принятых и непринятых решений и действий.
+*   2.1 Выполненные шаги, результы, возникшие трудности.
+*   2.2 Текущий и следующие шаги, их критерии завершения и ожидаемый результат.
+*   2.3 Ключевые действия и решения, неудачные попытки, отклонённые альтернативы. Причины принятых и отклонённых решений.
 
-### 3. Текущий статус, блокировки и черновики
-*   3.1 Незавершённые черновики (что это, где лежит, что осталось сделать), заблокированные задачи и зависимости, что блокирует и условия разблокировки.
+*   3.1 Незавершённые черновики (какие, где лежат, что осталось чтобы их закончить), заблокированные задачи и зависимости, что их блокирует и условия разблокировки.
 
-### 4. Знания, гипотезы и проверка
-*   4.1 Открытые вопросы, вещи требующие проверки. Подтвержденные вещи и чем подтверждены. Собственные наблюдения и выводы, текущие гипотезы.
+*   4.1 Требующие проверки/уточнения вещи. 
+*   4.2 Подтвержденные вещи и чем подтверждены.
+*   4.3 Наблюдения, выводы, гипотезы.
 
-### 5. Проектная специфика и метаданные
 *   5.1 Мета-данные о задаче, проекте, пользователе.
-*   5.2 Внутренние специфические термины/сокращения в рамках проекта/задачи. Специфические договоренности. Связи между сущностями.
+*   5.2 Специфические термины/сокращения/договорённости в рамках проекта/задачи.
 
-### 6. Ресурсы и артефакты
-*   6.1 Задействованные ресурсы и артефакты (или подсказки как их найти). Для каждого ресурса: зачем нужен, где находится (путь/ссылка), актуальная версия (если применимо), что с ним делали, что можно/нужно делать с ним теперь.
+*   6.1 Задействованные ресурсы и артефакты. Для каждого: зачем нужен, где находится, мета-данные, что с ним делали, что с ним делать далее.
 
-### 7. Инструкции для передачи контекста
-*   7.1 Подсказки для будущей версии себя продолжающей работу с конкретными инструкциями.
-*   7.2 Информация, которая не попала в предыдущие разделы, но может быть важна для продолжения.
+*   7.1 Подсказки для будущей версии себя.
+*   7.2 Информация, не попавшая в предыдущие разделы, но возможно важная.
+
+"""
+
+NEW_TO_PREVIOUS = """
+*   7.3 Новые находки относительно предыдущего саммари.
 """
 
 
@@ -59,10 +62,7 @@ def is_summary_message(msg) -> bool:
 
 
 def _find_existing_summary(messages: list, end_id: int) -> Optional[dict]:
-    """
-    Ищет в обрезаемом диапазоне ранее сгенерированное авто-саммари.
-    Возвращает {"index": int, "full_content": str, "body": str} или None.
-    """
+    """Ищет ранее сгенерированное авто-саммари в обрезаемом диапазоне; возвращает dict или None."""
     for i in range(0, end_id):
         msg = messages[i]
         if is_summary_message(msg):
@@ -81,12 +81,7 @@ def _report_service_error(agent: LLMAgent, context: str, err, msg_obj=None) -> N
 
 
 def _dense_summarize_message(agent: LLMAgent, content: str) -> Optional[str]:
-    """
-    Плотное, безлоосное саммари ОДНОГО сообщения. Используется в режиме
-    per-message summarization: результат складывается в рабочую память агента
-    (agent.history._per_msg_summaries) и НЕ попадает в контекст, а при сжатии диалога
-    вставляется на место исходного сообщения.
-    """
+    """Плотное безпотерьное саммари одного сообщения (per-message режим); складывается в рабочую память."""
     content = (content or "").strip()
     if not content:
         return None
@@ -98,9 +93,10 @@ def _dense_summarize_message(agent: LLMAgent, content: str) -> Optional[str]:
         f"Output ONLY the dense structured summary.\n"
         f"{ENVIRONMENT_PREFIX_END}"
     )
-    history_msgs = [m.to_api_dict() for m in agent.history.get_all()]
+        # Тот же формат, что у основного диалога (закэшированные заголовки), чтобы переиспользовался KV-кэш.
+    history_msgs = prepare_messages_for_api(agent, normalize=False)
     msgs = history_msgs + [{"role": "user", "content": prompt}]
-    msg_obj, err, usage = agent.service_llm_call(msgs, temp=0.2, timeout=60)
+    msg_obj, err, usage = agent.service_llm_call(msgs, temp=Config.TEMP, timeout=Config.TIMEOUT)
     if err or not msg_obj or not msg_obj.content:
         _report_service_error(agent, "per-message summary", err, msg_obj)
         return None
@@ -111,12 +107,7 @@ def _build_from_per_message_summaries(
     agent: LLMAgent, start_id: Optional[int], end_id: Optional[int],
     truncate_result_ratio: float = 0.0, truncate_result_min_chars: int = 0,
 ) -> Optional[str]:
-    """
-    Собирает новый (более короткий) диалог из маленьких саммари, накопленных
-    в рабочей памяти агента (agent.history._per_msg_summaries). Для сообщений без
-    саммари (короткие выводы инструментов и т.п.) используется исходный контент.
-    Возвращает None, если в сжимаемом диапазоне не нашлось ни одного саммари.
-    """
+    """Собирает короткий диалог из накопленных per-message саммари (без саммари — исходный контент); None, если саммари нет."""
     messages = agent.history.get_all()
     if start_id is None:
         start_id = Config.AFTER_SYSTEM_PROMPT
@@ -130,9 +121,7 @@ def _build_from_per_message_summaries(
     for i in range(start_id, end_id):
         msg = messages[i]
         content = (msg.content or "").strip()
-        # Assistant-сообщение, которое является ЧИСТЫМ вызовом инструмента
-        # (пустой text-контент) — раньше терялось из-за `if not content: continue`.
-        # Сохраняем его, чтобы в саммари попадали и сами вызовы инструментов.
+        # Чистый вызов инструмента (пустой текст) раньше терялся; сохраняем, чтобы саммари включало вызовы.
         if isinstance(msg, AssistantMessage) and msg.has_tool_calls() and not content:
             tcs = ", ".join(f"{tc.name}({tc.arguments})" for tc in msg.tool_calls)
             parts.append(f"{SUMMARY_PREFIX_TOOL_CALL} {tcs}")
@@ -148,8 +137,7 @@ def _build_from_per_message_summaries(
             parts.append(f"{SUMMARY_PREFIX_USER} {content}")
         elif isinstance(msg, ToolResult):
             if truncate_result_ratio > 0 and len(content) > 0:
-                # Относительная обрезка: оставляем долю оригинала, но не меньше
-                # абсолютного пола truncate_result_min_chars.
+                # Относительная обрезка: доля оригинала, но не меньше truncate_result_min_chars.
                 limit = max(int(len(content) * truncate_result_ratio), truncate_result_min_chars)
                 if len(content) > limit:
                     content = content[:limit] + f"...[truncated to {limit} chars]"
@@ -157,171 +145,11 @@ def _build_from_per_message_summaries(
         else:
             parts.append(f"{SUMMARY_PREFIX_AI} {content}")
 
-    # Ни одного сохранённого саммари в диапазоне — per-message сборка не имеет
-    # смысла, отдаём None, чтобы вызывающий код откатился на однофазный режим.
+    # Без сохранённых саммари per-message сборка бессмысленна — отдаём None для отката на single-shot.
     if used_summaries == 0:
         return None
 
     return "\n\n".join(parts)
-
-
-def summarize_dialogue(
-    agent: LLMAgent,
-    start_id: Optional[int] = None,
-    end_id: Optional[int] = None,
-    truncate_result_ratio: float = 0.0,
-    truncate_result_min_chars: int = 0,
-) -> Optional[str]:
-    """
-    Суммаризация диалога через LLM.
-
-    Единственный гейт per-message режима — Config.PER_MSG_SUMMARIES_ENABLED.
-    Когда он True, рабочая память агента (agent.history._per_msg_summaries)
-    наполняется плотными саммари отдельных сообщений, и здесь из них
-    собирается более короткий диалог (склейка, без LLM). Когда рабочая память
-    пуста (PER_MSG_SUMMARIES_ENABLED=False) — откат на single-shot режим: один
-    вызов LLM со всей историей (черновик + отревьюенная версия).
-    """
-    messages = agent.history.get_all()
-
-    if end_id is None:
-        end_id = len(messages)
-
-    # Структурированные сообщения истории для KV-cache reuse
-    history_msgs = [msg.to_api_dict() for msg in messages]
-
-    # Оригинальный системный промпт — должен быть 0-м сообщением в вызовах LLM,
-    # чтобы префикс совпадал с реальным диалогом и переиспользовался KV-cache.
-    system_msg = messages[0].to_api_dict() if messages else None
-
-    # Ранее сгенерированное авто-саммари в обрезаемом диапазоне
-    existing = _find_existing_summary(messages, end_id)
-
-    # Сначала пытаемся собрать диалог из накопленных per-message саммари;
-    # если рабочая память пуста — single-shot суммаризация всего диалога.
-    summary = (
-        _build_from_per_message_summaries(agent, start_id, end_id, truncate_result_ratio, truncate_result_min_chars)
-        or _single_phase_summarize(agent, history_msgs, system_msg, existing)
-    )
-
-    return summary
-
-
-def _single_phase_summarize(
-    agent: LLMAgent,
-    history_msgs: list[dict],
-    system_msg: Optional[dict],
-    existing: Optional[dict] = None,
-) -> Optional[str]:
-    """
-    Однофазная суммаризация: черновик (draft) + review.
-    Промпт суммаризации добавляется в конец structured истории.
-    system_msg передаётся 0-м сообщением для переиспользования KV-cache.
-    После черновика выполняется review-проход: прунинг устаревшего +
-    добавление недостающих деталей.
-    """
-    summary = _draft_summary(agent, history_msgs, system_msg, existing)
-    if not summary:
-        return None
-    if Config.AUTO_SUMMARY_REVIEW_PASS:
-        summary = _review_summary(agent, history_msgs, summary, system_msg, existing) or summary
-    return summary
-
-
-def _draft_summary(
-    agent: LLMAgent,
-    history_msgs: list[dict],
-    system_msg: Optional[dict],
-    existing: Optional[dict] = None,
-) -> Optional[str]:
-    prompt = _build_draft_prompt(existing)
-    msgs = history_msgs + [{"role": "user", "content": prompt}]
-    msg_obj, err, usage = agent.service_llm_call(msgs, temp=0.1, timeout=60)
-    if err or not msg_obj or not msg_obj.content:
-        _report_service_error(agent, "dialog draft summary", err, msg_obj)
-        return None
-    return msg_obj.content.strip()
-
-
-def _review_summary(
-    agent: LLMAgent,
-    history_msgs: list[dict],
-    draft: str,
-    system_msg: Optional[dict],
-    existing: Optional[dict] = None,
-) -> Optional[str]:
-    """
-    Review-проход: модель отревьюивает черновик саммари на фоне реальной
-    истории. Задача — СДЕЛАТЬ ПРУНИНГ: убрать устаревшие, дублирующиеся и
-    ненужные детали (в первую очередь потерявшие актуальность), и ДОБАВИТЬ
-    недостающие важные факты (chain-of-density).
-    """
-    existing_note = (
-        "\nThere is an EXISTING auto-summary inside the history. Keep its still-relevant facts, "
-        "fade out what is now outdated/unneeded."
-        if existing and existing.get("body") else ""
-    )
-    review_prompt = (
-        f"{ENVIRONMENT_PREFIX} Below is a DRAFT summary of the conversation above.\n"
-        f"Review it against the actual conversation and produce the FINAL summary:\n"
-        f"PRUNE: remove outdated, duplicated and no longer needed details — fade out first "
-        f"what is already finished/superseded/irrelevant to the current task.\n"
-        f"ADD: put back important facts missing from the draft (do not invent, only recover):\n"
-        f"1. The ORIGINAL USER TASK and the MOST RECENT USER REQUEST (find the last user message in history).\n"
-        f"2. Actual file/function/class/variable names, tool names and their arguments, exact paths, "
-        f"commands and any concrete values/numbers/errors mentioned.\n"
-        f"3. Key decisions, conclusions and results of tool execution.\n"
-        f"4. Current state: what is DONE vs PENDING/BLOCKED, and what the next step is.\n"
-        f"{existing_note}\n"
-        f"Keep the summary dense, structured and complete. Do not add irrelevant noise. "
-        f"Output ONLY the final summary.\n"
-        f"\nDRAFT SUMMARY:\n{draft}"
-        f"\n{ENVIRONMENT_PREFIX_END}"
-    )
-    msgs = history_msgs + [{"role": "user", "content": review_prompt}]
-    msg_obj, err, usage = agent.service_llm_call(msgs, temp=0.1, timeout=60)
-    if err or not msg_obj or not msg_obj.content:
-        _report_service_error(agent, "dialog review summary", err, msg_obj)
-        return None
-    return msg_obj.content.strip()
-
-
-def _build_draft_prompt(existing: Optional[dict] = None) -> str:
-    """Строит промпт черновой суммаризации с акцентом на сохранность фактов."""
-    if existing and existing.get("body"):
-        summary_note = (
-            f"\nThere is an EXISTING auto-summary of earlier part of the dialog inside the history. "
-            f"Keep its still-important facts and MERGE with the newer messages. "
-            f"Do not re-add facts that are no longer relevant."
-        )
-    else:
-        summary_note = ""
-
-    prompt = (
-        f"{ENVIRONMENT_PREFIX} Based on the conversation above "
-        f"write a very dense, detailed and lossless summary of the dialog.\n"
-        f"Preserve ALL of the following:"
-        f"1. The ORIGINAL USER TASK (findable at the start of the conversation) and the MOST RECENT "
-        f"USER REQUEST (the last user message) - keep their intent precisely.\n"
-        f"2. Every important concrete fact: file paths, function/class/variable names, tool names and "
-        f"their arguments, exact commands, values, numbers, error messages.\n"
-        f"3. Key decisions made and their reasons.\n"
-        f"4. Results of tool executions: what was read, written, created, changed.\n"
-        f"5. Current task state: what's DONE, what's PENDING/BLOCKED, what's the next step.\n"
-        f"{summary_note}\n"
-        f"Remove only reasoning chains and redundant filler. "
-        f"Do NOT generalize or replace concrete identifiers with vague words. "
-        f"Output ONLY the dense structured summary:"
-        f"\n"
-        f"SUMMARY:\n"
-        f"TASK:\n"
-        f"PROGRESS:\n"
-        f"KEY FACTS:\n"
-        f"DECISIONS:\n"
-        f"STATE / NEXT STEPS:"
-        f"\n{ENVIRONMENT_PREFIX_END}"
-    )
-    return prompt
 
 
 def _draft_task_summary(
@@ -343,7 +171,7 @@ def _draft_task_summary(
         f"\n{ENVIRONMENT_PREFIX_END}"
     )
     msgs = history_msgs + [{"role": "user", "content": prompt}]
-    msg_obj, err, usage = agent.service_llm_call(msgs, temp=0.1, timeout=60)
+    msg_obj, err, usage = agent.service_llm_call(msgs, temp=Config.TEMP, timeout=Config.TIMEOUT)
     if err or not msg_obj or not msg_obj.content:
         _report_service_error(agent, "task segment draft", err, msg_obj)
         return None
@@ -367,7 +195,7 @@ def _review_task_summary(
         f"\n{ENVIRONMENT_PREFIX_END}"
     )
     msgs = history_msgs + [{"role": "user", "content": review_prompt}]
-    msg_obj, err, usage = agent.service_llm_call(msgs, temp=0.1, timeout=60)
+    msg_obj, err, usage = agent.service_llm_call(msgs, temp=Config.TEMP, timeout=Config.TIMEOUT)
     if err or not msg_obj or not msg_obj.content:
         _report_service_error(agent, "task segment review", err, msg_obj)
         return None
@@ -375,10 +203,7 @@ def _review_task_summary(
 
 
 def synthesize_task_goal(agent: LLMAgent, tool_name: str) -> str:
-    """
-    Анализирует всю историю диалога через LLM и формулирует точную цель
-    для анализа вывода конкретного инструмента.
-    """
+    """Формулирует через LLM точную цель анализа вывода конкретного инструмента."""
     agent.on_system_msg(f"[GOAL SYNTHESIS] Analyzing conversation history to formulate goal for '{tool_name}'...")
 
     messages_base = prepare_messages_for_api(agent)[:-1]
@@ -414,10 +239,7 @@ def synthesize_task_goal(agent: LLMAgent, tool_name: str) -> str:
 
 
 def auto_compress_tool_result(agent: LLMAgent, tool_result: ToolResult) -> None:
-    """
-    Автоматически сжимает вывод инструмента перед добавлением в историю,
-    если он длинный, используя порционный анализ и динамический синтез цели.
-    """
+    """Автоматически сжимает длинный вывод инструмента перед добавлением в историю (порционный анализ)."""
     if tool_result.is_error or tool_result.is_user_denied:
         return
 
@@ -446,8 +268,7 @@ def auto_compress_tool_result(agent: LLMAgent, tool_result: ToolResult) -> None:
 
     if len(new_tool_result_content) < original_len * 0.95:
         tool_result.content = new_tool_result_content
-        # Содержимое результата сжато — модель потеряла фактический контент,
-        # поэтому кэш хэша файла сбрасываем, чтобы следующий read перечитал файл.
+        # Результат сжат — сбрасываем кэш хэша файла, чтобы следующий read перечитал.
         agent._on_history_changed()
         agent.on_system_msg(
             f"[AUTO-COMPRESS] Summarized '{tool_result.name}' output: "
@@ -461,9 +282,7 @@ def auto_compress_tool_result(agent: LLMAgent, tool_result: ToolResult) -> None:
 
 
 def chunk_and_summarize_large_text(agent: LLMAgent, text: str, tool_name: str, task_goal: str) -> str:
-    """
-    Инкрементально собирает факты по каждому чанку и синтезирует их в единый связный отчет.
-    """
+    """Инкрементально собирает факты по чанкам и синтезирует их в единый отчёт."""
     agent.on_system_msg(f"[CHUNK ANALYZER] Starting chunked analysis of {len(text)} chars for tool '{tool_name}'...")
 
     token_limit = agent.token_tracker.get_remaining()
@@ -494,7 +313,7 @@ def chunk_and_summarize_large_text(agent: LLMAgent, text: str, tool_name: str, t
         step_agent = agent.make_sub_agent(
             denied_tools="*",
             max_iter=1,
-            temp=0.35,
+            temp=Config.TEMP,
             on_log=agent.on_system_msg,
         )
 
@@ -572,38 +391,25 @@ def chunk_and_summarize_large_text(agent: LLMAgent, text: str, tool_name: str, t
 def summarize_history_plain(
     agent: LLMAgent,
     history_msgs: list[dict],
+    temp: float = 0.1,
+    extra_instruction: str = None,
+    include_new_to_previous: bool = False,
 ) -> Optional[str]:
-    """Сборка session summary в режиме single-shot (per-message выключен).
-
-    Подаётся ПОЛНАЯ история (включая system prompt) как структурированные
-    сообщения API — ровно в том же порядке, что и в реальном диалоге, чтобы
-    префикс совпадал и переиспользовался KV-cache. Инструкция суммаризации
-    (SECTION_GUIDE) добавляется последним user-сообщением.
-
-    Каждая компакция ПЕРЕПИСЫВАЕТ заметки с нуля. При повторной компакции
-    (current_summary задан) старые заметки подаются модели отдельным блоком
-    для слияния с полной историей — никакого инкрементального редактирования.
-
-    Возвращает готовый текст заметок или None при неудаче служебного вызова."""
-    prompt = _build_summary_prompt()
-    # history_msgs уже содержит system prompt первым сообщением — префикс
-    # совпадает с реальным диалогом, KV-cache переиспользуется.
+    """Сборка session summary в режиме single-shot: подаётся полная история (префикс совпадает для KV-cache), инструкция — последним сообщением. Перезаписывает заметки с нуля. ``include_new_to_previous`` добавляет раздел 7.3 (новые находки относительно предыдущего саммари) — имеет смысл только при повторной компакции, на первой предыдущего саммари нет. Возвращает текст или None."""
+    new_section = NEW_TO_PREVIOUS if include_new_to_previous else ""
+    prompt = (
+        f"{ENVIRONMENT_PREFIX} Write these sections of detailed full session summary:\n```"
+        f"{SECTION_GUIDE}{new_section}\n```\n"
+        f"Output only sectioned summary in the strict format. "
+    )
+    prompt += f"{ENVIRONMENT_PREFIX_END}"
+    # history_msgs содержит system prompt первым — префикс совпадает, KV-cache переиспользуется.
     msgs = list(history_msgs) + [{"role": "user", "content": prompt}]
-    msg_obj, err, usage = agent.service_llm_call(msgs, temp=0.1, timeout=Config.STATE_GEN_TIMEOUT)
+    # Доп. инструкция добавляется ПОСЛЕ промпта, чтобы не ломать закэшированный префикс.
+    if extra_instruction:
+        msgs.append({"role": "system", "content": extra_instruction})
+    msg_obj, err, usage = agent.service_llm_call(msgs, temp=temp, timeout=Config.TIMEOUT)
     if err or not msg_obj or not msg_obj.content:
         _report_service_error(agent, "dialog plain summary", err, msg_obj)
         return None
     return msg_obj.content.strip()
-
-
-def _build_summary_prompt() -> str:
-    """Строит инструкцию суммаризации (SECTION_GUIDE), без самой истории —
-    история подаётся отдельно структурированными сообщениями для KV-cache."""
-    prompt = (
-        f"{ENVIRONMENT_PREFIX} Write detailed full session summary from the beginning using these sections:\n```"
-        f"{SECTION_GUIDE}\n```\n"
-        f"Output only the summary in this strict format. "
-        f"Fill sections if there is something to fill with don't hallucinate non-existing just to fill gaps."
-    )
-    prompt += f"{ENVIRONMENT_PREFIX_END}"
-    return prompt

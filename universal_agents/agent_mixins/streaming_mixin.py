@@ -33,17 +33,9 @@ class StreamingMixin:
         params: GenerationParams = None,
         watch_prefix: str = None,
         watch_continue_temp: float = None,
+        stop_check: Callable[[], bool] = None,
     ) -> tuple:
-        """
-        Вызов LLM с streaming для текста.
-        Возвращает (message_obj, error, usage) как обычный LLMClient.call().
-
-        watch_prefix: если задан, накопленный текст сверяется с ним по префиксу.
-        Как только модель перестаёт повторять прежний ответ (расхождение), генерация
-        на горячей температуре прерывается, и ответ достраивается отдельным запросом
-        на спокойной температуре (watch_continue_temp) начиная с точки расхождения —
-        так высокий буст не успевает спровоцировать галлюцинации.
-        """
+        """Вызов LLM со streaming (возвращает (message_obj, error, usage)). Если задан watch_prefix, при расхождении с прежним ответом генерация на горячей температуре прерывается и достраивается спокойной температурой (watch_continue_temp) — буст не успевает вызвать галлюцинации. stop_check — вызывается после каждого чанка; True прерывает стрим."""
         try:
             stream = LLMClient.stream(
                 messages,
@@ -74,6 +66,8 @@ class StreamingMixin:
                 for chunk in stream:
                     if acc.process(chunk) and self._watch_diverged(watch_prefix, prefill, acc.content):
                         diverged = True
+                        break
+                    if stop_check and stop_check():
                         break
 
             if self.on_stream_end:

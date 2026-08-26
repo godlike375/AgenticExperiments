@@ -3,8 +3,8 @@ class Config:
     API_URL = "http://localhost:1234/v1"
     MODEL_NAME = ""
     AFTER_SYSTEM_PROMPT = 1  # Index after which dialog starts (0 = system)
-    BOOST_TEMP = 1.75
-    ERROR_RECOVERY_TEMP = 1.25
+    BOOST_TEMP = 1.7
+    ERROR_RECOVERY_TEMP = 1.2
     MAX_LOOP_RETRIES = 2  # попыток перегенерации при повторяющемся вызове/ответе
     # Порог Jaccard-схожести по множеству слов для признания текстового ответа повтором.
     DUPLICATE_SIMILARITY_THRESHOLD = 0.7
@@ -12,40 +12,35 @@ class Config:
     BROKEN_CALL_REGEN_RETRIES = 2  # попыток перегенерации при обнаружении сломанного вызова
     BROKEN_CALL_FIX_RETRIES = 2    # попыток «починить» вызов через промпт после неудачной регенерации
     DUPLICATE_CONTINUATION_TEMP = round(BOOST_TEMP / 4, 2)  # спокойная достройка после расхождения
+    SUMMARY_DUPLICATE_TEMP = round(BOOST_TEMP / 2, 2)  # буст при тождественном повторе саммари (мягче полного BOOST_TEMP)
 
     # Параметры генерации
-    TEMP = 0.36
+    TEMP = 0.4
     TOP_P = 0.94
-    FREQUENCY_PENALTY = 0.025
-    PRESENCE_PENALTY = 0.025
     MAX_CONTEXT_TOKENS = 50000
+    FREQUENCY_PENALTY = 0.05
+    PRESENCE_PENALTY = 0.05
     MAX_OUTPUT_TOKENS = min(32000, int(MAX_CONTEXT_TOKENS / 1.5))
     TIMEOUT = 1800
-    MAX_ITER = 35
+    MAX_ITER = 150
     SUMMARIZATION_THRESHOLD_DIVIDER = 2
 
     STREAM_ENABLED = True
 
-    # Держать reasoning_content ассистента в истории/контексте (для экспериментов).
-    # Если False (по умолчанию) — reasoning_content не попадает в API-контекст и в
-    # сохранённую историю (экономия токенов/KV-кэша; reasoning не нужен downstream).
     KEEP_REASONING_CONTENT_IN_HISTORY = False
 
     USE_RESPONSES_API = False
 
     # Автоматическая суммаризация диалога
-    AUTO_SUMMARY_THRESHOLD = 60  # процент контекста
+    AUTO_SUMMARY_THRESHOLD = 2  # процент контекста
     AUTO_SUMMARY_PRESERVE_LAST = 1  # сколько последних сообщений не трогать
     AUTO_SUMMARY_REVIEW_PASS = True  # отревьювить черновик саммари: подчистить устаревшее + добавить пропущенное
+    # Попыток перегенерации саммари при неудаче; между ними температура чуть растёт, чтобы не повторять ту же ошибку.
+    AUTO_SUMMARY_MAX_RETRIES = 5
 
-    # Если авто-суммаризация сжала контекст менее чем на эту долю
-    # (например 0.20 = 20%), сжатие считается слабым и поверх него дополнительно
-    # усекаются результаты выполнения инструментов, чтобы ещё сэкономить контекст.
+    # Слабое сжатие (меньше этой доли) → поверх него ещё усекаются выводы инструментов.
     AUTO_SUMMARY_MIN_REDUCTION_RATIO = 0.25
-    # Относительная мера усечения выводов инструментов при слабом сжатии:
-    # оставляем эту долю оригинала (0.5 = половину). Если от этой доли остаётся
-    # меньше TRUNCATE_TOOL_RESULT_CHARS символов — используем абсолютный пол
-    # TRUNCATE_TOOL_RESULT_CHARS (чтобы не резать слишком коротко).
+    # Усечение выводов при слабом сжатии: оставляем эту долю оригинала, но не меньше TRUNCATE_TOOL_RESULT_CHARS (чтобы не резать слишком коротко).
     TRUNCATE_TOOL_RESULT_KEEP_RATIO = 0.2
     TRUNCATE_TOOL_RESULT_CHARS = 60
 
@@ -53,75 +48,58 @@ class Config:
     TASK_COMPACTION_ENABLED = True  # сжимать завершённые группы подзадач
     MAX_TASK_COMPACTION_ROUNDS = 20  # макс. число групп за один проход
 
-    # Порог длины содержимого результата have_done (в символах): если больше —
-    # при компактизации задачи обрезаем его до короткого стаба, т.к. детальные
-    # факты уже сохранены в компактизационном summary.
+    # Порог have_done (символов): при превышении при компактизации обрезаем до стаба (детали уже в summary).
     HAVE_DONE_TRIM_THRESHOLD = 250
 
-    # Авто-доверие корня проекта: если в папке есть валидный .git, она доверена
-    # для edit_file по умолчанию (без запроса подтверждения) — git поможет откатить.
+    # Авто-доверие корня проекта: наличие .git → edit_file без подтверждения (git поможет откатить).
     AUTO_TRUST_GIT_ROOT = True
 
     # Константы токенизации и суммаризации
     CHARS_PER_TOKEN = 2.35
     MIN_TOKENS_TO_SUMMARIZE = 180
 
-    # Чтение больших файлов: вместо выгрузки всего файла в контекст — ровно один
-    # раз отдаём структурный скелет, а реальный код модель читает порциями через
-    # start_line/end_line. Повторные целиком-файловые чтения неизменённого файла
-    # запрещены (экономия контекста, см. REFACTORING_BASELINE §3.7).
+    # Чтение больших файлов: ровно один раз — структурный скелет, код модель
+    # читает порциями через start_line/end_line; повторные целиком-файловые
+    # чтения неизменённого файла запрещены (экономия контекста, см. REFACTORING_BASELINE §3.7).
     BIG_FILE_SKELETON = True
 
-    # Лимит одного чтения диапазона из файла: не более N символов за вызов;
-    # строка, на которой лимит превышен, включается целиком (порция всегда
-    # заканчивается концом строки). Дополнительно — не более
-    # MAX_READ_LINES_PER_CALL строк за вызов. Заставляет модель читать порциями,
-    # как человек, а не выгружать файл целиком.
-    MAX_READ_CHARS_PER_CALL = 2000
-    MAX_READ_LINES_PER_CALL = 150
+    # Единый лимит вывода ЛЮБОГО инструмента (символов за вызов). read/search уже
+    # сами режут вывод до этого лимита с подсказками; остальные усекаются «хвостом»
+    # в _execute_tools. MAX_READ_LINES_PER_CALL — доп. лимит строк порционного чтения (порция кончается концом строки).
+    MAX_READ_CHARS_PER_CALL = 6000
+    MAX_READ_LINES_PER_CALL = 120
 
-    # Отключает автоматическую суммаризацию большого вывода любых инструментов
+    # Отключает авто-суммаризацию большого вывода любых инструментов.
     DISABLE_TOOL_AUTO_SUMMARIZATION = True
 
-    # Режим per-message summarization (единственный гейт — PER_MSG_SUMMARIES_ENABLED):
-    #   • когда True — после каждого сообщения ассистента его плотное саммари
-    #     складывается в рабочую память агента (НЕ в контекст), длинные выводы
-    #     инструментов (> MIN_TOKENS_TO_SUMMARIZE) тоже; при сжатии диалога из
-    #     этих маленьких саммари собирается более короткий диалог;
-    #   • когда False — per-message саммари не копятся, сжатие собирает
-    #     session summary одним single-shot вызовом (см. SECTION_GUIDE).
-    # Локальный оверрайд на уровне агента — параметр disable_per_msg_summarization.
+    # per-message summarization (гейт — PER_MSG_SUMMARIES_ENABLED): True — плотное саммари каждого сообщения копится в память (НЕ контекст),
+    # длинные выводы (>MIN_TOKENS_TO_SUMMARIZE) тоже; при сжатии собирается короткий диалог. False — session summary одним single-shot вызовом.
+    # Локальный оверрайд агента — disable_per_msg_summarization.
 
-    # Как исполнять bash на Windows (для run_bash_host):
-    #   "wsl"     — через WSL (bash.exe / wsl.exe)
-    #   "gitbash" — через Git Bash (C:\Program Files\Git\bin\bash.exe и т.п.)
-    #   "auto"    — попытаться определить: git bash при наличии, иначе WSL (по умолчанию)
-    #   "system"  — shutil.which("bash") без дополнительной логики
+    # Bash на Windows (run_bash_host): "wsl" — через WSL, "gitbash" — Git Bash, "auto" — gitbash при наличии иначе WSL, "system" — shutil.which("bash").
     BASH_BACKEND = "auto"
 
-    # Явный путь к Git Bash для BASH_BACKEND="gitbash".
-    # Если пусто — поиск по стандартным расположениям установки Git.
+    # Путь к Git Bash для BASH_BACKEND="gitbash"; пусто — поиск по стандартным местам.
     GIT_BASH_PATH = ""
 
+    # Явный корень проекта перекрывает авто-поиск по .git; можно задать через --project-root. None = авто-поиск.
+    PROJECT_ROOT = ""
+
     # ------------------------------------------------------------------
-    # Память: session summary + архив (см. compressors.py, archive.py,
-    # MemoryMixin._auto_summarize_dialogue).
+    # Авто-сохранение истории после каждого нового сообщения (защита от сбоев)
     # ------------------------------------------------------------------
-    # Режим компакции: вытесняемый сегмент истории сворачивается ОДНИМ
-    # служебным вызовом в session summary (UserMessage сразу после system
-    # prompt). Каждая компакция ПЕРЕПИСЫВАЕТ заметки с нуля по схеме 7 разделов
-    # (см. SECTION_GUIDE в compressors.py); при повторной компакции старые
-    # заметки подаются модели как контекст для слияния.
-    # (PER_MSG_SUMMARIES_ENABLED=False, memory_blocks.py).
+    AUTOSAVE_ENABLED = True
+    AUTOSAVE_DIR = "autosave"
+    AUTOSAVE_KEEP = 50
+
+    # ------------------------------------------------------------------
+    # Память: session summary + архив (см. compressors.py, archive.py, MemoryMixin._auto_summarize_dialogue).
+    # ------------------------------------------------------------------
+    # Компакция: вытесняемый сегмент сворачивается ОДНИМ вызовом в session summary (UserMessage сразу после system prompt),
     PER_MSG_SUMMARIES_ENABLED = False
-    # Максимальный размер входа служебного вызова компакции (символы):
-    # сегмент/хвост обрезаются с сохранением начала и конца.
-    STATE_GEN_MAX_INPUT_CHARS = 24000
-    # Таймаут служебного вызова компакции (сек): на большом сегменте длинный
-    # ответ не успевает за 120с.
+    # Таймаут компакции (сек): на большом сегменте длинный ответ не успевает за 120с.
     STATE_GEN_TIMEOUT = 240
-    # Архив вытесненных оригиналов (recall). Выключение ломает только
-    # возможность отвечать на вопросы про давно удалённое из контекста.
+    # Архив вытесненных оригиналов (recall); выключение ломает только ответы про давно удалённое из контекста.
     MEMORY_ARCHIVE_ENABLED = True
     # Лимиты recall-инструментов (символы).
     RECALL_SNIPPET_CHARS = 300

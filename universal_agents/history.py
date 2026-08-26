@@ -1,6 +1,6 @@
 import json
 from typing import Optional, Any, Iterable
-from universal_agents.constants import ENVIRONMENT_PREFIX, ENVIRONMENT_PREFIX_END, err, ok
+from universal_agents.constants import ENVIRONMENT_PREFIX, ENVIRONMENT_PREFIX_END, err, ok, SUMMARY_MARKER
 from universal_agents.config import Config
 from universal_agents.models import (
     SystemMessage, UserMessage, AssistantMessage, ToolResult, ToolCall, Message
@@ -12,17 +12,11 @@ class ChatHistory:
         self._messages: list[Message] = [SystemMessage(system_prompt)]
         # Стабильные монотонные идентификаторы сообщений (переживают /load).
         self._next_seq: int = 1
-        # Рабочая память (НЕ попадает в контекст): плотные саммари отдельных
-        # сообщений (ключ — id(Message)). Используются при сжатии диалога,
-        # чтобы из маленьких саммари собрать более короткий новый диалог.
+        # Рабочая память (вне контекста): плотные per-message саммари для сборки короткого диалога при сжатии.
         self._per_msg_summaries: dict[int, str] = {}
-        # Extras последней загрузки (архив сессии, состояние плана) — читаются
-        # вызывающим кодом после load(); сам load сохраняет обратную совместимость
-        # и возвращает прежний кортеж.
+        # Extras последней загрузки (архив, состояние плана) — читаются после load().
         self.last_loaded_extras: dict = {}
-        # Dirty-флаг нормализации: normalize() пересобирает список сообщений,
-        # что дорого и сбрасывает кэш заголовков; запускаем его только когда
-        # история реально менялась с последней нормализации.
+        # Dirty-флаг: normalize() дорог и сбрасывает кэш заголовков, запускаем только при реальном изменении истории.
         self._needs_normalize: bool = False
 
     def _mark_dirty(self) -> None:
@@ -169,9 +163,7 @@ class ChatHistory:
 
         valid.append(raw[first_user_idx])
 
-        # Фильтруем и объединяем оставшуюся историю. Блоки гибридной памяти
-        # (STATE/EPISODES) не склеиваем ни между собой, ни с обычными user —
-        # их структура и порядок семантически значимы.
+        # Фильтруем и объединяем историю; блоки гибридной памяти (STATE/EPISODES) не склеиваем — их структура значима.
         for i in range(first_user_idx + 1, len(raw)):
             msg = raw[i]
             last = valid[-1]
@@ -206,17 +198,7 @@ class ChatHistory:
         self._needs_normalize = False
 
     def remove_failed_call_chains(self) -> int:
-        """Удаляет цепочки «неудачный вызов -> неудачный вызов» из истории.
-
-        Ошибочный вызов (AssistantMessage с tool_calls + его error-ToolResult)
-        удаляется только если сразу за ним следует ещё один неудачный вызов.
-        Сценарий «неудачный -> удачный» сохраняется: после удачного вызова может
-        идти большой вывод инструмента, и удаление неудачи перед ним сбросило бы
-        KV-кэш, тогда как ошибки обычно короткие.
-
-        Возвращает число удалённых сообщений. Вызывающий код сам решает, звать ли
-        normalize()/_on_history_changed().
-        """
+        """Удаляет цепочки «неудачный вызов -> неудачный вызов» (сохраняя «неудачный -> удачный», чтобы не сбрасывать KV-кэш). Возвращает число удалённых сообщений."""
         n = len(self._messages)
         if n <= Config.AFTER_SYSTEM_PROMPT + 1:
             return 0
@@ -251,10 +233,7 @@ class ChatHistory:
              extras: dict = None):
         """Сохраняет историю. extras — произвольные данные верхнего уровня
         (архив сессии, состояние плана и т.п.), которые переживут /load."""
-        # Саммари рабочей памяти сохраняются списком, выровненным по индексам
-        # сообщений (ключ id() при перезагрузке не переживёт — объекты создаются заново).
-        # Если рабочая память пуста — пишем [], чтобы не засорять файл и сохранить
-        # обратно совместимый формат.
+        # Саммари рабочей памяти сохраняем списком по индексам сообщений (ключ id() не переживёт перезагрузку); если пусто — пишем [] для обратной совместимости.
         summaries: list[str] = (
             [] if not self._per_msg_summaries
             else [self._per_msg_summaries.get(id(m)) or "" for m in self._messages]
@@ -342,8 +321,7 @@ class ChatHistory:
             extras = raw.get("extras")
             self.last_loaded_extras = extras if isinstance(extras, dict) else {}
 
-        # Перепривязываем сохранённые саммари рабочей памяти к пересозданным
-        # объектам сообщений (ключ id() меняется после загрузки).
+        # Перепривязываем сохранённые per-message саммари к пересозданным объектам (ключ id() меняется).
         self._per_msg_summaries = {}
         for i, s in enumerate(summaries):
             if s and i < len(self._messages):
@@ -365,12 +343,7 @@ class ChatHistory:
         self._mark_dirty()
 
     def pop_pending_tool_calls(self) -> int:
-        """Удаляет висящие (pending) вызовы инструментов в конце истории —
-        AssistantMessage с tool_calls, у которых ещё нет результата. Возвращает
-        число удалённых сообщений.
-
-        Используется перед авто-суммаризацией: незавершённый вызов инструмента
-        чище перевызвать уже после сжатия, чем тащить через суммаризацию."""
+        """Удаляет висящие tool_calls в конце истории (без результата); возвращает число удалённых. Используется перед суммаризацией, чтобы не тащить незавершённый вызов."""
         popped = 0
         while (
             self._messages
@@ -393,11 +366,7 @@ class ChatHistory:
         return total
 
     def content_len(self, start: int, end: int) -> int:
-        """Суммарная исчерпывающая длина сообщений в диапазоне [start..end].
-
-        Учитывает content, reasoning_content (если есть) и tool_calls
-        (id + name + arguments), т.к. все они расходуют токены.
-        """
+        """Суммарная исчерпывающая длина сообщений [start..end]: content + reasoning_content + tool_calls (все расходуют токены)."""
         return sum(
             self._message_len(m)
             for m in self._messages[start:end + 1]
@@ -415,26 +384,14 @@ class ChatHistory:
     # --------------------------------------------------------
 
     def get_session_summary(self) -> Optional[str]:
-        """Текст текущего session summary без служебной обёртки (или None).
-
-        При повторной компакции подаётся модели как контекст для слияния
-        (см. compressors.summarize_history_plain)."""
+        """Текст текущего session summary без обёртки (или None); при повторной компакции подаётся модели для слияния."""
         for m in self._messages:
             if isinstance(m, UserMessage) and m.is_summary:
                 return (m.content)
         return None
 
     def compress_old_messages(self, summary: str, preserve_last: int = 2) -> None:
-        """Заменяет старые сообщения summary-сообщением (одно UserMessage,
-        помеченное ENVIRONMENT_PREFIX), сохраняя system prompt и последние
-        preserve_last сообщений. Всё (включая выводы инструментов) сворачивается
-        в единственное пользовательское сообщение.
-
-        Если граница режет пару «ассистент вызвал инструмент -> ToolResult»
-        (первое сохранённое сообщение — ToolResult, а вызвавший его ассистент
-        оказывается в свёрнутой области), границу сдвигаем назад, чтобы сохранить
-        ассистента вместе с его ToolResult. Иначе ToolResult остаётся без
-        предшествующего вызова (invalid для API и теряется в normalize())."""
+        """Заменяет старые сообщения одним summary UserMessage (сохраняя system prompt и последние preserve_last). При необходимости сдвигает границу назад, чтобы не оставить ToolResult без предшествующего вызова ассистента."""
         safe_end = len(self._messages) - preserve_last
 
         if Config.AFTER_SYSTEM_PROMPT > safe_end:
@@ -452,7 +409,7 @@ class ChatHistory:
             safe_end -= 1
 
         summary_msg = UserMessage(
-            content=f"{ENVIRONMENT_PREFIX}: Your past dialog summary with user:\n{summary}\n{ENVIRONMENT_PREFIX_END}",
+            content=f"{ENVIRONMENT_PREFIX}: {SUMMARY_MARKER}:\n{summary}\n{ENVIRONMENT_PREFIX_END}",
             is_summary=True,
         )
         # Саммари живёт в истории и при следующих компакциях архивируется —

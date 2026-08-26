@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from universal_agents.config import Config
 from universal_agents.constants import (
     ENVIRONMENT_PREFIX,
     ENVIRONMENT_PREFIX_END,
@@ -11,6 +12,8 @@ from universal_agents.compressors import auto_compress_tool_result
 from universal_agents.models import ToolCall, ToolResult
 from universal_agents.task_tracker import DONE_TOOL, validate_task_mark_call
 from universal_agents.tool_parsing import parse_tool_args, is_error_content
+from universal_agents.subprocess_utils import set_interrupt_event, clear_interrupt_event
+from universal_agents.exceptions import GenerationInterrupted
 
 
 class ExecuteMixin:
@@ -20,107 +23,120 @@ class ExecuteMixin:
         results = []
         history_before_current_turn = self.history.get_all()[:-1]
 
-        for tc in tool_calls:
-            name = tc.name
-            args_str = tc.arguments or "{}"
+        # На время выполнения инструментов регистрируем флаг прерывания, чтобы
+        # долгий subprocess можно было принудительно убить по запросу пользователя.
+        set_interrupt_event(self.stop_event)
+        try:
+            for tc in tool_calls:
+                name = tc.name
+                args_str = tc.arguments or "{}"
 
-            # Инструмент запрещён запретительным конфигом (суб-агенту). Схема
-            # остаётся в префиксе ради KV-cache, но вызов явно отклоняется.
-            if self.tools_manager.is_denied(name):
-                err_msg = err(
-                    f": tool '{name}' is forbidden for this sub-agent. "
-                    f"Use other tools or answer yourself."
-                )
-                self.on_system_msg(f"[TOOL DENIED] Model tried to call forbidden tool '{name}'.")
-                results.append(ToolResult.error(tc.id, name, err_msg))
-                continue
-
-            # Инструмент помечен на отложенную выгрузку (unload_tool), но ещё не убран из
-            # префикса ради KV-кэша. Модель пытается его вызвать — возвращаем явную ошибку.
-            if self.tools_manager.is_pending_unload(name):
-                err_msg = err(
-                    f": tool '{name}' was unloaded. "
-                    f"If you still wanna use it then load_tool('{name}') first."
-                )
-                self.on_system_msg(f"[TOOL UNLOADED] Model tried to call unloaded tool '{name}'.")
-                results.append(ToolResult.error(tc.id, name, err_msg))
-                continue
-
-            if self.loop_detector.check_duplicate_in_turn(name, args_str, history_before_current_turn):
-                warning_msg = (
-                    f"{ENVIRONMENT_PREFIX} System rejected duplicate call of tool '{name}'. "
-                    f"This tool was just called with the exact same parameters in the previous step. "
-                    f"Do NOT call it again in the current moment even if user asked to. Try a different approach, use other parameters, "
-                    f"or complete your response with the final answer."
-                    f"{ENVIRONMENT_PREFIX_END}"
-                )
-                self.on_system_msg(f"[LOOP PREVENTED] Blocked repeated call to '{name}' during execution.")
-                results.append(ToolResult.error(tc.id, name, warning_msg))
-                continue
-
-            tool_info = self._all_tools.get(name)
-            if not tool_info:
-                results.append(ToolResult.error(tc.id, name, f"Unknown tool '{name}'. It must be loaded first or probably misspelled."))
-                continue
-
-            args_dict = parse_tool_args(args_str)
-
-            # Принудительный порядок декомпозиции: неверный вызов have_done
-            # → ошибка → существующий механизм перегенерации ответа модели.
-            if name == DONE_TOOL:
-                order_err = validate_task_mark_call(
-                    history_before_current_turn, args_dict, self.task_plan_map, self._compacted_task_ids
-                )
-                if order_err:
-                    self.on_system_msg(f"[TASK ORDER] Rejected out-of-order have_done call: {order_err}")
-                    results.append(ToolResult.error(tc.id, name, f"{ENVIRONMENT_PREFIX} {order_err}{ENVIRONMENT_PREFIX_END}"))
+                # Инструмент запрещён для суб-агента: схема в префиксе ради KV-cache, но вызов отклоняется.
+                if self.tools_manager.is_denied(name):
+                    err_msg = err(
+                        f": tool '{name}' is forbidden for this sub-agent. "
+                        f"Use other tools or answer yourself."
+                    )
+                    self.on_system_msg(f"[TOOL DENIED] Model tried to call forbidden tool '{name}'.")
+                    results.append(ToolResult.error(tc.id, name, err_msg))
                     continue
 
-            if tool_info.get('requires_confirmation', False) or tool_info.get('path_safety', False):
-                skip_confirm = bool(
-                    tool_info.get('safe_in_trusted')
-                    and "path" in args_dict
-                    and self.is_path_trusted(args_dict["path"])
-                )
-                external = self._check_external_paths(name, args_dict)
-                if not skip_confirm and (external or not tool_info.get('path_safety', False)):
-                    if external:
-                        self.on_system_msg(
-                            f"🚫 Command references path(s) OUTSIDE project root: {', '.join(external)}"
-                        )
-                    if not self.on_confirm(name, args_dict):
-                        results.append(ToolResult.user_denied(tc.id, name))
+                # Инструмент помечен на отложенную выгрузку (unload_tool), но ещё не убран из
+                # префикса ради KV-кэша. Модель пытается его вызвать — возвращаем явную ошибку.
+                if self.tools_manager.is_pending_unload(name):
+                    err_msg = err(
+                        f": tool '{name}' was unloaded. "
+                        f"If you still wanna use it then load_tool('{name}') first."
+                    )
+                    self.on_system_msg(f"[TOOL UNLOADED] Model tried to call unloaded tool '{name}'.")
+                    results.append(ToolResult.error(tc.id, name, err_msg))
+                    continue
+
+                if self.loop_detector.check_duplicate_in_turn(name, args_str, history_before_current_turn):
+                    warning_msg = (
+                        f"{ENVIRONMENT_PREFIX} System rejected duplicate call of tool '{name}'. "
+                        f"This tool was just called with the exact same parameters in the previous step. "
+                        f"Do NOT call it again in the current moment even if user asked to. Try a different approach, use other parameters, "
+                        f"or complete your response with the final answer."
+                        f"{ENVIRONMENT_PREFIX_END}"
+                    )
+                    self.on_system_msg(f"[LOOP PREVENTED] Blocked repeated call to '{name}' during execution.")
+                    results.append(ToolResult.error(tc.id, name, warning_msg))
+                    continue
+
+                tool_info = self._all_tools.get(name)
+                if not tool_info:
+                    results.append(ToolResult.error(tc.id, name, f"Unknown tool '{name}'. It must be loaded first or probably misspelled."))
+                    continue
+
+                args_dict = parse_tool_args(args_str)
+
+                # Принудительный порядок декомпозиции: неверный вызов have_done
+                # → ошибка → существующий механизм перегенерации ответа модели.
+                if name == DONE_TOOL:
+                    order_err = validate_task_mark_call(
+                        history_before_current_turn, args_dict, self.task_plan_map, self._compacted_task_ids
+                    )
+                    if order_err:
+                        self.on_system_msg(f"[TASK ORDER] Rejected out-of-order have_done call: {order_err}")
+                        results.append(ToolResult.error(tc.id, name, f"{ENVIRONMENT_PREFIX} {order_err}{ENVIRONMENT_PREFIX_END}"))
                         continue
 
-            try:
-                handler = tool_info['handler']
-                if tool_info.get('has_agent_param') or tool_info.get('is_instance_method'):
-                    full_result = handler(self, **args_dict)
-                else:
-                    full_result = handler(**args_dict)
-                content = str(full_result) if full_result is not None else "Tool executed successfully"
-                if is_error_content(content):
-                    tr = ToolResult(tc.id, name, content, is_error=True)
-                else:
-                    tr = ToolResult.success(tc.id, name, content)
-                    self._tool_usage[name] = self._tool_usage.get(name, 0) + 1
-                    if name == 'read' and self._read_registrations:
-                        self.file_states.mark_tool_call(self._read_registrations.pop(0), tr.tool_call_id)
-                    # Результат чтения (скелет большого файла, диапазон строк или
-                    # полный маленький файл) не пересжимаем в рабочую память:
-                    # либо он уже компактный (скелет), либо это сырые строки файла,
-                    # которые должны остаться в контексте как есть. Помечаем
-                    # метаданными объекта (ToolResult.skip_summarize) — никаких
-                    # текстовых маркеров в контенте не используем.
-                    if name == 'read':
-                        tr.skip_summarize = True
+                if tool_info.get('requires_confirmation', False) or tool_info.get('path_safety', False):
+                    skip_confirm = bool(
+                        tool_info.get('safe_in_trusted')
+                        and "path" in args_dict
+                        and self.is_path_trusted(args_dict["path"])
+                    )
+                    external = self._check_external_paths(name, args_dict)
+                    if not skip_confirm and (external or not tool_info.get('path_safety', False)):
+                        if external:
+                            self.on_system_msg(
+                                f"🚫 Command references path(s) OUTSIDE project root: {', '.join(external)}"
+                            )
+                        if not self.on_confirm(name, args_dict):
+                            results.append(ToolResult.user_denied(tc.id, name))
+                            continue
 
-                if not getattr(tr, 'skip_summarize', False):
-                    auto_compress_tool_result(self, tr)
-                results.append(tr)
-            except Exception as e:
-                self.on_system_msg(f"⚠️ [ERROR] Tool '{name}' FAILED: {e}")
-                results.append(ToolResult.error(tc.id, name, str(e)))
+                try:
+                    handler = tool_info['handler']
+                    if tool_info.get('has_agent_param') or tool_info.get('is_instance_method'):
+                        full_result = handler(self, **args_dict)
+                    else:
+                        full_result = handler(**args_dict)
+                    content = str(full_result) if full_result is not None else "Tool executed successfully"
+                    if is_error_content(content):
+                        tr = ToolResult(tc.id, name, content, is_error=True)
+                    else:
+                        # Жёсткий лимит вывода любого инструмента — держим контекст в рамках.
+                        # `read` и `search` уже сами режут вывод до этой же константы (с
+                        # подсказками по продолжению), поэтому их не трогаем, чтобы не срезать хвост.
+                        if name not in ('read', 'search') and len(content) > Config.MAX_READ_CHARS_PER_CALL:
+                            content = (
+                                content[:Config.MAX_READ_CHARS_PER_CALL]
+                                + f"\n{ENVIRONMENT_PREFIX} Output truncated to {Config.MAX_READ_CHARS_PER_CALL} "
+                                f"chars per tool call — narrow your request/parameters.{ENVIRONMENT_PREFIX_END}"
+                            )
+                        tr = ToolResult.success(tc.id, name, content)
+                        self._tool_usage[name] = self._tool_usage.get(name, 0) + 1
+                        if name == 'read' and self._read_registrations:
+                            self.file_states.mark_tool_call(self._read_registrations.pop(0), tr.tool_call_id)
+                        # Чтение не пересжимаем в память: скелет уже компактный, диапазон/маленький
+                        # файл — сырые строки, которые должны остаться в контексте как есть.
+                        if name == 'read':
+                            tr.skip_summarize = True
+
+                    if not getattr(tr, 'skip_summarize', False):
+                        auto_compress_tool_result(self, tr)
+                    results.append(tr)
+                except GenerationInterrupted:
+                    raise
+                except Exception as e:
+                    self.on_system_msg(f"⚠️ [ERROR] Tool '{name}' FAILED: {e}")
+                    results.append(ToolResult.error(tc.id, name, str(e)))
+
+        finally:
+            clear_interrupt_event()
 
         return results
 

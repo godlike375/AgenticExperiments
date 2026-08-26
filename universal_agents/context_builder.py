@@ -26,13 +26,13 @@ def _format_closing_header() -> str:
     return " }\n\n"
 
 
-def prepare_messages_for_api(agent: LLMAgent) -> list[dict]:
-    """Готовит историю диалога для отправки в API."""
-    agent.history.normalize()
+def prepare_messages_for_api(agent: LLMAgent, normalize: bool = True) -> list[dict]:
+    """Готовит историю для отправки в API. ``normalize=False`` (служебные вызовы) не сбрасывает кэш заголовков user-сообщений, чтобы переиспользовался KV-кэш."""
+    if normalize:
+        agent.history.normalize()
     api_messages: list[dict] = []
 
-    # «Последним user-сообщением» для токен-заголовка считаем живое сообщение
-    # пользователя, а не служебные блоки памяти (STATE/EPISODES).
+    # «Последним user-сообщением» для токен-заголовка считаем живое, а не служебные блоки памяти.
     last_user_idx = None
     last_user_msg = None
     for i in range(len(agent.history) - 1, -1, -1):

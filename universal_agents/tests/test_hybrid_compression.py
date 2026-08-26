@@ -2,6 +2,7 @@ import unittest
 from unittest import mock
 from types import SimpleNamespace
 
+from universal_agents.constants import SUMMARY_MARKER
 from universal_agents.history import ChatHistory
 from universal_agents.llm_client import TokenUsageTracker
 from universal_agents.agent_mixins.memory_mixin import MemoryMixin
@@ -203,7 +204,7 @@ class TestSecondCompaction(unittest.TestCase):
         )
         self.assertIn("go on", full_text)
         # инструкция не дублирует обёртку старого саммари
-        self.assertNotIn("Your past dialog summary with user:", instruction)
+        self.assertNotIn(f"{SUMMARY_MARKER}:", instruction)
 
     def test_old_summary_archived_before_rewrite(self):
         archive_len_before = len(self.agent.archive)
