@@ -140,5 +140,37 @@ class TestToolManagerTrust(unittest.TestCase):
             self.assertIn("was not trusted", tm.untrust_dir(sub))
 
 
+@tool(description="alpha tool", short_description="does alpha")
+def alpha_short(x: int) -> str:
+    return str(x)
+
+
+@tool(description="beta tool", short_description="does beta")
+def beta_short(y: str = "b") -> str:
+    return y
+
+
+class TestToolManagerListLoaded(unittest.TestCase):
+    def test_list_loaded_includes_short_description(self):
+        tm = ToolManager(
+            None, external_plugins={"alpha_short": alpha_short, "beta_short": beta_short}
+        )
+        text = tm.list_loaded()
+        self.assertIn("LOADED TOOLS:", text)
+        self.assertIn('"alpha_short" (does alpha);', text)
+        self.assertIn('"beta_short" (does beta);', text)
+
+    def test_list_loaded_empty(self):
+        tm = ToolManager()
+        self.assertEqual(tm.list_loaded(), "LOADED TOOLS:\n")
+
+    def test_list_loaded_omits_desc_when_missing(self):
+        # alpha/beta из верхнего блока не имеют short_description
+        tm = ToolManager(None, external_plugins={"alpha": alpha, "beta": beta})
+        text = tm.list_loaded()
+        self.assertIn("alpha", text)
+        self.assertNotIn("(alpha", text)
+
+
 if __name__ == "__main__":
     unittest.main()

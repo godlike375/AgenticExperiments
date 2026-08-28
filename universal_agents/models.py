@@ -21,6 +21,7 @@ class Message(ABC):
     def to_persist_dict(self) -> dict[str, Any]:
         """Словарь для сохранения в историю (JSON). По умолчанию = API-представлению; подклассы добавляют служебные метаданные, которые не уходят в LLM, но переживают /save+/load."""
         d = self.to_api_dict()
+        d["_ts"] = self.timestamp.isoformat()
         if self.seq is not None:
             d["_seq"] = self.seq
         return d
@@ -44,6 +45,8 @@ class UserMessage(Message):
     def to_persist_dict(self) -> dict[str, Any]:
         d = self.to_api_dict()
         d["_is_summary"] = self.is_summary
+        d["_ts"] = self.timestamp.isoformat()
+        d["_header"] = self._cached_header
         return d
 
 @dataclass
@@ -104,6 +107,7 @@ class ToolResult(Message):
     def to_persist_dict(self) -> dict[str, Any]:
         d = self.to_api_dict()
         # Служебные метаданные через underscore-префикс — не конфликтуют с API и не уходят в запрос к модели.
+        d["_ts"] = self.timestamp.isoformat()
         d.update({
             "_is_error": self.is_error,
             "_is_user_denied": self.is_user_denied,

@@ -1,4 +1,5 @@
 import json
+from datetime import datetime
 from typing import Optional, Any, Iterable
 from universal_agents.constants import ENVIRONMENT_PREFIX, ENVIRONMENT_PREFIX_END, err, ok, SUMMARY_MARKER
 from universal_agents.config import Config
@@ -272,15 +273,17 @@ class ChatHistory:
             raise ValueError(f"⚠️ {ENVIRONMENT_PREFIX} Invalid history format")
 
         self._messages = []
-        for d in data_list:
+        for i, d in enumerate(data_list):
             role = d.get("role")
             if role == "system":
                 self._messages.append(SystemMessage(d["content"]))
             elif role == "user":
-                self._messages.append(UserMessage(
+                um = UserMessage(
                     d["content"],
                     is_summary=d.get("_is_summary", False),
-                ))
+                )
+                um._cached_header = data_list[i].get("_header")
+                self._messages.append(um)
             elif role == "assistant":
                 tcs = []
                 for tc in d.get("tool_calls", []):
@@ -291,7 +294,8 @@ class ChatHistory:
                     ))
                 self._messages.append(AssistantMessage(
                     content=d.get("content", ""),
-                    tool_calls=tcs
+                    tool_calls=tcs,
+                    reasoning_content=d.get("reasoning_content", ""),
                 ))
             elif role == "tool":
                 self._messages.append(ToolResult(
@@ -312,6 +316,12 @@ class ChatHistory:
             saved_seq = data_list[i].get("_seq")
             if isinstance(saved_seq, int) and saved_seq > 0:
                 m.seq = saved_seq
+            saved_ts = data_list[i].get("_ts")
+            if isinstance(saved_ts, str):
+                try:
+                    m.timestamp = datetime.fromisoformat(saved_ts)
+                except ValueError:
+                    pass
 
         max_seq = max((m.seq for m in self._messages if m.seq), default=0)
         self._next_seq = max(max_seq + 1, int(raw.get("next_seq", 1) or 1)) if isinstance(raw, dict) else max_seq + 1

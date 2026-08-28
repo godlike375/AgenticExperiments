@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import threading
+
 from universal_agents.config import Config
 from universal_agents.generation import GenerationParams
 from universal_agents.llm_client import LLMClient, StreamAccumulator
 from universal_agents.tool_parsing import build_tool_calls
+from universal_agents.exceptions import GenerationInterrupted
 
 
 class StreamingMixin:
@@ -45,52 +48,79 @@ class StreamingMixin:
                 params=params,
             )
 
-            acc = StreamAccumulator(
-                prefill=prefill,
-                on_stream_chunk=self.on_stream_chunk,
-                on_reasoning_start=self.on_reasoning_start,
-                on_reasoning_chunk=self.on_reasoning_chunk,
-            )
+            # Watchdog: закрывает соединение при остановке пользователя, в т.ч. во время
+            # префилла (до первого чанка), когда stop_check в цикле ниже ещё не сработал.
+            LLMClient._active_stream = stream
+            _watch_done = threading.Event()
+            if stop_check is not None:
+                def _watcher():
+                    while not _watch_done.is_set():
+                        if stop_check():
+                            LLMClient.cancel_active()
+                            break
+                        _watch_done.wait(0.05)
+                threading.Thread(target=_watcher, daemon=True).start()
 
-            first_chunk = next(stream)
-            if isinstance(first_chunk, dict) and "error" in first_chunk:
-                return None, first_chunk["error"], None
-
-            if self.on_stream_start:
-                self.on_stream_start()
-
-            acc.process(first_chunk)
-            diverged = self._watch_diverged(watch_prefix, prefill, acc.content)
-
-            if not diverged:
-                for chunk in stream:
-                    if acc.process(chunk) and self._watch_diverged(watch_prefix, prefill, acc.content):
-                        diverged = True
-                        break
-                    if stop_check and stop_check():
-                        break
-
-            if self.on_stream_end:
-                self.on_stream_end()
-            if acc.reasoning_started and self.on_reasoning_end:
-                self.on_reasoning_end()
-
-            if diverged:
-                return self._continue_stream_after_divergence(
-                    messages, tools, prefill, acc, watch_continue_temp
+            try:
+                acc = StreamAccumulator(
+                    prefill=prefill,
+                    on_stream_chunk=self.on_stream_chunk,
+                    on_reasoning_start=self.on_reasoning_start,
+                    on_reasoning_chunk=self.on_reasoning_chunk,
                 )
 
-            message_obj = self._assemble_assistant_message(
-                acc.content,
-                build_tool_calls(acc.tool_calls_data),
-                acc.reasoning,
-                prefill=prefill,
-                streamed=True,
-            )
+                first_chunk = next(stream)
+                if isinstance(first_chunk, dict) and "error" in first_chunk:
+                    return None, first_chunk["error"], None
 
-            return message_obj, None, acc.usage
+                if self.on_stream_start:
+                    self.on_stream_start()
+
+                acc.process(first_chunk)
+                diverged = self._watch_diverged(watch_prefix, prefill, acc.content)
+
+                if not diverged:
+                    for chunk in stream:
+                        if acc.process(chunk) and self._watch_diverged(watch_prefix, prefill, acc.content):
+                            diverged = True
+                            break
+                        if stop_check and stop_check():
+                            break
+
+                if self.on_stream_end:
+                    self.on_stream_end()
+                if acc.reasoning_started and self.on_reasoning_end:
+                    self.on_reasoning_end()
+
+                if diverged:
+                    return self._continue_stream_after_divergence(
+                        messages, tools, prefill, acc, watch_continue_temp
+                    )
+
+                message_obj = self._assemble_assistant_message(
+                    acc.content,
+                    build_tool_calls(acc.tool_calls_data),
+                    acc.reasoning,
+                    prefill=prefill,
+                    streamed=True,
+                )
+
+                return message_obj, None, acc.usage
+
+            except Exception as e:
+                if isinstance(e, GenerationInterrupted):
+                    raise
+                if stop_check and stop_check():
+                    raise GenerationInterrupted()
+                return None, str(e), None
+            finally:
+                _watch_done.set()
+                if LLMClient._active_stream is stream:
+                    LLMClient._active_stream = None
 
         except Exception as e:
+            if isinstance(e, GenerationInterrupted):
+                raise
             return None, str(e), None
 
     def _continue_stream_after_divergence(

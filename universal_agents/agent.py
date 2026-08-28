@@ -570,7 +570,9 @@ class LLMAgent(
                 self._autosave()
                 return ""
             step_prefill = current_prefill if i == 0 else None
-            all_messages = prepare_messages_for_api(self)
+            all_messages = prepare_messages_for_api(
+                self, debug_hash_check=Config.DEBUG_PREFIX_HASH_CHECK
+            )
 
             if i == 0 or self._last_response_id is None:
                 messages_to_send = all_messages
@@ -579,12 +581,18 @@ class LLMAgent(
                 messages_to_send = all_messages[self._last_sent_msg_count:]
                 prev_response_id = self._last_response_id
 
-            message_obj, api_error_occurred = self.call_with_retries(
-                messages_to_send,
-                step_prefill=step_prefill,
-                prev_response_id=prev_response_id,
-                all_messages_len=len(all_messages),
-            )
+            try:
+                message_obj, api_error_occurred = self.call_with_retries(
+                    messages_to_send,
+                    step_prefill=step_prefill,
+                    prev_response_id=prev_response_id,
+                    all_messages_len=len(all_messages),
+                )
+            except GenerationInterrupted:
+                self.on_system_msg("⏹ Generation stopped by user — control returned to you.")
+                self.clear_stop()
+                self._autosave()
+                return ""
 
             if api_error_occurred or not message_obj:
                 self._recover('api_error')

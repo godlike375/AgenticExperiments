@@ -15,11 +15,11 @@ class Config:
     SUMMARY_DUPLICATE_TEMP = round(BOOST_TEMP / 2, 2)  # буст при тождественном повторе саммари (мягче полного BOOST_TEMP)
 
     # Параметры генерации
-    TEMP = 0.28
+    TEMP = 0.3
     TOP_P = 0.94
     MAX_CONTEXT_TOKENS = 50000
-    FREQUENCY_PENALTY = 0.01
-    PRESENCE_PENALTY = 0.01
+    FREQUENCY_PENALTY = 0.0
+    PRESENCE_PENALTY = 0.0
     MAX_OUTPUT_TOKENS = min(32000, int(MAX_CONTEXT_TOKENS / 1.5))
     TIMEOUT = 1800
     MAX_ITER = 150
@@ -31,8 +31,12 @@ class Config:
 
     USE_RESPONSES_API = False
 
+    # Отладка KV-кэша: хэшировать каждое сообщение префикса и сравнивать с
+    # предыдущей итерацией подготовки. Об изменении предупредить
+    DEBUG_PREFIX_HASH_CHECK = True
+
     # Автоматическая суммаризация диалога
-    AUTO_SUMMARY_THRESHOLD = 80  # процент контекста
+    AUTO_SUMMARY_THRESHOLD = 85  # процент контекста
     AUTO_SUMMARY_PRESERVE_LAST = 1  # сколько последних сообщений не трогать
     AUTO_SUMMARY_REVIEW_PASS = True  # отревьювить черновик саммари: подчистить устаревшее + добавить пропущенное
     # Попыток перегенерации саммари при неудаче; между ними температура чуть растёт, чтобы не повторять ту же ошибку.
@@ -67,19 +71,19 @@ class Config:
 
     # Периферийное зрение read: шаг между строками растёт в ^PERIPHERAL_GAP_GROWTH
     # на каждом кольце от фокуса (меньше → плотнее).
-    PERIPHERAL_GAP_GROWTH = 1.35
+    PERIPHERAL_GAP_GROWTH = 1.5
     # Периферийные строки обрезаются до N символов (фокус — без лимита). 0 = не резать.
     PERIPHERAL_MAX_LINE_CHARS = 50
     # Периферия в каждую сторону ≤ PERIPHERAL_SIDE_FACTOR × размер фокуса строк.
     # 0 = без ограничения (до краёв файла).
-    PERIPHERAL_SIDE_FACTOR = 3.0
+    PERIPHERAL_SIDE_FACTOR = 1.5
     # Вокруг каждой выбранной периферийной строки захватывается ещё ±N соседних
     # строк как локальный контекст (0 = выключено).
     PERIPHERAL_LINE_CONTEXT = 1
 
     # Лимит вывода любого инструмента (символов); read/search режут сами.
     # MAX_READ_LINES_PER_CALL — доп. лимит строк порционного чтения.
-    MAX_READ_CHARS_PER_CALL = 4000
+    MAX_READ_CHARS_PER_CALL = 5000
     MAX_READ_LINES_PER_CALL = 100
 
     # Отключает авто-суммаризацию большого вывода любых инструментов.

@@ -178,19 +178,28 @@ class ToolManager:
 
         return flushed
 
+    def list_loaded(self) -> str:
+        """Список уже активных (загруженных) инструментов с кратким описанием."""
+        lines = []
+        for name in sorted(self._tools_map):
+            func = self._tools_map[name].get("handler")
+            desc = getattr(func, '_short_description', '') if func else ''
+            lines.append(f'"{name}" ({desc});' if desc else name)
+        return "\n".join(lines)
+
     def list_available(self) -> str:
         """Список загружаемых (неактивных) инструментов из директории плагинов."""
         external_tools = load_external_plugins(_tools_directory())
         enabled = set(self._tools_map.keys())
         available = set(external_tools.keys()) - enabled - MANAGED_TOOLS
-        lines = ["LOADABLE TOOLS:\n"]
+        lines = []
         for name in sorted(available):
             if not self.is_tool_allowed(name):
                 continue
             func = external_tools[name]
             desc = getattr(func, '_short_description', '')
             lines.append(f'"{name}" ({desc});' if desc else name)
-        lines.append(f'\nTo load a concrete tool use "load_tool" + "name" arg')
+        #lines.append(f'\nTo load concrete tool use "load_tool" + "name" arg\n')
         return "\n".join(lines)
 
     # --------------------------------------------------------

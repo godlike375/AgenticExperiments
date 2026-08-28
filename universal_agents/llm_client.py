@@ -1,3 +1,4 @@
+import threading
 from typing import Optional, Callable
 from types import SimpleNamespace
 from openai import OpenAI
@@ -199,12 +200,32 @@ class StreamAccumulator:
 
 class LLMClient:
     _client = None
+    _active_stream = None
 
     @classmethod
     def get_client(cls) -> OpenAI:
         if cls._client is None:
             cls._client = OpenAI(api_key="lm-studio", base_url=Config.API_URL)
         return cls._client
+
+    @classmethod
+    def cancel_active(cls) -> None:
+        """Принудительно прерывает активный запрос: закрывает соединение стрима.
+        Вызывается из watchdog-потока при запросе остановки пользователем (фаза
+        префилла, когда чанков ещё нет и обычный stop_check не срабатывает)."""
+        s = cls._active_stream
+        cls._active_stream = None
+        if s is None:
+            return
+        try:
+            if hasattr(s, "close"):
+                s.close()
+            elif hasattr(s, "_response") and hasattr(s._response, "close"):
+                s._response.close()
+            elif hasattr(s, "response") and hasattr(s.response, "close"):
+                s.response.close()
+        except Exception:
+            pass
 
     @staticmethod
     def call(
@@ -381,6 +402,22 @@ class LLMClient:
         start_cb = cb.get("on_stream_start")
         end_cb = cb.get("on_stream_end")
         reasoning_end_cb = cb.get("on_reasoning_end")
+
+        # Watchdog: закрывает соединение при остановке пользователя, в т.ч. во время
+        # префилла (до появления первого чанка), когда stop_check в цикле ещё не сработал.
+        LLMClient._active_stream = raw
+        _watch_done = threading.Event()
+        _watch = None
+        if stop_check is not None:
+            def _watcher():
+                while not _watch_done.is_set():
+                    if stop_check():
+                        LLMClient.cancel_active()
+                        break
+                    _watch_done.wait(0.05)
+            _watch = threading.Thread(target=_watcher, daemon=True)
+            _watch.start()
+
         try:
             if start_cb:
                 start_cb()
@@ -393,6 +430,7 @@ class LLMClient:
             for chunk in raw:
                 acc.process(chunk)
                 if stop_check and stop_check():
+                    LLMClient.cancel_active()
                     break
         except Exception as e:
             if end_cb:
@@ -400,6 +438,10 @@ class LLMClient:
             if acc.reasoning_started and reasoning_end_cb:
                 reasoning_end_cb()
             return None, str(e), None
+        finally:
+            _watch_done.set()
+            if LLMClient._active_stream is raw:
+                LLMClient._active_stream = None
         if end_cb:
             end_cb()
         if acc.reasoning_started and reasoning_end_cb:
