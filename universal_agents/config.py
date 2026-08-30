@@ -15,7 +15,7 @@ class Config:
     SUMMARY_DUPLICATE_TEMP = round(BOOST_TEMP / 2, 2)  # буст при тождественном повторе саммари (мягче полного BOOST_TEMP)
 
     # Параметры генерации
-    TEMP = 0.3
+    TEMP = 0.35
     TOP_P = 0.94
     MAX_CONTEXT_TOKENS = 50000
     FREQUENCY_PENALTY = 0.0
@@ -106,7 +106,7 @@ class Config:
     # ------------------------------------------------------------------
     AUTOSAVE_ENABLED = True
     AUTOSAVE_DIR = "autosave"
-    AUTOSAVE_KEEP = 50
+    AUTOSAVE_KEEP = 25
 
     # ------------------------------------------------------------------
     # Память: session summary + архив (см. compressors.py, archive.py, MemoryMixin._auto_summarize_dialogue).

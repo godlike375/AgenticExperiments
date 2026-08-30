@@ -322,8 +322,9 @@ def _compact_one_group(agent: LLMAgent) -> Optional[str]:
 def summarize_task_segment(agent: LLMAgent, segment_msgs: list, task_id: str, task_title: str) -> Optional[str]:
     """Суммаризация сегмента истории через LLM: черновик + review."""
     from universal_agents.compressors import _review_task_summary, _draft_task_summary
+    from universal_agents.context_builder import prepare_messages_for_api
 
-    history_msgs = [m.to_api_dict() for m in segment_msgs]
+    history_msgs = prepare_messages_for_api(agent, normalize=False)
     draft = _draft_task_summary(agent, history_msgs, task_id, task_title)
     if not draft:
         return None
