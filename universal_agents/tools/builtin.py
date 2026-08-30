@@ -178,9 +178,10 @@ def have_done(agent: LLMAgent, id: str) -> str:
 
 
 @tool(
-    description="Plan in advance using make_plan to create a list of tasks/steps in execution order. "
-                "Each entry is {\"id\", \"title\"}. Call this FIRST for any multi-step task, and call it again "
-                "You can change the plan by creating a new one if something changed your mind.",
+    description="Plan in advance using make_plan to create a list of steps in taking order. "
+                "Each entry is {\"id\", \"title\"}. If you detect that user's task is complex and requires multiple "
+                "steps then call this tool and do your best to decompose the task into as independent and parallel "
+                "steps as possible. You can always change the plan by creating a new one if needed.",
     short_description="make a plan",
     plan=("list", "List of {id, title} dicts, in execution order"),
 )

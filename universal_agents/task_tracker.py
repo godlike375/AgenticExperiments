@@ -354,13 +354,3 @@ def restore_plan_state(agent: "LLMAgent", data: dict | None) -> None:
     agent.task_plan_map = dict(data.get("task_plan_map") or {})
     agent._compacted_task_ids = set(data.get("compacted_task_ids") or [])
 
-
-# ---------------------------------------------------------------------------
-# Инструкции модели (встраиваются в системный промпт, см. main.py)
-# ---------------------------------------------------------------------------
-
-TASK_MARK_INSTRUCTIONS = (
-    "\n"
-    "* TASK DECOMPOSITION (только для длинных многошаговых задач):\n"
-    "  - Сложную многошаговую просьбу разбивай на шаги/подзадачи через make_plan."
-)

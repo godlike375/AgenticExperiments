@@ -9,7 +9,6 @@ from universal_agents.ui import ConsoleUI, CLI
 from universal_agents.constants import ENVIRONMENT_PREFIX, ENVIRONMENT_PREFIX_END
 from universal_agents.project_root import find_project_root, set_project_root
 from universal_agents.config import Config
-from universal_agents.task_tracker import TASK_MARK_INSTRUCTIONS
 
 LOADABLE_TOOLS = [
     'run_bash_host'
@@ -61,7 +60,7 @@ if __name__ == "__main__":
     print("Use load_tool to load additional tools dynamically.")
 
     project_root = find_project_root() or '(not found - no .git upwards)'
-    root_line = f"Current project root: {project_root}, current working dir: {os.getcwd()}"
+    root_line = f"Current project root: {project_root}, working dir: {os.getcwd()}"
 
     # Предзагруженные инструменты всегда разрешены к использованию, даже если их
     # нет в LOADABLE_TOOLS (который задаёт ДОПОЛНИТЕЛЬНО доступные для загрузки).
@@ -77,15 +76,15 @@ if __name__ == "__main__":
 
     sys_prompt = (
         f"{ENVIRONMENT_PREFIX} * You are tool-calling LLM-assistant.\n"
-        "* You are launched in a custom environment to be able use tools.\n"
+        "* You are launched in a custom environment to use tools.\n"
         f"* {root_line}\n"
         f"* '{ENVIRONMENT_PREFIX}' prefix means system says something.\n"
-        f"* Already loaded tools you can use:\n{loaded_tools_text}\n"
-        f"* Loadable tools (load with 'load_tool' + 'name' arg):\n{available_tools_text}\n"
-        "* Do NOT repeat identical tool calls with same arguments twice. You can call only 1 tool at 1 turn (message). "
-        "So you must wait for tool results before making any next call. "
-        "Говори только на русском."
-        f"{TASK_MARK_INSTRUCTIONS}"
+        f"* Already loaded tools to use:\n{loaded_tools_text}\n"
+        f"* Loadable tools (load - 'load_tool' + 'name' arg):\n{available_tools_text}\n"
+        "* Do NOT repeat identical tool calls with same args. You can call only 1 tool at 1 turn/message. "
+        "You must wait for tool results before making next calls.\n"
+        "You must explain aloud what you're gonna do before calling tools. Every tool call must be explained verbally!\n"
+        "Говори только по-русски.\n"
         f"{ENVIRONMENT_PREFIX_END}"
     )
 

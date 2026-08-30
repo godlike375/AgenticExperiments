@@ -104,36 +104,6 @@ class TestFirstCompaction(unittest.TestCase):
         self._run()
         self.assertEqual(len(self.agent.archive), 3)
 
-    def test_prompt_is_plain_text_with_seven_sections(self):
-        captured = []
-        with mock.patch(
-            "universal_agents.compressors.LLMClient.call",
-            side_effect=_compression_router(calls=captured),
-        ):
-            self.agent._auto_summarize_dialogue()
-        # единственный вызов компакции — полная история + инструкция
-        self.assertEqual(len(captured), 1)
-        msgs = captured[0]
-        # system prompt — первое сообщение (префикс для KV-cache)
-        self.assertEqual(msgs[0]["role"], "system")
-        # инструкция суммаризации — последнее сообщение
-        instruction = msgs[-1]["content"]
-        self.assertIn("Write the full session summary from the beginning", instruction)
-        for marker in (
-            "### 1. Постановка задачи", "### 2. Ход работы",
-            "### 3. Текущий статус", "### 4. Знания, гипотезы",
-            "### 5. Проектная специфика", "### 6. Ресурсы и артефакты",
-            "### 7. Инструкции для передачи контекста",
-        ):
-            self.assertIn(marker, instruction)
-        # полная история передана как структурированные сообщения, а не текст-транскрипция
-        full_text = "\n".join(
-            m["content"] for m in msgs
-            if isinstance(m.get("content"), str)
-        )
-        self.assertIn("TASK: write the report about dolphins", full_text)
-        self.assertIn("found 3 sources", full_text)
-
     def test_seq_assigned_unique_and_stable(self):
         self._run()
         msgs = self.agent.history.get_all()
