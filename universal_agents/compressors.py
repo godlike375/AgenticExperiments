@@ -47,6 +47,16 @@ NEW_TO_PREVIOUS = """
 *   7.3 Новое относительно предыдущего саммари (обязательно).
 """
 
+import re as _re
+
+_REQUIRED_SECTION_IDS = tuple(sorted(
+    set(_re.findall(r'\d+\.\d+', SECTION_GUIDE)),
+    key=lambda s: tuple(map(int, s.split('.')))
+))
+_REQUIRED_SECTION_IDS_WITH_73 = _REQUIRED_SECTION_IDS + (
+    tuple(s for s in _re.findall(r'\d+\.\d+', NEW_TO_PREVIOUS) if s not in _REQUIRED_SECTION_IDS)
+)
+
 
 # ============================================================
 # Автокомпрессия длинных результатов инструментов
@@ -398,7 +408,8 @@ def summarize_history_plain(
     """Сборка session summary в режиме single-shot: подаётся полная история (префикс совпадает для KV-cache), инструкция — последним сообщением. Перезаписывает заметки с нуля. ``include_new_to_previous`` добавляет раздел 7.3 (новые находки относительно предыдущего саммари) — имеет смысл только при повторной компакции, на первой предыдущего саммари нет. Возвращает текст или None."""
     new_section = NEW_TO_PREVIOUS if include_new_to_previous else ""
     prompt = (
-        f"{ENVIRONMENT_PREFIX} Fill these sections of the very detailed session summary:\n```"
+        f"{ENVIRONMENT_PREFIX} Fill these sections of the very detailed session summary because "
+        f"you're out of memory and can't continue working without summarizing:\n```"
         f"{SECTION_GUIDE}{new_section}\n```\n"
         f"Answer only in the strict format. Do your best to avoid repeating already said things between sections.\n"
         f"If it's not the first summary then do your best to bring fresh things into this new detailed summary.\n"

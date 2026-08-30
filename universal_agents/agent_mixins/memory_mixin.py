@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from universal_agents.config import Config, CHARS_PER_TOKEN, MIN_TOKENS_TO_SUMMARIZE
 from universal_agents.constants import (
     SUMMARY_PREFIX_USER,
@@ -11,6 +13,8 @@ from universal_agents.constants import (
 from universal_agents.compressors import (
     _dense_summarize_message,
     summarize_history_plain,
+    _REQUIRED_SECTION_IDS,
+    _REQUIRED_SECTION_IDS_WITH_73,
 )
 from universal_agents.models import UserMessage, AssistantMessage, ToolResult
 from universal_agents.task_tracker import compact_completed_tasks
@@ -24,6 +28,15 @@ def _raw_summary(content: str) -> str:
         s = s.split(marker, 1)[1]
     s = s.replace(ENVIRONMENT_PREFIX, "").replace(ENVIRONMENT_PREFIX_END, "")
     return s.strip()
+
+
+
+def _validate_summary_sections(text: str, include_73: bool = False) -> str | None:
+    """Проверяет, что саммари содержит все обязательные разделы (1.1-7.2, опционально 7.3).
+    Возвращает строку с перечнем отсутствующих разделов или None, если всё на месте."""
+    required = _REQUIRED_SECTION_IDS_WITH_73 if include_73 else _REQUIRED_SECTION_IDS
+    missing = [sec for sec in required if not re.search(r'\b' + re.escape(sec) + r'\b', text)]
+    return ", ".join(missing) if missing else None
 
 
 class MemoryMixin:
@@ -161,6 +174,7 @@ class MemoryMixin:
         prev_summary = self.history.get_session_summary()
 
         summary_text = None
+        include_73 = prev_summary is not None
         for attempt in range(1, Config.AUTO_SUMMARY_MAX_RETRIES + 1):
             # Лёгкий рост температуры между попытками, чтобы не повторять ту же ошибку.
             if prev_summary is not None and summary_text is not None and _raw_summary(summary_text) == _raw_summary(prev_summary):
@@ -170,7 +184,7 @@ class MemoryMixin:
             extra = FORBID_TOOLS_MSG if attempt > 1 else None
             summary_text = summarize_history_plain(
                 self, history_msgs, temp=temp, extra_instruction=extra,
-                include_new_to_previous=prev_summary is not None,
+                include_new_to_previous=include_73,
             )
             if summary_text:
                 # Повтор саммари: модель проигнорировала новый контент и вернула старую —
@@ -180,6 +194,15 @@ class MemoryMixin:
                         f"[AUTO-SUMMARY] New summary is identical to the existing one "
                         f"(attempt {attempt}/{Config.AUTO_SUMMARY_MAX_RETRIES}); "
                         f"regenerating with temperature boost ({Config.SUMMARY_DUPLICATE_TEMP})."
+                    )
+                    continue
+                # Проверяем, что саммари содержит все обязательные разделы (1.1-7.2/7.3).
+                missing = _validate_summary_sections(summary_text, include_73=include_73)
+                if missing:
+                    self.on_system_msg(
+                        f"[AUTO-SUMMARY] Summary is missing sections: {missing} "
+                        f"(attempt {attempt}/{Config.AUTO_SUMMARY_MAX_RETRIES}); "
+                        f"retrying with temperature boost."
                     )
                     continue
                 break
