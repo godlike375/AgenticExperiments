@@ -109,6 +109,18 @@ def _is_option(token: str) -> bool:
 
 def _has_clear_path_marker(token: str) -> bool:
     """Признаки, однозначно говорящие о пути (без проверки существования)."""
+    if not token:
+        return False
+    # Слишком короткие токены — только разделители, не пути
+    if len(token) <= 1:
+        return False
+    # Токены, состоящие только из разделителей пути (\, /, \\, // и т.п.)
+    if all(c in _PATH_SEPS for c in token):
+        return False
+    # Токены, явно являющиеся кодом (содержат операторы, скобки и т.п.)
+    # $ и } исключены — они часть синтаксиса env-переменных (${VAR}, $env:VAR)
+    if any(c in token for c in "=()|;&<>!"):
+        return False
     if any(sep in token for sep in _PATH_SEPS):
         return True
     if token.startswith(("./", "../", "~/", "~\\", ":\\", ":/", "/", "\\")):
@@ -128,11 +140,20 @@ def _looks_like_path(token: str, cwd: str) -> bool:
     """Решает, является ли токен путём, минимизируя ложные срабатывания."""
     if not token or _is_option(token):
         return False
+    # Токены, явно являющиеся кодом (PowerShell-выражения и т.п.)
+    # $ и } исключены — они часть синтаксиса env-переменных
+    if any(c in token for c in "=()|;&<>!"):
+        return False
     if _has_clear_path_marker(token):
         return True
     # «Голый» относительный токен (нет разделителей/расширения): только если существует
     resolved = os.path.normpath(os.path.join(cwd, token))
-    return os.path.exists(resolved)
+    if not os.path.exists(resolved):
+        return False
+    # Не считаем путём то, что совпадает с cwd (раскрытие $root, $PWD и т.п.)
+    if os.path.normcase(resolved) == os.path.normcase(cwd):
+        return False
+    return True
 
 
 def _resolve(token: str, cwd: str) -> str | None:
@@ -145,7 +166,14 @@ def _resolve(token: str, cwd: str) -> str | None:
         return None
     expanded = os.path.expanduser(t)
     if os.path.isabs(expanded):
-        return os.path.normpath(expanded)
+        normed = os.path.normpath(expanded)
+        # Не считаем путём корень диска, одиночный разделитель или UNC-префикс
+        if normed in (os.sep, os.altsep, os.path.splitdrive(normed)[0]):
+            return None
+        # UNC-пути типа \\ — тоже не пути
+        if normed.replace("/", "\\").strip("\\") == "":
+            return None
+        return normed
     return os.path.normpath(os.path.join(cwd, expanded))
 
 

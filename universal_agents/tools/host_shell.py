@@ -10,7 +10,7 @@ import time
 from universal_agents.tool import tool
 from universal_agents.constants import err
 from universal_agents.config import Config
-from universal_agents.subprocess_utils import run_capture
+from universal_agents.subprocess_utils import run_capture, truncate_middle
 
 
 def _git_bash_candidates() -> list[str]:
@@ -93,8 +93,8 @@ def run_powershell(command: str, timeout: int = 60) -> str:
     pwsh = shutil.which("pwsh") or shutil.which("powershell")
     if not pwsh:
         return err(" PowerShell executable not found")
-    # -NoProfile: без профилей пользователя; -NonInteractive: без интерактива
-    return run_capture([pwsh, "-NoProfile", "-NonInteractive", "-Command", command], timeout)
+    output = run_capture([pwsh, "-NoProfile", "-NonInteractive", "-Command", command], timeout)
+    return truncate_middle(output)
 
 
 @tool(
@@ -112,4 +112,5 @@ def run_bash_host(command: str, timeout: int = 60) -> str:
         argv = _build_bash_command(command)
     except RuntimeError as e:
         return err(f" {e}")
-    return run_capture(argv, timeout)
+    output = run_capture(argv, timeout)
+    return truncate_middle(output)

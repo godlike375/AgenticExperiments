@@ -392,7 +392,15 @@ class LLMAgent(
         """Дефолтный детектор дубликатов (§1): повторный вызов инструмента или повтор текстового ответа; возвращает None или ('tool_call', (name, args))/('answer', prev_answer)."""
         if message_obj.tool_calls:
             current_history = self.history.get_all()
+            seen_in_batch: set[str] = set()
             for tc in message_obj.tool_calls:
+                norm = self.loop_detector.normalize_args(tc_args(tc))
+                # Дубликат внутри текущего пакета (два одинаковых вызова в одном ответе)
+                batch_key = f"{tc_name(tc)}:{norm}"
+                if batch_key in seen_in_batch:
+                    return 'tool_call', (tc_name(tc), tc_args(tc))
+                seen_in_batch.add(batch_key)
+                # Дубликат с предыдущими вызовами в текущем ходу
                 if self.loop_detector.check_duplicate_in_turn(tc_name(tc), tc_args(tc), current_history):
                     return 'tool_call', (tc_name(tc), tc_args(tc))
             return None

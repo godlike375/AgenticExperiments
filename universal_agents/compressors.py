@@ -418,7 +418,7 @@ def summarize_history_plain(
     prompt += f"{ENVIRONMENT_PREFIX_END}"
     # history_msgs содержит system prompt первым — префикс совпадает, KV-cache переиспользуется.
     msgs = list(history_msgs) + [{"role": "user", "content": prompt}]
-    msg_obj, err, usage = agent.service_llm_call(msgs, temp=temp, timeout=Config.TIMEOUT)
+    msg_obj, err, usage = agent.service_llm_call(msgs, temp=temp, timeout=Config.TIMEOUT, prefill='* 1.1 Ключевой контекст, сущности и связи:')
     if err or not msg_obj or not msg_obj.content:
         _report_service_error(agent, "dialog plain summary", err, msg_obj)
         return None

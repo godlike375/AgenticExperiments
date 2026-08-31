@@ -8,7 +8,7 @@ class Config:
     MAX_LOOP_RETRIES = 2  # попыток перегенерации при повторяющемся вызове/ответе
     # Порог Jaccard-схожести по множеству слов для признания текстового ответа повтором.
     DUPLICATE_SIMILARITY_THRESHOLD = 0.7
-    ERROR_RECOVERY_RETRIES = 1  # попыток перегенерации после ошибки инструмента
+    ERROR_RECOVERY_RETRIES = 0  # попыток перегенерации после ошибки инструмента
     BROKEN_CALL_REGEN_RETRIES = 2  # попыток перегенерации при обнаружении сломанного вызова
     BROKEN_CALL_FIX_RETRIES = 2    # попыток «починить» вызов через промпт после неудачной регенерации
     DUPLICATE_CONTINUATION_TEMP = round(BOOST_TEMP / 4, 2)  # спокойная достройка после расхождения
@@ -36,7 +36,7 @@ class Config:
     DEBUG_PREFIX_HASH_CHECK = True
 
     # Автоматическая суммаризация диалога
-    AUTO_SUMMARY_THRESHOLD = 75  # процент контекста
+    AUTO_SUMMARY_THRESHOLD = 75  # процент занятого контекста для начала авто-суммаризации
     AUTO_SUMMARY_PRESERVE_LAST = 1  # сколько последних сообщений не трогать
     AUTO_SUMMARY_REVIEW_PASS = True  # отревьювить черновик саммари: подчистить устаревшее + добавить пропущенное
     # Попыток перегенерации саммари при неудаче; между ними температура чуть растёт, чтобы не повторять ту же ошибку.
@@ -89,9 +89,6 @@ class Config:
     # Отключает авто-суммаризацию большого вывода любых инструментов.
     DISABLE_TOOL_AUTO_SUMMARIZATION = True
 
-    # per-message саммари: True — плотное саммари каждого сообщения в память,
-    # False — session summary одним вызовом. Оверрайд: disable_per_msg_summarization.
-
     # Bash на Windows (run_bash_host): "wsl" — через WSL, "gitbash" — Git Bash, "auto" — gitbash при наличии иначе WSL, "system" — shutil.which("bash").
     BASH_BACKEND = "auto"
 
@@ -112,6 +109,8 @@ class Config:
     # Память: session summary + архив (см. compressors.py, archive.py, MemoryMixin._auto_summarize_dialogue).
     # ------------------------------------------------------------------
     # Компакция: вытесняемый сегмент сворачивается ОДНИМ вызовом в session summary (UserMessage сразу после system prompt),
+    # per-message саммари: True — плотное саммари каждого сообщения в память,
+    # False — session summary одним вызовом. Оверрайд: disable_per_msg_summarization.
     PER_MSG_SUMMARIES_ENABLED = False
     # Таймаут компакции (сек): на большом сегменте длинный ответ не успевает за 120с.
     STATE_GEN_TIMEOUT = 240

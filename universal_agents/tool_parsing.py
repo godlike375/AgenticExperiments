@@ -103,11 +103,17 @@ def args_are_valid(args_str: str) -> bool:
 
 
 def normalize_args(args_str: str) -> str:
-    """Канонизирует аргументы для сравнения на дубликаты (порядок ключей и пробелы не важны)."""
-    if not args_str or args_str.strip() in ("{}", "", "null"):
+    """Канонизирует аргументы для сравнения на дубликаты (порядок ключей и пробелы не важны).
+
+    Принимает строку JSON или dict (на случай, если ToolCall.arguments — dict).
+    """
+    if not args_str or (isinstance(args_str, str) and args_str.strip() in ("{}", "", "null")):
         return ""
     try:
-        parsed = json.loads(args_str)
+        if isinstance(args_str, dict):
+            parsed = args_str
+        else:
+            parsed = json.loads(args_str)
         return json.dumps(parsed, sort_keys=True, separators=(',', ':'), ensure_ascii=False)
     except Exception:
-        return args_str.strip()
+        return str(args_str).strip()

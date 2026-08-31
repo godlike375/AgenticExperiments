@@ -328,7 +328,9 @@ class CLI:
         self._reader_thread = threading.Thread(target=self._stdin_reader, daemon=True)
         self._reader_thread.start()
         # Подтверждения инструментов тоже читают через общую очередь ввода.
-        ConsoleUI._input_fn = self._get_line
+        # Оборачиваем: _get_line не принимает аргументов, а confirm_action
+        # вызывает _input_fn(prompt) — проглатываем prompt.
+        ConsoleUI._input_fn = lambda _prompt="": self._get_line()
 
     def _stdin_reader(self):
         while True:

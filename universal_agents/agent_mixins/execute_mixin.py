@@ -22,6 +22,7 @@ class ExecuteMixin:
     def _execute_tools(self, tool_calls: list[ToolCall]) -> list[ToolResult]:
         results = []
         history_before_current_turn = self.history.get_all()[:-1]
+        seen_in_batch: set[str] = set()
 
         # На время выполнения инструментов регистрируем флаг прерывания, чтобы
         # долгий subprocess можно было принудительно убить по запросу пользователя.
@@ -51,6 +52,22 @@ class ExecuteMixin:
                     self.on_system_msg(f"[TOOL UNLOADED] Model tried to call unloaded tool '{name}'.")
                     results.append(ToolResult.error(tc.id, name, err_msg))
                     continue
+
+                # Дубликат внутри текущего пакета (два одинаковых вызова в одном ответе)
+                norm = self.loop_detector.normalize_args(args_str)
+                batch_key = f"{name}:{norm}"
+                if batch_key in seen_in_batch:
+                    warning_msg = (
+                        f"{ENVIRONMENT_PREFIX} System rejected duplicate call of tool '{name}'. "
+                        f"This tool was just called with the exact same parameters in the previous step. "
+                        f"Do NOT call it again in the current moment even if user asked to. Try a different approach, use other parameters, "
+                        f"or complete your response with the final answer."
+                        f"{ENVIRONMENT_PREFIX_END}"
+                    )
+                    self.on_system_msg(f"[LOOP PREVENTED] Blocked repeated call to '{name}' during execution.")
+                    results.append(ToolResult.error(tc.id, name, warning_msg))
+                    continue
+                seen_in_batch.add(batch_key)
 
                 if self.loop_detector.check_duplicate_in_turn(name, args_str, history_before_current_turn):
                     warning_msg = (
@@ -109,9 +126,10 @@ class ExecuteMixin:
                         tr = ToolResult(tc.id, name, content, is_error=True)
                     else:
                         # Жёсткий лимит вывода любого инструмента — держим контекст в рамках.
-                        # `read` и `search` уже сами режут вывод до этой же константы (с
-                        # подсказками по продолжению), поэтому их не трогаем, чтобы не срезать хвост.
-                        if name not in ('read', 'search') and len(content) > Config.MAX_READ_CHARS_PER_CALL:
+                        # `read`, `search`, `run_powershell`, `run_bash_host` уже сами режут вывод
+                        # (с подсказками по продолжению), поэтому их не трогаем.
+                        _self_truncating = ('read', 'search', 'run_powershell', 'run_bash_host')
+                        if name not in _self_truncating and len(content) > Config.MAX_READ_CHARS_PER_CALL:
                             content = (
                                 content[:Config.MAX_READ_CHARS_PER_CALL]
                                 + f"\n{ENVIRONMENT_PREFIX} Output truncated to {Config.MAX_READ_CHARS_PER_CALL} "
