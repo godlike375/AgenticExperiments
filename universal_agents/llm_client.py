@@ -117,6 +117,10 @@ class LoopDetector:
                             continue
                         if self.normalize_args(tc.arguments) == norm_args:
                             return True
+                # Проверяем только самый последний AssistantMessage: если между
+                # двумя одинаковыми вызовами был другой инструмент (прогресс),
+                # это не зацикливание.
+                break
         return False
 
 class StreamAccumulator:

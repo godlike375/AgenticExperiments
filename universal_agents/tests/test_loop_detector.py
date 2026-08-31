@@ -96,6 +96,27 @@ class TestLoopDetector(unittest.TestCase):
         ]
         self.assertTrue(self.detector.check_duplicate_in_turn("read", "{}", history))
 
+    def test_duplicate_after_other_tool_is_not_loop(self):
+        # Если между двумя одинаковыми вызовами был другой инструмент — это не зацикливание.
+        history = [
+            UserMessage("do the task"),
+            AssistantMessage(content="", tool_calls=[ToolCall(id="t1", name="edit_file", arguments='{"path":"x.txt"}')]),
+            ToolResult.success("t1", "edit_file", "ok"),
+            AssistantMessage(content="", tool_calls=[ToolCall(id="t2", name="read", arguments='{"path":"x.txt"}')]),
+            ToolResult.success("t2", "read", "content"),
+        ]
+        self.assertFalse(self.detector.check_duplicate_in_turn("edit_file", '{"path":"x.txt"}', history))
+
+    def test_consecutive_same_call_is_still_duplicate(self):
+        # Два одинаковых вызова подряд (без другого инструмента между ними) — дубль
+        history = [
+            UserMessage("do the task"),
+            AssistantMessage(content="", tool_calls=[ToolCall(id="t1", name="edit_file", arguments='{"path":"x.txt"}')]),
+            ToolResult.success("t1", "edit_file", "ok"),
+            AssistantMessage(content="", tool_calls=[ToolCall(id="t2", name="edit_file", arguments='{"path":"x.txt"}')]),
+        ]
+        self.assertTrue(self.detector.check_duplicate_in_turn("edit_file", '{"path":"x.txt"}', history))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,6 +1,6 @@
 class Config:
-    #API_URL = "http://192.168.50.196:1234/v1"
-    API_URL = "http://localhost:1234/v1"
+    API_URL = "http://192.168.50.196:1234/v1"
+    #API_URL = "http://localhost:1234/v1"
     MODEL_NAME = ""
     AFTER_SYSTEM_PROMPT = 1  # Index after which dialog starts (0 = system)
     BOOST_TEMP = 1.7
@@ -15,14 +15,14 @@ class Config:
     SUMMARY_DUPLICATE_TEMP = round(BOOST_TEMP / 2, 2)  # буст при тождественном повторе саммари (мягче полного BOOST_TEMP)
 
     # Параметры генерации
-    TEMP = 0.35
+    TEMP = 0.33
     TOP_P = 0.94
     MAX_CONTEXT_TOKENS = 50000
     FREQUENCY_PENALTY = 0.0
     PRESENCE_PENALTY = 0.0
     MAX_OUTPUT_TOKENS = min(32000, int(MAX_CONTEXT_TOKENS / 1.5))
     TIMEOUT = 1800
-    MAX_ITER = 150
+    MAX_ITER = 250
     SUMMARIZATION_THRESHOLD_DIVIDER = 2
 
     STREAM_ENABLED = True
@@ -71,7 +71,7 @@ class Config:
 
     # Периферийное зрение read: шаг между строками растёт в ^PERIPHERAL_GAP_GROWTH
     # на каждом кольце от фокуса (меньше → плотнее).
-    PERIPHERAL_GAP_GROWTH = 1.35
+    PERIPHERAL_GAP_GROWTH = 1.45
     # Периферийные строки обрезаются до N символов (фокус — без лимита). 0 = не резать.
     PERIPHERAL_MAX_LINE_CHARS = 50
     # Периферия в каждую сторону ≤ PERIPHERAL_SIDE_FACTOR × размер фокуса строк.
