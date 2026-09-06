@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from universal_agents.constants import ENVIRONMENT_PREFIX, ENVIRONMENT_PREFIX_END
 from universal_agents.llm_client import apply_prefill
-from universal_agents.models import AssistantMessage, ToolCall, ToolResult
+from universal_agents.models import AssistantMessage, ToolCall, ToolResult, UserMessage
 from universal_agents.tool_parsing import tc_name, tc_args, detect_broken_call, args_are_valid
 
 
@@ -99,6 +100,22 @@ class ResponseMixin:
                 assistant_msg.tool_calls = [chosen_tc]
                 if message_obj.tool_calls:
                     message_obj.tool_calls = [tc for tc in message_obj.tool_calls if tc.id == chosen_tc.id]
+
+        if assistant_msg.has_tool_calls() and not clean_content:
+            tool_names = [tc.name for tc in assistant_msg.tool_calls]
+            assistant_msg.tool_calls = []
+            if message_obj.tool_calls:
+                message_obj.tool_calls = []
+            warn = (
+                f"{ENVIRONMENT_PREFIX} You called tool(s) {tool_names} without any explanation. "
+                f"Rewrite your response with a comment before tool call."
+                f"{ENVIRONMENT_PREFIX_END}"
+            )
+            self.on_system_msg(f"[NO COMMENT] Tool call(s) {tool_names} rejected: no text before tool call.")
+            self._append_assistant(assistant_msg)
+            self.history.add(UserMessage(content=warn))
+            self.on_render(self.history.get_all()[-1])
+            return clean_content, True, False
 
         if not clean_content and not assistant_msg.has_tool_calls():
             self.on_system_msg("[EMPTY RESPONSE] Model returned no content. Discarding and retrying...")

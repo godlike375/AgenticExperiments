@@ -5,7 +5,7 @@ class Config:
     AFTER_SYSTEM_PROMPT = 1  # Index after which dialog starts (0 = system)
     BOOST_TEMP = 1.7
     ERROR_RECOVERY_TEMP = 1.2
-    MAX_LOOP_RETRIES = 2  # попыток перегенерации при повторяющемся вызове/ответе
+    MAX_LOOP_RETRIES = 3  # попыток перегенерации при повторяющемся вызове/ответе
     # Порог Jaccard-схожести по множеству слов для признания текстового ответа повтором.
     DUPLICATE_SIMILARITY_THRESHOLD = 0.7
     ERROR_RECOVERY_RETRIES = 0  # попыток перегенерации после ошибки инструмента

@@ -83,7 +83,7 @@ if __name__ == "__main__":
         f"* Loadable tools (load - 'load_tool' + 'name' arg):\n{available_tools_text}\n"
         "* Do NOT repeat identical tool calls with same args. You can call only 1 tool at 1 turn/message. "
         "You must wait for tool results before making next calls.\n"
-        "You must explain aloud what you're gonna do before calling tools. Every tool call must be explained verbally!\n"
+        "You must say aloud what you're doing while calling a tool. Every tool call must be described verbally!\n"
         "Говори только по-русски.\n"
         f"{ENVIRONMENT_PREFIX_END}"
     )

@@ -54,7 +54,7 @@ class TestAgentChat(unittest.TestCase):
             tools_config=["double_me"],
             external_plugins={"double_me": double_me},
         )
-        first = AssistantMessage(content="", tool_calls=[ToolCall(id="t1", name="double_me", arguments='{"value": 21}')])
+        first = AssistantMessage(content="Let me compute 21 * 2", tool_calls=[ToolCall(id="t1", name="double_me", arguments='{"value": 21}')])
         second = AssistantMessage(content="final answer 42")
         with mock.patch(
             "universal_agents.agent.LLMClient.call",
@@ -76,6 +76,8 @@ class TestAgentChat(unittest.TestCase):
         )
 
         def stream1(*args, **kwargs):
+            yield _chunk(_delta(content="Let me compute "))
+            yield _chunk(_delta(content="21 * 2 "))
             yield _chunk(_delta(tool_calls=[_tc_delta(0, id="t1", name="double_me", arguments='{"value": ')],
                                 content=""))
             yield _chunk(_delta(tool_calls=[_tc_delta(0, arguments='21}')]))
