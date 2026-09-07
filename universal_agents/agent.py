@@ -633,7 +633,7 @@ class LLMAgent(
 
     def _run_turn_loop(self, max_iter: int, prefill: str = None) -> str:
         current_prefill = get_effective_prefill(prefill)
-        pending_prefill = current_prefill  # prefill для следующего шага; 'AI:' после [NO COMMENT]
+        pending_prefill = current_prefill  # prefill для следующего шага; 'Assistant:' после [NO COMMENT]
         consecutive_errors = 0
         tool_error_retries_left = Config.ERROR_RECOVERY_RETRIES
         broken_regen_left = Config.BROKEN_CALL_REGEN_RETRIES

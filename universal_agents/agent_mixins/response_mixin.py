@@ -79,7 +79,7 @@ class ResponseMixin:
 
     def _process_llm_response(self, message_obj) -> tuple[str, bool, bool, Optional[str]]:
         """Обрабатывает сырой ответ LLM. Возвращает (text, tool_error, broken_call, rerun_prefill);
-        rerun_prefill непуст, когда следующий ход надо перегенерировать с указанным prefill (напр. 'AI:')."""
+        rerun_prefill непуст, когда следующий ход надо перегенерировать с указанным prefill (напр. 'Assistant:')."""
         if not message_obj:
             return "Empty response", True, False, None
 
@@ -110,10 +110,10 @@ class ResponseMixin:
             if message_obj.tool_calls:
                 message_obj.tool_calls = []
             # Вместо warning-сообщения: стираем (не добавляем) пустой ответ ассистента
-            # и перегенерируем со следующий ход с prefill 'AI:', чтобы модель начала
+            # и перегенерируем со следующий ход с prefill 'Assistant:', чтобы модель начала
             # с текстового комментария перед вызовом инструмента.
-            self.on_system_msg(f"[NO COMMENT] Tool call `{tool_names[0]}` with no explanation before were rejected: rerunning with 'AI:' prefill.")
-            return clean_content, False, False, "AI:"
+            self.on_system_msg(f"[NO COMMENT] Tool call `{tool_names[0]}` with no explanation before were rejected: rerunning with 'Assistant:' prefill.")
+            return clean_content, False, False, "Assistant:"
 
         if not clean_content and not assistant_msg.has_tool_calls():
             self.on_system_msg("[EMPTY RESPONSE] Model returned no content. Discarding and retrying...")
