@@ -5,9 +5,9 @@ import threading
 from datetime import datetime
 from typing import Iterable, Union, Callable, Optional
 
-from universal_agents.constants import ENVIRONMENT_PREFIX, ENVIRONMENT_PREFIX_END
+from universal_agents.constants import ENVIRONMENT_PREFIX, ENVIRONMENT_PREFIX_END, INTERRUPT_HEADER
 from universal_agents.config import Config
-from universal_agents.models import UserMessage
+from universal_agents.models import UserMessage, AssistantMessage, ToolResult
 from universal_agents.llm_client import LLMClient, TokenUsageTracker, LoopDetector, jaccard_similarity
 from universal_agents.history import ChatHistory
 from universal_agents.generation import GenerationParams
@@ -144,6 +144,12 @@ class LLMAgent(
         self.stop_event = threading.Event()
         self.on_interrupt_check = on_interrupt_check if on_interrupt_check is not None else (lambda: False)
         self._stop_check = lambda: self.stop_event.is_set() or bool(self.on_interrupt_check())
+        # Пользовательский ввод во время генерации (redirect): когда выполняется инструмент,
+        # текст пользователя не прерывает инструмент, а ждёт его завершения, после чего
+        # вставляется в историю и запускается новая генерация (сценарий В).
+        self.pending_interrupt: Optional[str] = None
+        # True, пока поток генерации исполняет инструменты (нужно UI для выбора поведения).
+        self._in_tool_execution = False
 
     @property
     def _per_msg_enabled(self) -> bool:
@@ -323,6 +329,20 @@ class LLMAgent(
 
     def clear_stop(self) -> None:
         self.stop_event.clear()
+
+    def set_pending_interrupt(self, text: str) -> None:
+        """Запоминает текст пользователя, введённый во время выполнения инструмента (сценарий В).
+        Поток генерации обработает его на границе хода (после завершения инструмента)."""
+        self.pending_interrupt = text
+
+    def take_pending_interrupt(self) -> Optional[str]:
+        """Забирает и сбрасывает ожидающий текст прерывания (вызывается UI после завершения потока)."""
+        text = self.pending_interrupt
+        self.pending_interrupt = None
+        return text
+
+    def clear_pending_interrupt(self) -> None:
+        self.pending_interrupt = None
 
     # --------------------------------------------------------
 
@@ -555,23 +575,77 @@ class LLMAgent(
         max_iter = max_iter if max_iter is not None else Config.MAX_ITER
         if self.self_consistency_mode:
             return self._chat_self_consistent(message, prefill)
+        self._prepare_turn(message)
+        return self._run_turn_loop(max_iter, prefill)
 
+    def inject_user_interrupt(self, user_text: str, max_iter: int = None) -> str:
+        """Прерывание генерации с новой информацией (сценарии А/Б/В).
+
+        Сценарий В (после вывода инструмента): шапка и текст пользователя дописываются
+        в конец контента ToolResult — это не ломает последовательность ролей в API
+        и не требует пустой заглушки ассистента. Сценарии А/Б: сообщение пользователя
+        с шапкой добавляется отдельным UserMessage сразу после прерванного фрагмента.
+        В обоих случаях сразу запускается новая генерация ассистента.
+        """
+        max_iter = max_iter if max_iter is not None else Config.MAX_ITER
+        if self.self_consistency_mode:
+            self.clear_pending_interrupt()
+            return self._chat_self_consistent(f"{INTERRUPT_HEADER}\n\n{user_text}", None)
+        self.clear_pending_interrupt()
+        if not self._append_interrupt_to_tool_result(user_text):
+            self._prepare_turn(f"{INTERRUPT_HEADER}\n\n{user_text}")
+        return self._run_turn_loop(max_iter)
+
+    def _append_interrupt_to_tool_result(self, user_text: str) -> bool:
+        """Сценарий В: дописывает шапку прерывания и текст пользователя в конец вывода
+        инструмента (последнего ToolResult в истории). Возвращает True, если дописала."""
+        last = self.history.get_last_message()
+        if not isinstance(last, ToolResult):
+            return False
+        last.content = (last.content or "") + f"\n\n{INTERRUPT_HEADER}\n\n{user_text}"
+        self._on_history_changed()
+        self._autosave()
+        self._last_response_id = None
+        self._last_sent_msg_count = 0
+        self.clear_stop()
+        return True
+
+    def _prepare_turn(self, message: str) -> None:
+        """Добавляет user-сообщение в историю и готовит позицию контекста перед генерацией.
+
+        Сообщение вставляется сразу после прерванного фрагмента. При необходимости
+        добавляется пустая заглушка ассистента (или убираются висящие tool_calls), чтобы
+        не сломать последовательность ролей в API-запросе."""
         user_msg = UserMessage(content=message)
+        last = self.history.get_last_message()
+        if isinstance(last, AssistantMessage) and last.has_tool_calls():
+            self.history.pop_pending_tool_calls()
+            last = self.history.get_last_message()
+        if isinstance(last, UserMessage):
+            self.history.add(AssistantMessage(content=""))
         self.history.add(user_msg)
         if self._per_msg_enabled:
             self._maybe_summarize_user_message(user_msg)
         self._autosave()
-        current_prefill = get_effective_prefill(prefill)
         self._last_response_id = None
         self._last_sent_msg_count = 0
         self.clear_stop()
 
+    def _run_turn_loop(self, max_iter: int, prefill: str = None) -> str:
+        current_prefill = get_effective_prefill(prefill)
         consecutive_errors = 0
         tool_error_retries_left = Config.ERROR_RECOVERY_RETRIES
         broken_regen_left = Config.BROKEN_CALL_REGEN_RETRIES
         broken_fix_left = Config.BROKEN_CALL_FIX_RETRIES
 
         for i in range(max_iter):
+            # Пользователь ввёл новый текст, пока выполнялся инструмент (сценарий В):
+            # завершаем ход на чистой границе истории, чтобы вставка сообщения и новая
+            # генерация произошли сразу после результата инструмента.
+            if self.pending_interrupt is not None:
+                self._autosave()
+                return ""
+
             if self.stop_event.is_set():
                 self.on_system_msg("⏹ Generation stopped by user — control returned to you.")
                 self.clear_stop()

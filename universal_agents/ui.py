@@ -355,15 +355,18 @@ class CLI:
                 return self._line_queue.popleft()
             return ''
 
-    def _poll_stop(self) -> bool:
-        """Неразрушающе проверяет очередь на стоп-команду (забирает только если это стоп)."""
+    def _poll_input(self):
+        """Неразрушающе проверяет очередь ввода: забирает строку, если это пользовательский текст.
+        Пустые строки (в т.ч. инжектированные ''/'\n' для разблокировки воркера) и команды
+        ('/...') не считаются вводом — они остаются в очереди. Возвращает строку или None."""
         with self._line_lock:
-            if self._line_queue:
-                head = self._line_queue[0].strip().lower()
-                if head in ('q', 'stop', 'exit-gen', '!q'):
-                    self._line_queue.popleft()
-                    return True
-            return False
+            if not self._line_queue:
+                return None
+            line = self._line_queue[0]
+            if not line.strip() or line.lstrip().startswith('/'):
+                return None
+            self._line_queue.popleft()
+            return line.strip()
 
     def _inject_line(self, line: str):
         """Подкладывает строку в очередь (чтобы разблокировать ожидающий ввод в воркере при остановке)."""
@@ -373,31 +376,72 @@ class CLI:
 
     def _call_chat(self, message: str, prefill=None):
         """Генерация идёт в отдельном потоке; основной поток опрашивает очередь ввода.
-        Остановка (универсально, работает везде, включая консоль PyCharm): введите
-        'q' на новой строке и нажмите Enter — прервётся и текущий вызов инструмента."""
-        ConsoleUI.system_msg("💡 To stop generation, type 'q' and press Enter.")
+        'q' на новой строке + Enter — принудительная остановка. Любой другой текст
+        + Enter во время работы LLM останавливает текущую генерацию, вставляет
+        сообщение пользователя с системной шапкой в историю и сразу запускает новую
+        генерацию (сценарии А/Б/В)."""
+        ConsoleUI.system_msg(
+            "💡 To stop generation, type 'q' and press Enter. "
+            "Type any other text and press Enter to interrupt and inject it as a new message."
+        )
         self._monitor_active = True
-        self.agent.clear_stop()
-        gen = threading.Thread(target=self._run_chat, args=(message,), kwargs={'prefill': prefill}, daemon=True)
-        gen.start()
-        stopped = False
         try:
-            while gen.is_alive():
-                if self.agent.stop_event.is_set():
-                    stopped = True
+            interrupt_next = False
+            while True:
+                self.agent.clear_stop()
+                self.agent.clear_pending_interrupt()
+                gen = threading.Thread(
+                    target=self._run_chat,
+                    args=(message,),
+                    kwargs={'prefill': prefill, 'interrupt': interrupt_next},
+                    daemon=True,
+                )
+                gen.start()
+                interrupt_next = False
+                redirect = None
+                try:
+                    while gen.is_alive():
+                        if self.agent.stop_event.is_set():
+                            break
+                        line = self._poll_input()
+                        if line is not None:
+                            if line.lower() in ('q', 'stop', 'exit-gen', '!q'):
+                                self._request_stop()
+                                break
+                            if self.agent._in_tool_execution:
+                                # Сценарий В: инструмент уже выполняется — не убиваем его,
+                                # а ждём завершения; текст вставится после результата.
+                                self.agent.set_pending_interrupt(line)
+                                ConsoleUI.system_msg(
+                                    "⏸ Tool in progress — waiting for it to finish; "
+                                    "your message will be processed right after the result."
+                                )
+                            else:
+                                # Сценарии А/Б: генерация текста/рассуждения — прерываем сразу.
+                                self._request_stop()
+                                redirect = line
+                                break
+                        time.sleep(0.05)
+                finally:
+                    gen.join()
+                    self._monitor_active = False
+                if redirect is None:
+                    redirect = self.agent.take_pending_interrupt()
+                if redirect is None:
                     break
-                if self._poll_stop():
-                    self._request_stop()
-                    stopped = True
-                    break
-                time.sleep(0.05)
+                ConsoleUI.system_msg("✍️ Interrupted generation — injecting new message and continuing…")
+                message = redirect
+                prefill = None
+                interrupt_next = True
         finally:
-            gen.join()
             self._monitor_active = False
 
-    def _run_chat(self, message: str, prefill=None):
+    def _run_chat(self, message: str, prefill=None, interrupt: bool = False):
         try:
-            self.agent.chat(message, prefill=prefill)
+            if interrupt:
+                self.agent.inject_user_interrupt(message)
+            else:
+                self.agent.chat(message, prefill=prefill)
         except GenerationInterrupted:
             # Уже выведено в agent.chat; управление возвращается пользователю.
             pass

@@ -27,6 +27,7 @@ class ExecuteMixin:
         # На время выполнения инструментов регистрируем флаг прерывания, чтобы
         # долгий subprocess можно было принудительно убить по запросу пользователя.
         set_interrupt_event(self.stop_event)
+        self._in_tool_execution = True
         try:
             for tc in tool_calls:
                 name = tc.name
@@ -155,6 +156,7 @@ class ExecuteMixin:
 
         finally:
             clear_interrupt_event()
+            self._in_tool_execution = False
 
         return results
 

@@ -5,9 +5,10 @@ from unittest import mock
 from types import SimpleNamespace
 
 from universal_agents.agent import LLMAgent
-from universal_agents.models import AssistantMessage, ToolCall, UserMessage
+from universal_agents.models import AssistantMessage, ToolCall, ToolResult, UserMessage
 from universal_agents.tool import tool
 from universal_agents.config import Config
+from universal_agents.constants import INTERRUPT_HEADER
 
 
 @tool(description="double a value")
@@ -47,6 +48,82 @@ class TestAgentChat(unittest.TestCase):
         self.assertIn("hello back", result)
         roles = [m.to_api_dict()["role"] for m in agent.history]
         self.assertEqual(roles, ["system", "user", "assistant"])
+
+    def test_inject_user_interrupt_adds_header_and_generates(self):
+        agent = LLMAgent(system_prompt="sys")
+        fake = AssistantMessage(content="redirected answer")
+        with mock.patch("universal_agents.agent.LLMClient.call", return_value=(fake, None, None)):
+            result = agent.inject_user_interrupt("new direction")
+        self.assertIn("redirected answer", result)
+        user_msgs = [m.content for m in agent.history.get_all() if isinstance(m, UserMessage)]
+        self.assertTrue(any(INTERRUPT_HEADER in c for c in user_msgs))
+        self.assertTrue(any("new direction" in c for c in user_msgs))
+        roles = [m.to_api_dict()["role"] for m in agent.history]
+        self.assertEqual(roles, ["system", "user", "assistant"])
+
+    def test_inject_user_interrupt_appends_to_tool_result(self):
+        agent = LLMAgent(system_prompt="sys")
+        agent.history.add(UserMessage("comp"))
+        agent.history.add(AssistantMessage(
+            content="calling",
+            tool_calls=[ToolCall(id="t1", name="double_me", arguments='{"value": 2}')],
+        ))
+        tr = ToolResult(tool_call_id="t1", name="double_me", content="4")
+        agent.history.add(tr)
+        fake = AssistantMessage(content="ok")
+        with mock.patch("universal_agents.agent.LLMClient.call", return_value=(fake, None, None)):
+            agent.inject_user_interrupt("stop, instead do X")
+        # шапка и текст пользователя дописаны в конец вывода инструмента
+        self.assertIn(INTERRUPT_HEADER, tr.content)
+        self.assertIn("stop, instead do X", tr.content)
+        # отдельного user-сообщения с текстом прерывания нет, пустой заглушки ассистента нет
+        self.assertFalse(
+            any(isinstance(m, UserMessage) and "stop, instead do X" in m.content for m in agent.history.get_all())
+        )
+        self.assertFalse(
+            any(
+                isinstance(m, AssistantMessage) and m.content == "" and not m.has_tool_calls()
+                for m in agent.history.get_all()
+            )
+        )
+        roles = [m.to_api_dict()["role"] for m in agent.history]
+        self.assertEqual(roles, ["system", "user", "assistant", "tool", "assistant"])
+
+    def test_pending_interrupt_stops_turn_without_llm_call(self):
+        agent = LLMAgent(system_prompt="sys")
+        agent.pending_interrupt = "user typed during tool execution"
+        with mock.patch("universal_agents.agent.LLMClient.call") as mocked:
+            result = agent._run_turn_loop(5)
+        mocked.assert_not_called()
+        self.assertEqual(result, "")
+        self.assertEqual(agent.pending_interrupt, "user typed during tool execution")
+
+    def test_prepare_turn_inserts_stub_between_consecutive_user_messages(self):
+        agent = LLMAgent(system_prompt="sys")
+        agent.history.add(UserMessage("first"))
+        agent._prepare_turn("second")
+        roles = [m.to_api_dict()["role"] for m in agent.history]
+        self.assertEqual(roles, ["system", "user", "assistant", "user"])
+        stub = agent.history.get_all()[2]
+        self.assertIsInstance(stub, AssistantMessage)
+        self.assertEqual(stub.content, "")
+
+    def test_prepare_turn_cleans_hanging_tool_call(self):
+        agent = LLMAgent(system_prompt="sys")
+        agent.history.add(UserMessage("comp"))
+        agent.history.add(AssistantMessage(
+            content="calling",
+            tool_calls=[ToolCall(id="t1", name="double_me", arguments='{"value": 2}')],
+        ))
+        # висящий вызов без результата — должен быть удалён при вставке нового сообщения
+        agent._prepare_turn("redirect")
+        roles = [m.to_api_dict()["role"] for m in agent.history]
+        self.assertEqual(roles, ["system", "user", "assistant", "user"])
+        msgs = agent.history.get_all()
+        self.assertFalse(msgs[1].has_tool_calls() if hasattr(msgs[1], 'has_tool_calls') else False)
+        stub = msgs[2]
+        self.assertIsInstance(stub, AssistantMessage)
+        self.assertEqual(stub.content, "")
 
     def test_chat_executes_tool_and_finishes(self):
         agent = LLMAgent(

@@ -27,3 +27,7 @@ SUMMARY_PREFIX_TOOL_RESULT = "RESULT:"
 SUMMARY_PREFIX_TOOL_NAMED = "TOOL({name}):"
 SUMMARY_MARKER = "[PAST-SUMMARY]"
 
+# Заголовок для сообщения пользователя при прерывании генерации
+INTERRUPT_HEADER = (f"{ENVIRONMENT_PREFIX} User interrupted generation and wants to say something more important. "
+                    f"Treat it carefully before continuing {ENVIRONMENT_PREFIX_END}")
+
