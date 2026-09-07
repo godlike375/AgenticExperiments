@@ -633,6 +633,7 @@ class LLMAgent(
 
     def _run_turn_loop(self, max_iter: int, prefill: str = None) -> str:
         current_prefill = get_effective_prefill(prefill)
+        pending_prefill = current_prefill  # prefill для следующего шага; 'AI:' после [NO COMMENT]
         consecutive_errors = 0
         tool_error_retries_left = Config.ERROR_RECOVERY_RETRIES
         broken_regen_left = Config.BROKEN_CALL_REGEN_RETRIES
@@ -651,7 +652,7 @@ class LLMAgent(
                 self.clear_stop()
                 self._autosave()
                 return ""
-            step_prefill = current_prefill if i == 0 else None
+            step_prefill = pending_prefill
             all_messages = prepare_messages_for_api(
                 self, debug_hash_check=Config.DEBUG_PREFIX_HASH_CHECK
             )
@@ -681,7 +682,7 @@ class LLMAgent(
                 return ""
 
             try:
-                result_text, tool_error_occurred, broken_call = self._process_llm_response(message_obj)
+                result_text, tool_error_occurred, broken_call, rerun_prefill = self._process_llm_response(message_obj)
             except GenerationInterrupted:
                 # Пользователь прервал выполнение инструмента: убираем висящий вызов
                 # ассистента без результата, чтобы история осталась валидной для API.
@@ -691,6 +692,16 @@ class LLMAgent(
                 self.on_system_msg("⏹ Generation stopped by user.")
                 self._autosave()
                 raise
+
+            if rerun_prefill:
+                # [NO COMMENT]: модель вызвала инструмент без текста. Перегенерируем
+                # следующий ход с prefill (напр. 'AI:'), не добавляя пустой ответ в историю.
+                pending_prefill = rerun_prefill
+                self._last_response_id = None
+                self._last_sent_msg_count = 0
+                continue
+
+            pending_prefill = None
 
             if broken_call:
                 if broken_regen_left > 0:

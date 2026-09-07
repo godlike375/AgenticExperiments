@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from universal_agents.constants import ENVIRONMENT_PREFIX, ENVIRONMENT_PREFIX_END
+from typing import Optional
+
 from universal_agents.llm_client import apply_prefill
-from universal_agents.models import AssistantMessage, ToolCall, ToolResult, UserMessage
+from universal_agents.models import AssistantMessage, ToolCall, ToolResult
 from universal_agents.tool_parsing import tc_name, tc_args, detect_broken_call, args_are_valid
 
 
@@ -76,9 +77,11 @@ class ResponseMixin:
             self.on_render(tr)
             self._emit_token_info()
 
-    def _process_llm_response(self, message_obj) -> tuple[str, bool, bool]:
+    def _process_llm_response(self, message_obj) -> tuple[str, bool, bool, Optional[str]]:
+        """Обрабатывает сырой ответ LLM. Возвращает (text, tool_error, broken_call, rerun_prefill);
+        rerun_prefill непуст, когда следующий ход надо перегенерировать с указанным prefill (напр. 'AI:')."""
         if not message_obj:
-            return "Empty response", True, False
+            return "Empty response", True, False, None
 
         content = message_obj.content or ""
         clean_content = content.strip()
@@ -106,28 +109,23 @@ class ResponseMixin:
             assistant_msg.tool_calls = []
             if message_obj.tool_calls:
                 message_obj.tool_calls = []
-            warn = (
-                f"{ENVIRONMENT_PREFIX} You called tool(s) {tool_names} without any explanation. "
-                f"Rewrite your response with a comment before tool call."
-                f"{ENVIRONMENT_PREFIX_END}"
-            )
-            self.on_system_msg(f"[NO COMMENT] Tool call(s) {tool_names} rejected: no text before tool call.")
-            self._append_assistant(assistant_msg)
-            self.history.add(UserMessage(content=warn))
-            self.on_render(self.history.get_all()[-1])
-            return clean_content, True, False
+            # Вместо warning-сообщения: стираем (не добавляем) пустой ответ ассистента
+            # и перегенерируем со следующий ход с prefill 'AI:', чтобы модель начала
+            # с текстового комментария перед вызовом инструмента.
+            self.on_system_msg(f"[NO COMMENT] Tool call `{tool_names[0]}` with no explanation before were rejected: rerunning with 'AI:' prefill.")
+            return clean_content, False, False, "AI:"
 
         if not clean_content and not assistant_msg.has_tool_calls():
             self.on_system_msg("[EMPTY RESPONSE] Model returned no content. Discarding and retrying...")
-            return clean_content, True, False
+            return clean_content, True, False, None
 
         self._append_assistant(assistant_msg)
 
         if not assistant_msg.has_tool_calls():
             if detect_broken_call(clean_content, self._known_tool_names()):
                 self.on_system_msg("[BROKEN CALL] Response looks like an unparsed tool call (prose or XML).")
-                return clean_content, False, True
-            return clean_content, False, False
+                return clean_content, False, True, None
+            return clean_content, False, False, None
 
         tool_results = self._execute_tools(assistant_msg.tool_calls)
         self._append_tool_results(tool_results)
@@ -142,4 +140,4 @@ class ResponseMixin:
             self._on_history_changed()
 
         tool_error_occurred = any(tr.is_error and not tr.is_user_denied for tr in tool_results)
-        return clean_content, tool_error_occurred, False
+        return clean_content, tool_error_occurred, False, None
