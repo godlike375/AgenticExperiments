@@ -6,10 +6,16 @@
 Важно: запуск через Popen с опросом, чтобы можно было прервать выполнение по
 требованию пользователя (см. set_interrupt_event / _interrupt_requested) — иначе
 долгий вызов инструмента блокирует поток и остановка оказывается невозможной.
+
+На Windows дополнительно создаётся Job Object с KILL_ON_JOB_CLOSE: при прерывании
+процесс вместе со всеми дочерними (Gradle, Java и т.д.) гарантированно завершается,
+а reader-потоки не застревают в незакрытых pipe'ах.
 """
 
 from __future__ import annotations
 
+import ctypes
+import os
 import subprocess
 import threading
 import time
@@ -17,6 +23,134 @@ import time
 from universal_agents.config import Config
 from universal_agents.constants import ENVIRONMENT_PREFIX, ENVIRONMENT_PREFIX_END
 from universal_agents.exceptions import GenerationInterrupted
+
+# --- Windows Job Object API (через ctypes) ---
+_IS_WINDOWS = os.name == "nt"
+
+if _IS_WINDOWS:
+    _kernel32 = ctypes.windll.kernel32
+
+    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
+    JOB_OBJECT_LIMIT_ACTIVE_PROCESS = 0x08
+
+    class JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
+        _fields_ = [
+            ("PerProcessUserTimeLimit", ctypes.c_int64),
+            ("PerJobUserTimeLimit", ctypes.c_int64),
+            ("LimitFlags", ctypes.c_uint32),
+            ("MinimumWorkingSetSize", ctypes.c_size_t),
+            ("MaximumWorkingSetSize", ctypes.c_size_t),
+            ("ActiveProcessLimit", ctypes.c_uint32),
+            ("Affinity", ctypes.POINTER(ctypes.c_ulong)),
+            ("PriorityClass", ctypes.c_uint32),
+            ("SchedulingClass", ctypes.c_uint32),
+        ]
+
+    class IO_COUNTERS(ctypes.Structure):
+        _fields_ = [
+            ("ReadOperationCount", ctypes.c_uint64),
+            ("WriteOperationCount", ctypes.c_uint64),
+            ("OtherOperationCount", ctypes.c_uint64),
+            ("ReadTransferCount", ctypes.c_uint64),
+            ("WriteTransferCount", ctypes.c_uint64),
+            ("OtherTransferCount", ctypes.c_uint64),
+        ]
+
+    class JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
+        _fields_ = [
+            ("BasicLimitInformation", JOBOBJECT_BASIC_LIMIT_INFORMATION),
+            ("IoInfo", IO_COUNTERS),
+            ("ProcessMemoryLimit", ctypes.c_size_t),
+            ("JobMemoryLimit", ctypes.c_size_t),
+            ("PeakProcessMemoryUsed", ctypes.c_size_t),
+            ("PeakJobMemoryUsed", ctypes.c_size_t),
+        ]
+
+
+def _create_kill_job():
+    """Создаёт Windows Job Object с KILL_ON_JOB_CLOSE.
+    Все процессы, назначенные этому Job, будут принудительно завершены при закрытии хэндла.
+    Возвращает (handle, assign_fn) или (None, None) если не Windows или ошибка.
+    """
+    if not _IS_WINDOWS:
+        return None, None
+    try:
+        job = _kernel32.CreateJobObjectW(None, None)
+        if not job:
+            return None, None
+
+        info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        info.BasicLimitInformation.ActiveProcessLimit = 512
+
+        result = _kernel32.SetInformationJobObject(
+            job, 2,  # JobObjectExtendedLimitInformation
+            ctypes.byref(info),
+            ctypes.sizeof(info),
+        )
+        if not result:
+            _kernel32.CloseHandle(job)
+            return None, None
+
+        def assign(proc_handle):
+            """Назначает процесс (или его PID) в Job Object."""
+            _kernel32.AssignProcessToJobObject(job, proc_handle)
+
+        return job, assign
+    except Exception:
+        return None, None
+
+
+def _kill_process_tree(pid: int) -> None:
+    """Принудительно убивает дерево процессов по PID (Windows taskkill /T /F)."""
+    try:
+        subprocess.run(
+            ["taskkill", "/T", "/F", "/PID", str(pid)],
+            capture_output=True,
+            timeout=5,
+        )
+    except Exception:
+        pass
+
+
+def _safe_close_job(job) -> None:
+    """Закрывает хэндл Job Object; все назначенные процессы будут завершены."""
+    if job and _IS_WINDOWS:
+        try:
+            _kernel32.CloseHandle(job)
+        except Exception:
+            pass
+
+
+def _force_kill_proc(proc, job_handle) -> None:
+    """Принудительно завершает процесс со всем деревом потомков.
+
+    Стратегия на Windows (в порядке надёжности):
+    1. `proc.terminate()` — обычное завершение главного процесса.
+    2. `taskkill /T /F` — принудительное завершение дерева (fallback, если Job не сработал).
+    3. Закрытие Job Object убьёт всё, что в нём было (если Job активен).
+    """
+    try:
+        proc.terminate()
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+    if _IS_WINDOWS:
+        # Закрываем Job первым — это гарантированно убьёт все назначенные процессы
+        _safe_close_job(job_handle)
+        # На случай, если Job не сработал или есть процессы вне Job — добиваем дерево taskkill'ом
+        try:
+            _kill_process_tree(proc.pid)
+        except Exception:
+            pass
+        # Финальная страховка: прибить сам процесс напрямую
+        try:
+            proc.kill()
+        except Exception:
+            pass
 
 # Текущий "прерыватель" (обычно stop_event агента), устанавливается на время
 # выполнения инструмента и сбрасывается после. Гонок нет: инструменты агента
@@ -137,9 +271,18 @@ def run_capture(
     (чтобы вызывающая сторона могла трактовать результат как ошибку).
     Если во время выполнения запрошена остановка (interrupt event), процесс
     принудительно завершается и бросается ``GenerationInterrupted``.
+
+    На Windows создаётся Job Object с KILL_ON_JOB_CLOSE: при прерывании или
+    таймауте гарантированно убивается всё дерево процессов (Gradle, Java и т.д.),
+    чтобы reader-потоки не застревали в незакрытых pipe'ах.
     """
     effective_timeout = timeout if timeout and timeout > 0 else 60
     stdin_stream = subprocess.PIPE if stdin is not None else subprocess.DEVNULL
+
+    # На Windows: создаём Job Object для гарантированного убийства дерева процессов.
+    # При прерывании/таймауте закрытие хэндла Job убьёт все назначенные процессы,
+    # включая дочерние (Gradle → Java), и reader-потоки получат EOF на pipe'ах.
+    job_handle, job_assign = _create_kill_job()
 
     proc = subprocess.Popen(
         cmd,
@@ -152,6 +295,13 @@ def run_capture(
         cwd=cwd,
         bufsize=1,
     )
+
+    # Назначаем процесс в Job Object (все дочерние автоматически попадают тоже)
+    if job_assign is not None:
+        try:
+            job_assign(proc._handle)
+        except Exception:
+            pass
 
     out_chunks: list[str] = []
     err_chunks: list[str] = []
@@ -192,16 +342,17 @@ def run_capture(
                 break
             if _interrupt_requested():
                 interrupted = True
-                proc.kill()
+                _force_kill_proc(proc, job_handle)
                 break
             if time.time() > deadline:
                 timed_out = True
-                proc.kill()
+                _force_kill_proc(proc, job_handle)
                 break
             time.sleep(0.05)
     finally:
-        t_out.join()
-        t_err.join()
+        t_out.join(timeout=5)
+        t_err.join(timeout=5)
+        _safe_close_job(job_handle)
 
     if interrupted:
         raise GenerationInterrupted("Command interrupted by user")

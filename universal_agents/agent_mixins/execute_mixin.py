@@ -154,6 +154,14 @@ class ExecuteMixin:
                     self.on_system_msg(f"⚠️ [ERROR] Tool '{name}' FAILED: {e}")
                     results.append(ToolResult.error(tc.id, name, str(e)))
 
+                # Авто-сохранение после КАЖДОГО выполненного инструмента, чтобы не терять
+                # промежуточный результат при сбое/остановке. (Один быстрый вызов — файл
+                # один на диалог, просто перезапись.)
+                try:
+                    self.autosave()
+                except Exception:
+                    pass
+
         finally:
             clear_interrupt_event()
             self._in_tool_execution = False
