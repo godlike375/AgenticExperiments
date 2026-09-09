@@ -112,6 +112,8 @@ class LLMAgent(
         self.loop_detector = LoopDetector()
         self._temp_override: Optional[float] = None
         self._original_temp = temp
+        self._thinking_enabled: bool = False
+        self._thinking_once: bool = False
         self.on_stream_chunk = on_stream_chunk
         self.on_stream_start = on_stream_start
         self.on_stream_end = on_stream_end
@@ -155,6 +157,16 @@ class LLMAgent(
     def _per_msg_enabled(self) -> bool:
         """Гейт per-message суммаризации: выключена глобально (Config.PER_MSG_SUMMARIES_ENABLED) или локально (disable_per_msg_summarization)."""
         return Config.PER_MSG_SUMMARIES_ENABLED and not self._disable_per_msg_summarization
+
+    @property
+    def _reasoning_effort(self) -> str:
+        """Вычисляет текущий reasoning_effort на основе состояния thinking-тогглов. Если включён один из тогглов — возвращает 'low'; иначе 'none'. Разовый тоггл (_thinking_once) сбрасывается после вычисления."""
+        if self._thinking_once:
+            self._thinking_once = False
+            return "low"
+        if self._thinking_enabled:
+            return "low"
+        return "none"
 
     def _build_duplicate_warning(self, dup_name: str, dup_args: str) -> str:
         """ENVIRONMENT_PREFIX-обёртка предупреждения о повторном дубликате вызова."""
@@ -355,6 +367,7 @@ class LLMAgent(
         watch_prefix: Optional[str] = None,
         watch_continue_temp: Optional[float] = None,
         stop_check: Callable[[], bool] = None,
+        reasoning_effort: str = "none",
     ) -> tuple:
         """Единая точка транспорта LLM (§2): выбирает стриминг или обычный вызов; возвращает (message_obj, error, usage)."""
         tools = self.tools if self.tools else None
@@ -368,6 +381,7 @@ class LLMAgent(
                 watch_prefix=watch_prefix,
                 watch_continue_temp=watch_continue_temp,
                 stop_check=stop_check,
+                reasoning_effort=reasoning_effort,
             )
         return LLMClient.call(
             messages,
@@ -376,6 +390,7 @@ class LLMAgent(
             previous_response_id=previous_response_id,
             params=params,
             stop_check=stop_check,
+            reasoning_effort=reasoning_effort,
         )
 
     def service_llm_call(
@@ -457,6 +472,7 @@ class LLMAgent(
         last_retry_warning: Optional[str] = None
         dup_watch_target: Optional[str] = None
         api_error_occurred = False
+        effective_reasoning_effort = self._reasoning_effort
 
         for attempt in range(max_generation_attempts):
             attempt_params = self._gen_params
@@ -478,6 +494,7 @@ class LLMAgent(
                 watch_prefix=dup_watch_target,
                 watch_continue_temp=Config.DUPLICATE_CONTINUATION_TEMP if dup_watch_target is not None else None,
                 stop_check=self._stop_check,
+                reasoning_effort=effective_reasoning_effort,
             )
             dup_watch_target = None
 

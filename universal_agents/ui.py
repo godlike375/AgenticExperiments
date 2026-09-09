@@ -118,6 +118,9 @@ class CLI:
             "/multiline": self.cmd_multiline,
             "/trust": self.cmd_trust,
             "/untrust": self.cmd_untrust,
+            "/think_on": self.cmd_think_on,
+            "/think_off": self.cmd_think_off,
+            "/think": self.cmd_think,
         }
 
     def cmd_regen(self, parts: list[str]):
@@ -287,6 +290,21 @@ class CLI:
         self.multiline = not self.multiline
         status = "ON" if self.multiline else "OFF"
         ConsoleUI.system_msg(f"Multiline input mode turned {status}. Type Ctrl+D to finish the input.")
+
+    def cmd_think_on(self, parts: list[str]):
+        self.agent._thinking_enabled = True
+        self.agent._thinking_once = False
+        ConsoleUI.system_msg("Thinking mode turned ON. LLM will use reasoning_effort='low' for all messages.")
+
+    def cmd_think_off(self, parts: list[str]):
+        self.agent._thinking_enabled = False
+        self.agent._thinking_once = False
+        ConsoleUI.system_msg("Thinking mode turned OFF. LLM will use reasoning_effort='none'.")
+
+    def cmd_think(self, parts: list[str]):
+        self.agent._thinking_once = True
+        self.agent._thinking_enabled = False
+        ConsoleUI.system_msg("Thinking enabled for the next LLM message only.")
 
     def cmd_trust(self, parts: list[str]):
         if len(parts) < 2:

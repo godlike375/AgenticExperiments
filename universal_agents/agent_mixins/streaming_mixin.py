@@ -37,6 +37,7 @@ class StreamingMixin:
         watch_prefix: str = None,
         watch_continue_temp: float = None,
         stop_check: Callable[[], bool] = None,
+        reasoning_effort: str = "none",
     ) -> tuple:
         """Вызов LLM со streaming (возвращает (message_obj, error, usage)). Если задан watch_prefix, при расхождении с прежним ответом генерация на горячей температуре прерывается и достраивается спокойной температурой (watch_continue_temp) — буст не успевает вызвать галлюцинации. stop_check — вызывается после каждого чанка; True прерывает стрим."""
         try:
@@ -46,6 +47,7 @@ class StreamingMixin:
                 prefill=prefill,
                 previous_response_id=previous_response_id,
                 params=params,
+                reasoning_effort=reasoning_effort,
             )
 
             # Watchdog: закрывает соединение при остановке пользователя, в т.ч. во время
@@ -94,7 +96,7 @@ class StreamingMixin:
 
                 if diverged:
                     return self._continue_stream_after_divergence(
-                        messages, tools, prefill, acc, watch_continue_temp
+                        messages, tools, prefill, acc, watch_continue_temp, reasoning_effort=reasoning_effort
                     )
 
                 message_obj = self._assemble_assistant_message(
@@ -130,6 +132,7 @@ class StreamingMixin:
         prefill: str,
         acc: StreamAccumulator,
         watch_continue_temp: float,
+        reasoning_effort: str = "none",
     ) -> tuple:
         """Достраивает прерванный на расхождении ответ спокойной генерацией (тоже со стримингом)."""
         partial_text = (prefill or "") + acc.content
@@ -141,6 +144,7 @@ class StreamingMixin:
             prefill=partial_text,
             params=calm_params,
             callbacks=self._stream_callbacks(),
+            reasoning_effort=reasoning_effort,
         )
         tool_calls = build_tool_calls(acc.tool_calls_data)
 
