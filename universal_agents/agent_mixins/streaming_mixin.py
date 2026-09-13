@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+from typing import Callable
 
 from universal_agents.config import Config
 from universal_agents.generation import GenerationParams
@@ -58,7 +59,7 @@ class StreamingMixin:
                 def _watcher():
                     while not _watch_done.is_set():
                         if stop_check():
-                            LLMClient.cancel_active()
+                            LLMClient.close_stream(stream)
                             break
                         _watch_done.wait(0.05)
                 threading.Thread(target=_watcher, daemon=True).start()
@@ -96,7 +97,8 @@ class StreamingMixin:
 
                 if diverged:
                     return self._continue_stream_after_divergence(
-                        messages, tools, prefill, acc, watch_continue_temp, reasoning_effort=reasoning_effort
+                        messages, tools, prefill, acc, watch_continue_temp,
+                        reasoning_effort=reasoning_effort, stop_check=stop_check,
                     )
 
                 message_obj = self._assemble_assistant_message(
@@ -133,6 +135,7 @@ class StreamingMixin:
         acc: StreamAccumulator,
         watch_continue_temp: float,
         reasoning_effort: str = "none",
+        stop_check: Callable[[], bool] = None,
     ) -> tuple:
         """Достраивает прерванный на расхождении ответ спокойной генерацией (тоже со стримингом)."""
         partial_text = (prefill or "") + acc.content
@@ -145,6 +148,7 @@ class StreamingMixin:
             params=calm_params,
             callbacks=self._stream_callbacks(),
             reasoning_effort=reasoning_effort,
+            stop_check=stop_check,
         )
         tool_calls = build_tool_calls(acc.tool_calls_data)
 

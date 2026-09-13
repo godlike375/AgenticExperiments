@@ -131,20 +131,33 @@ class MemoryMixin:
     # Авто-компакция диалога
     # ------------------------------------------------------------------
 
-    def _auto_summarize_dialogue(self) -> None:
-        """Компакция: сегмент уходит в архив, вместо него — session summary (UserMessage после system prompt). Первая компакция пишет заметки с нуля, повторные правят по SEARCH/REPLACE; при неудаче история не трогается."""
+    def _auto_summarize_dialogue(self, force: bool = False) -> bool:
+        """Компакция: сегмент уходит в архив, вместо него — session summary (UserMessage после system prompt). Первая компакция пишет заметки с нуля, повторные правят по SEARCH/REPLACE; при неудаче история не трогается.
+
+        force=True — принудительная компакция (команда /compact_history): сжимает даже на ассистентской границе и сообщает о причинах пропуска. Возвращает True, если история реально сжата."""
         preserve_last = Config.AUTO_SUMMARY_PRESERVE_LAST
 
-        # --- Точка срабатывания: только на «безопасных» границах ---
+        # Остановка пользователя: не начинаем долгую компакцию и не трогаем историю.
+        if self.stop_event.is_set():
+            self._auto_summarize_suppressed = True
+            return False
+
+        # --- Точка срабатывания: только на «безопасных» границах (force — сжимаем в любом месте) ---
         popped_calls = self.history.pop_pending_tool_calls()
 
         last = self.history._messages[-1] if self.history._messages else None
         if not (isinstance(last, ToolResult) or isinstance(last, UserMessage)):
-            return
+            if not force:
+                return False
+            self.on_system_msg(
+                "[COMPACT-HISTORY] Forced compaction on an assistant-message boundary "
+                "(the last response will be preserved)."
+            )
 
+        tag = "COMPACT-HISTORY" if force else "AUTO-SUMMARY"
         if popped_calls:
             self.on_system_msg(
-                f"[AUTO-SUMMARY] Removed {popped_calls} pending tool call(s) before "
+                f"[{tag}] Removed {popped_calls} pending tool call(s) before "
                 f"summarizing; assistant will re-invoke after compression."
             )
 
@@ -152,7 +165,9 @@ class MemoryMixin:
         start_id = Config.AFTER_SYSTEM_PROMPT
         end_id = len(messages) - 1 - preserve_last
         if start_id > end_id:
-            return
+            if force:
+                self.on_system_msg("[COMPACT-HISTORY] Nothing to compress: history is too short.")
+            return False
 
         original_len = self.history.content_len(start_id, end_id)
 
@@ -176,6 +191,13 @@ class MemoryMixin:
         summary_text = None
         include_73 = prev_summary is not None
         for attempt in range(1, Config.AUTO_SUMMARY_MAX_RETRIES + 1):
+            # Пользователь запросил остановку — прекращаем ретраи, не открывая новые стримы.
+            if self.stop_event.is_set():
+                self._auto_summarize_suppressed = True
+                self.on_system_msg(
+                    "[AUTO-SUMMARY] Compaction stopped by user; history left unchanged."
+                )
+                return False
             # Лёгкий рост температуры между попытками, чтобы не повторять ту же ошибку.
             if prev_summary is not None and summary_text is not None and _raw_summary(summary_text) == _raw_summary(prev_summary):
                 temp = Config.SUMMARY_DUPLICATE_TEMP
@@ -211,11 +233,12 @@ class MemoryMixin:
                 f"{Config.AUTO_SUMMARY_MAX_RETRIES}); retrying..."
             )
         if not summary_text:
+            self._auto_summarize_suppressed = True
             self.on_system_msg(
                 "[AUTO-SUMMARY] Compression call failed after "
                 f"{Config.AUTO_SUMMARY_MAX_RETRIES} attempts; history left unchanged."
             )
-            return
+            return False
 
         # --- 3. Удаляем сегмент из истории, оставляя текст как контекст ---
         self.history.compress_old_messages(summary_text, preserve_last)
@@ -225,7 +248,9 @@ class MemoryMixin:
 
         new_len = self.history.content_len(1, len(self.history) - 1)
         final_reduction = 1.0 - (new_len / max(original_len, 1))
+        self._auto_summarize_suppressed = False
         self.on_system_msg(
-            f"[AUTO-SUMMARY] Session summary written "
+            f"[{tag}] Session summary written "
             f"(-{final_reduction:.0%}); originals archived for recall."
         )
+        return True

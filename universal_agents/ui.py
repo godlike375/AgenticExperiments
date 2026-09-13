@@ -121,6 +121,7 @@ class CLI:
             "/think_on": self.cmd_think_on,
             "/think_off": self.cmd_think_off,
             "/think": self.cmd_think,
+            "/compact_history": self.cmd_compact_history,
         }
 
     def cmd_regen(self, parts: list[str]):
@@ -305,6 +306,65 @@ class CLI:
         self.agent._thinking_once = True
         self.agent._thinking_enabled = False
         ConsoleUI.system_msg("Thinking enabled for the next LLM message only.")
+
+    def cmd_compact_history(self, parts: list[str]):
+        before = self.agent._get_context_usage_percent()
+        if getattr(self, "_line_queue", None) is None:
+            # Вне CLI (тесты): компакция синхронно, без stdin-монитора.
+            try:
+                compacted = self.agent._auto_summarize_dialogue(force=True)
+            except GenerationInterrupted:
+                ConsoleUI.system_msg("Compaction interrupted.")
+                return
+            after = self.agent._get_context_usage_percent()
+            self._report_compaction(compacted, before, after)
+            return
+
+        # Компакция идёт в отдельном потоке, а главный опрашивает stdin: иначе
+        # ввод во время сжатия (q+Enter или любая фраза) никто не читает, и
+        # остановка llm-service не срабатывает — компакция просто дорабатывает.
+        result = {}
+        pending_text = []
+
+        def _compact():
+            try:
+                result["compacted"] = self.agent._auto_summarize_dialogue(force=True)
+            except GenerationInterrupted:
+                result["interrupted"] = True
+
+        worker = threading.Thread(target=_compact, daemon=True)
+        worker.start()
+        while worker.is_alive():
+            if self.agent.stop_event.is_set():
+                break
+            line = self._poll_input()
+            if line is not None:
+                if line.lower() in ("q", "stop", "exit-gen", "!q"):
+                    self._request_stop()
+                    break
+                # Любая другая фраза тоже останавливает компакцию; текст возвращаем в
+                # очередь, чтобы он стал обычным сообщением для следующего хода.
+                pending_text.append(line)
+                self._request_stop()
+                break
+            time.sleep(0.05)
+        worker.join()
+
+        if pending_text:
+            self._inject_line(pending_text[0])
+
+        after = self.agent._get_context_usage_percent()
+        if result.get("interrupted"):
+            ConsoleUI.system_msg(f"Compaction interrupted (stopped). Context: {before:.0f}% -> {after:.0f}%")
+        else:
+            self._report_compaction(result.get("compacted", False), before, after)
+
+    def _report_compaction(self, compacted: bool, before: float, after: float):
+        delta = f"{before:.0f}% -> {after:.0f}%"
+        if compacted:
+            ConsoleUI.system_msg(f"History compacted. Context: {delta}")
+        else:
+            ConsoleUI.system_msg(f"History left unchanged. Context: {delta}")
 
     def cmd_trust(self, parts: list[str]):
         if len(parts) < 2:

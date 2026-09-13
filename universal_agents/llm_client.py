@@ -213,23 +213,30 @@ class LLMClient:
         return cls._client
 
     @classmethod
+    def close_stream(cls, stream) -> None:
+        """Закрывает конкретное соединение стрима. Watchdog'и закрывают ИМЕННО свой
+        стрим (а не глобальный _active_stream), чтобы отмена одного запроса не рубила
+        чужой параллельный стрим — например, компакцию, стартовавшую следом."""
+        if stream is None:
+            return
+        try:
+            if hasattr(stream, "close"):
+                stream.close()
+            elif hasattr(stream, "_response") and hasattr(stream._response, "close"):
+                stream._response.close()
+            elif hasattr(stream, "response") and hasattr(stream.response, "close"):
+                stream.response.close()
+        except Exception:
+            pass
+
+    @classmethod
     def cancel_active(cls) -> None:
         """Принудительно прерывает активный запрос: закрывает соединение стрима.
         Вызывается из watchdog-потока при запросе остановки пользователем (фаза
         префилла, когда чанков ещё нет и обычный stop_check не срабатывает)."""
         s = cls._active_stream
         cls._active_stream = None
-        if s is None:
-            return
-        try:
-            if hasattr(s, "close"):
-                s.close()
-            elif hasattr(s, "_response") and hasattr(s._response, "close"):
-                s._response.close()
-            elif hasattr(s, "response") and hasattr(s.response, "close"):
-                s.response.close()
-        except Exception:
-            pass
+        cls.close_stream(s)
 
     @staticmethod
     def call(
@@ -269,6 +276,10 @@ class LLMClient:
             )
             if streamed is not None:
                 return streamed
+            # Пользователь запросил остановку: НЕ скатываемся в блокирующий вызов,
+            # который невозможно прервать (иначе llm-service «глохнет» на разрыв).
+            if stop_check and stop_check():
+                return None, "stopped: stream unavailable and stop requested", None
 
         result = None
         if Config.USE_RESPONSES_API:
@@ -289,6 +300,10 @@ class LLMClient:
                 if not err and msg and (msg.content or msg.tool_calls):
                     result = (msg, err, usage)
         if result is None:
+            # Не-стриминговый путь: не начинаем блокирующий вызов, если пользователь
+            # уже запросил остановку (такой вызов прервать невозможно).
+            if stop_check and stop_check():
+                return None, "stopped", None
             result = LLMClient._call_chat_completions(
                 messages_to_send, temp, timeout, tools, prefill, top_p,
                 frequency_penalty, presence_penalty, max_tokens,
@@ -425,7 +440,7 @@ class LLMClient:
             def _watcher():
                 while not _watch_done.is_set():
                     if stop_check():
-                        LLMClient.cancel_active()
+                        LLMClient.close_stream(raw)
                         break
                     _watch_done.wait(0.05)
             _watch = threading.Thread(target=_watcher, daemon=True)
@@ -438,12 +453,15 @@ class LLMClient:
             if isinstance(first, dict) and "error" in first:
                 if end_cb:
                     end_cb()
-                return None
+                # Возвращаем ошибку ТОЛЬКО как кортеж: None здесь приводил к бесшовному
+                # откату в блокирующий _call_chat_completions, который stop'ом не
+                # прерывается — llm-service «не останавливался» при недоступном стриме.
+                return None, f"stream creation failed: {first['error']}", None
             acc.process(first)
             for chunk in raw:
                 acc.process(chunk)
                 if stop_check and stop_check():
-                    LLMClient.cancel_active()
+                    LLMClient.close_stream(raw)
                     break
         except Exception as e:
             if end_cb:

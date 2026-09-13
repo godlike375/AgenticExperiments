@@ -104,7 +104,11 @@ class ResponseMixin:
                 if message_obj.tool_calls:
                     message_obj.tool_calls = [tc for tc in message_obj.tool_calls if tc.id == chosen_tc.id]
 
-        if assistant_msg.has_tool_calls() and not clean_content:
+        if (
+            assistant_msg.has_tool_calls()
+            and not clean_content
+            and self._reasoning_effort == "none"
+        ):
             tool_names = [tc.name for tc in assistant_msg.tool_calls]
             assistant_msg.tool_calls = []
             if message_obj.tool_calls:
@@ -112,6 +116,8 @@ class ResponseMixin:
             # Вместо warning-сообщения: стираем (не добавляем) пустой ответ ассистента
             # и перегенерируем со следующий ход с prefill 'Assistant:', чтобы модель начала
             # с текстового комментария перед вызовом инструмента.
+            # При активном reasoning это не нужно: модель уже «прокомментировала» ход в
+            # reasoning_content, поэтому пустой вызов принимаем и исполняем как обычно.
             self.on_system_msg(f"[NO COMMENT] Tool call `{tool_names[0]}` with no explanation before were rejected: rerunning with 'Assistant:' prefill.")
             return clean_content, False, False, "Assistant:"
 

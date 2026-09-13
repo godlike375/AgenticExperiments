@@ -131,6 +131,7 @@ class LLMAgent(
         self._depth: int = 0
         self._disable_per_msg_summarization = disable_per_msg_summarization
         self._compacted_task_ids: set[str] = set()
+        self._auto_summarize_suppressed = False
         self.task_plan: list[str] = []
         self.task_plan_map: dict = {}
 
@@ -402,7 +403,7 @@ class LLMAgent(
         prefill: Optional[str] = None,
         params: GenerationParams = None,
     ) -> tuple:
-        """Служебный вызов LLM (саммаризация, компактизация, consistency). При заданных on_service_stream_* колбэках стримится в отдельный канал со своей меткой. tools=True — текущий набор инструментов агента."""
+        """Служебный вызов LLM (саммаризация, компактизация, consistency). При заданных on_service_stream_* колбэках стримится в отдельный канал со своей меткой. tools=True — текущий набор инструментов агента. stop_check всегда передаётся (это стоп-событие пользователя), чтобы служебный стрим можно было прервать через watchdog — иначе компакция «глуха» к остановке."""
         callbacks = None
         if self.streaming_enabled and self.on_service_stream_chunk:
             callbacks = {
@@ -418,6 +419,7 @@ class LLMAgent(
             prefill=prefill,
             params=params,
             callbacks=callbacks,
+            stop_check=self._stop_check,
         )
 
     # --------------------------------------------------------
@@ -592,6 +594,9 @@ class LLMAgent(
         max_iter = max_iter if max_iter is not None else Config.MAX_ITER
         if self.self_consistency_mode:
             return self._chat_self_consistent(message, prefill)
+        # Новый ход пользователя: снимаем cooldown авто-компакции (следующая
+        # компакция снова разрешена один раз), прерванная продолжаться не должна.
+        self._auto_summarize_suppressed = False
         self._prepare_turn(message)
         return self._run_turn_loop(max_iter, prefill)
 
@@ -742,7 +747,8 @@ class LLMAgent(
                 continue
 
             self._compact_completed_tasks()
-            if self._get_context_usage_percent() >= self._current_summary_threshold():
+            if (not getattr(self, '_auto_summarize_suppressed', False)
+                    and self._get_context_usage_percent() >= self._current_summary_threshold()):
                 if getattr(self, '_is_subagent', False):
                     # Суб-агент: авто-суммаризация бессмысленна (история — клон родителя,
                     # сжатие ломает извлечение ответа и тратит лишние вызовы LLM). При

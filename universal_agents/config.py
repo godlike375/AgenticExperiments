@@ -16,9 +16,9 @@ class Config:
     SUMMARY_DUPLICATE_TEMP = round(BOOST_TEMP / 2, 2)  # буст при тождественном повторе саммари (мягче полного BOOST_TEMP)
 
     # Параметры генерации
-    TEMP = 0.33
-    TOP_P = 0.94
     MAX_CONTEXT_TOKENS = 50000
+    TEMP = 0.38
+    TOP_P = 0.935
     FREQUENCY_PENALTY = 0.0
     PRESENCE_PENALTY = 0.0
     MAX_OUTPUT_TOKENS = min(32000, int(MAX_CONTEXT_TOKENS / 1.5))
@@ -28,7 +28,11 @@ class Config:
 
     STREAM_ENABLED = True
 
-    KEEP_REASONING_CONTENT_IN_HISTORY = False
+    # Отправлять ли reasoning_content ассистента обратно в историю следующих запросов.
+    # Проверено на LM Studio + qwen3: Единственное, что роняет кэш целиком — смена reasoning_effort:
+    # сервер вставляет в начало промпта ~40 подпорных токенов, префикс расходится от позиции 0
+    # (одноразовый пересчёт при каждом /think-тоггле, это ожидаемо).
+    KEEP_REASONING_CONTENT_IN_HISTORY = True
 
     USE_RESPONSES_API = False
 
@@ -37,7 +41,7 @@ class Config:
     DEBUG_PREFIX_HASH_CHECK = True
 
     # Автоматическая суммаризация диалога
-    AUTO_SUMMARY_THRESHOLD = 80  # процент занятого контекста для начала авто-суммаризации
+    AUTO_SUMMARY_THRESHOLD = 85  # процент занятого контекста для начала авто-суммаризации
     AUTO_SUMMARY_PRESERVE_LAST = 1  # сколько последних сообщений не трогать
     AUTO_SUMMARY_REVIEW_PASS = True  # отревьювить черновик саммари: подчистить устаревшее + добавить пропущенное
     # Попыток перегенерации саммари при неудаче; между ними температура чуть растёт, чтобы не повторять ту же ошибку.
@@ -72,7 +76,7 @@ class Config:
 
     # Периферийное зрение read: шаг между строками растёт в ^PERIPHERAL_GAP_GROWTH
     # на каждом кольце от фокуса (меньше → плотнее).
-    PERIPHERAL_GAP_GROWTH = 1.45
+    PERIPHERAL_GAP_GROWTH = 1.6
     # Периферийные строки обрезаются до N символов (фокус — без лимита). 0 = не резать.
     PERIPHERAL_MAX_LINE_CHARS = 50
     # Периферия в каждую сторону ≤ PERIPHERAL_SIDE_FACTOR × размер фокуса строк.
@@ -84,8 +88,8 @@ class Config:
 
     # Лимит вывода любого инструмента (символов); read/search режут сами.
     # MAX_READ_LINES_PER_CALL — доп. лимит строк порционного чтения.
-    MAX_READ_CHARS_PER_CALL = 5000
-    MAX_READ_LINES_PER_CALL = 100
+    MAX_READ_CHARS_PER_CALL = 4500
+    MAX_READ_LINES_PER_CALL = 80
 
     # Отключает авто-суммаризацию большого вывода любых инструментов.
     DISABLE_TOOL_AUTO_SUMMARIZATION = True

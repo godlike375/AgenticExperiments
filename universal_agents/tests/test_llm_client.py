@@ -2,6 +2,7 @@ import unittest
 from types import SimpleNamespace
 from unittest import mock
 
+from universal_agents.config import Config
 from universal_agents.generation import GenerationParams
 from universal_agents.llm_client import LLMClient
 
@@ -104,6 +105,37 @@ class TestCall(unittest.TestCase):
         self.assertIsNone(result)
         self.assertEqual(err, "down")
         self.assertIsNone(usage)
+
+    def test_stream_failure_no_blocking_fallback_when_stopped(self):
+        """Если стрим не создался и пользователь запросил остановку, call() не должен
+        скатываться в блокирующий _call_chat_completions (его прервать нельзя)."""
+        with mock.patch("universal_agents.llm_client.LLMClient._call_via_chat_stream", return_value=None), \
+                mock.patch("universal_agents.llm_client.LLMClient._call_chat_completions") as blocking, \
+                mock.patch.object(Config, "STREAM_ENABLED", True), \
+                mock.patch.object(Config, "USE_RESPONSES_API", False):
+            result, err, usage = LLMClient.call(
+                [{"role": "user", "content": "hi"}],
+                callbacks={"on_stream_chunk": lambda c: None},
+                stop_check=lambda: True,
+            )
+        blocking.assert_not_called()
+        self.assertIsNone(result)
+        self.assertIn("stopped", err)
+
+    def test_chat_stream_creation_failure_keeps_error(self):
+        """Недоступный стрим возвращает кортеж ошибки (не None), чтобы call() пошёл по
+        пути ошибки, а не в блокирующий обычный вызов."""
+        fake_client = mock.Mock()
+        fake_client.chat.completions.create.side_effect = RuntimeError("boom")
+        with mock.patch("universal_agents.llm_client.LLMClient.get_client", return_value=fake_client), \
+                mock.patch("universal_agents.llm_client.LLMClient._call_chat_completions") as blocking:
+            result, err, usage = LLMClient._call_via_chat_stream(
+                [{"role": "user", "content": "hi"}], 0.3, 10, None, None, None, None, None, None,
+                {"on_stream_chunk": lambda c: None}, None,
+            )
+        blocking.assert_not_called()
+        self.assertIsNone(result)
+        self.assertIn("stream creation failed", err)
 
 
 if __name__ == "__main__":

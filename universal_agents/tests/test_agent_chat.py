@@ -355,6 +355,132 @@ class TestAgentChat(unittest.TestCase):
         # повтор был отброшен, вернулся свежий ответ
         self.assertEqual(result, "new answer")
 
+    def test_no_comment_rerun_when_reasoning_off(self):
+        agent = LLMAgent(system_prompt="sys")
+        agent.history.add(UserMessage("compute"))
+        msg = AssistantMessage(
+            content="",
+            tool_calls=[ToolCall(id="t1", name="double_me", arguments='{"value": 2}')],
+        )
+        text, tool_err, broken, rerun = agent._process_llm_response(msg)
+        self.assertEqual(rerun, "Assistant:")
+        self.assertEqual(text, "")
+        # пустой ответ не попал в историю, инструмент не исполнялся
+        roles = [m.to_api_dict()["role"] for m in agent.history]
+        self.assertEqual(roles, ["system", "user"])
+
+    def test_no_comment_accepted_when_reasoning_on(self):
+        agent = LLMAgent(
+            system_prompt="sys",
+            tools_config=["double_me"],
+            external_plugins={"double_me": double_me},
+        )
+        agent._thinking_enabled = True
+        msg = AssistantMessage(
+            content="",
+            tool_calls=[ToolCall(id="t1", name="double_me", arguments='{"value": 21}')],
+        )
+        text, tool_err, broken, rerun = agent._process_llm_response(msg)
+        self.assertIsNone(rerun)
+        roles = [m.to_api_dict()["role"] for m in agent.history]
+        self.assertIn("tool", roles)
+        tr = [m for m in agent.history.get_all() if m.to_api_dict()["role"] == "tool"][-1]
+        self.assertEqual(tr.content, "42")
+
+    def test_forced_compaction_short_history_returns_false(self):
+        agent = LLMAgent(system_prompt="sys")
+        with mock.patch("universal_agents.agent_mixins.memory_mixin.summarize_history_plain") as summ:
+            result = agent._auto_summarize_dialogue(force=True)
+        self.assertFalse(result)
+        summ.assert_not_called()
+
+    def test_forced_compaction_writes_summary(self):
+        agent = LLMAgent(system_prompt="sys")
+        agent.history.add(UserMessage("question one"))
+        agent.history.add(AssistantMessage(content="answer one"))
+        agent.history.add(UserMessage("question two"))
+        agent.history.add(AssistantMessage(content="answer two"))
+        ids = ["1.1", "1.2", "1.3", "1.4", "1.5", "2.1", "2.2", "2.3",
+               "3.1", "4.1", "4.2", "4.3", "5.1", "6.1", "6.2", "7.1", "7.2"]
+        summary_body = "".join(f"{section_id} content. " for section_id in ids) + "Compressed."
+        with mock.patch(
+            "universal_agents.agent_mixins.memory_mixin.summarize_history_plain",
+            return_value=summary_body,
+        ):
+            result = agent._auto_summarize_dialogue(force=True)
+        self.assertTrue(result)
+        user_msgs = [m for m in agent.history.get_all() if isinstance(m, UserMessage)]
+        self.assertTrue(any("Compressed" in (m.content or "") for m in user_msgs))
+
+    def test_auto_summarize_bails_on_user_stop(self):
+        agent = LLMAgent(system_prompt="sys")
+        agent.history.add(UserMessage("q"))
+        agent.history.add(AssistantMessage(content="a"))
+        agent.stop_event.set()
+        with mock.patch("universal_agents.agent_mixins.memory_mixin.summarize_history_plain") as summ:
+            result = agent._auto_summarize_dialogue(force=True)
+        self.assertFalse(result)
+        summ.assert_not_called()
+        # история не изменена: роли те же, summary-сообщение не добавлено
+        roles = [m.to_api_dict()["role"] for m in agent.history]
+        self.assertEqual(roles, ["system", "user", "assistant"])
+
+    def test_auto_summarize_sets_suppression_on_user_stop(self):
+        agent = LLMAgent(system_prompt="sys")
+        agent.history.add(UserMessage("q"))
+        agent.history.add(AssistantMessage(content="a"))
+        agent.stop_event.set()
+        with mock.patch("universal_agents.agent_mixins.memory_mixin.summarize_history_plain") as summ:
+            result = agent._auto_summarize_dialogue(force=True)
+        self.assertFalse(result)
+        self.assertTrue(agent._auto_summarize_suppressed)
+
+    def test_auto_summarize_clears_suppression_on_success(self):
+        agent = LLMAgent(system_prompt="sys")
+        agent._auto_summarize_suppressed = True
+        agent.history.add(UserMessage("question one"))
+        agent.history.add(AssistantMessage(content="answer one"))
+        agent.history.add(UserMessage("question two"))
+        agent.history.add(AssistantMessage(content="answer two"))
+        ids = ["1.1", "1.2", "1.3", "1.4", "1.5", "2.1", "2.2", "2.3",
+               "3.1", "4.1", "4.2", "4.3", "5.1", "6.1", "6.2", "7.1", "7.2"]
+        summary_body = "".join(f"{section_id} content. " for section_id in ids) + "Compressed."
+        with mock.patch(
+            "universal_agents.agent_mixins.memory_mixin.summarize_history_plain",
+            return_value=summary_body,
+        ):
+            result = agent._auto_summarize_dialogue(force=True)
+        self.assertTrue(result)
+        self.assertFalse(agent._auto_summarize_suppressed)
+
+    def test_auto_summarize_suppression_skips_and_chat_resets(self):
+        agent = LLMAgent(system_prompt="sys")
+        fake = AssistantMessage(content="answer")
+        # История над порогом, но компакция подавлена прерванной попыткой.
+        agent._auto_summarize_suppressed = True
+        with mock.patch("universal_agents.agent.LLMClient.call", return_value=(fake, None, None)), \
+                mock.patch.object(agent, "_auto_summarize_dialogue") as auto, \
+                mock.patch.object(agent, "_get_context_usage_percent", return_value=99.0), \
+                mock.patch.object(agent, "_autosave"):
+            agent.history.add(UserMessage("q"))
+            agent.history.add(AssistantMessage(content="a"))
+            agent._run_turn_loop(max_iter=1, prefill="")
+        auto.assert_not_called()
+        # Новый ход пользователя через chat() снимает cooldown.
+        fake2 = AssistantMessage(content="fresh answer")
+        with mock.patch("universal_agents.agent.LLMClient.call", return_value=(fake2, None, None)), \
+                mock.patch.object(agent, "_autosave"):
+            result = agent.chat("next user turn")
+        self.assertIn("fresh answer", result)
+        self.assertFalse(agent._auto_summarize_suppressed)
+
+    def test_service_llm_call_passes_stop_check(self):
+        agent = LLMAgent(system_prompt="sys")
+        with mock.patch("universal_agents.agent.LLMClient.call") as mocked:
+            agent.service_llm_call([{"role": "user", "content": "hi"}])
+        _, kwargs = mocked.call_args
+        self.assertIs(kwargs["stop_check"], agent._stop_check)
+
 
 if __name__ == "__main__":
     unittest.main()

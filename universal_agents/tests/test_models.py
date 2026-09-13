@@ -22,13 +22,18 @@ class TestMessages(unittest.TestCase):
     def test_assistant_message_api_dict(self):
         tc = ToolCall(id="t1", name="read", arguments="{}")
         msg = AssistantMessage(content="hi", tool_calls=[tc], reasoning_content="thinking")
-        d = msg.to_api_dict()
-        self.assertEqual(d["role"], "assistant")
-        self.assertEqual(d["content"], "hi")
-        # По умолчанию reasoning_content не попадает в контекст
-        self.assertNotIn("reasoning_content", d)
-        self.assertEqual(len(d["tool_calls"]), 1)
-        self.assertTrue(msg.has_tool_calls())
+        original = Config.KEEP_REASONING_CONTENT_IN_HISTORY
+        try:
+            Config.KEEP_REASONING_CONTENT_IN_HISTORY = False
+            d = msg.to_api_dict()
+            self.assertEqual(d["role"], "assistant")
+            self.assertEqual(d["content"], "hi")
+            # При KEEP_REASONING_CONTENT_IN_HISTORY=False reasoning_content не попадает в контекст.
+            self.assertNotIn("reasoning_content", d)
+            self.assertEqual(len(d["tool_calls"]), 1)
+            self.assertTrue(msg.has_tool_calls())
+        finally:
+            Config.KEEP_REASONING_CONTENT_IN_HISTORY = original
 
     def test_assistant_message_reasoning_toggle(self):
         tc = ToolCall(id="t1", name="read", arguments="{}")
