@@ -8,6 +8,10 @@ from universal_agents.llm_client import apply_prefill
 from universal_agents.models import AssistantMessage, ToolCall, ToolResult
 from universal_agents.tool_parsing import tc_name, tc_args, detect_broken_call, args_are_valid
 
+# Prefill для перегенерации голого вызова инструмента без пояснения.
+# 'Assistant:' — стартовая приставка, после которой модель должна написать текст.
+_NO_COMMENT_PREFILL = "Assistant:"
+
 
 class ResponseMixin:
     """Преобразует сырой ответ LLM в сообщение истории и управляет его добавлением/рендером."""
@@ -85,6 +89,13 @@ class ResponseMixin:
 
         content = message_obj.content or ""
         clean_content = content.strip()
+        # Впрыснутый prefill («Assistant:») сам по себе объяснением не считается:
+        # модель должна написать текст сама. Обычно prefill попадает в content как
+        # отдельное сообщение (тогда substantive == clean_content); если же шлюз
+        # приклеил его к ответу — срезаем маркер перед проверкой.
+        substantive = clean_content
+        if substantive.startswith(_NO_COMMENT_PREFILL):
+            substantive = substantive[len(_NO_COMMENT_PREFILL):].strip()
         assistant_msg = self._build_assistant_msg(message_obj, clean_content)
 
         if assistant_msg.has_tool_calls():
@@ -106,20 +117,20 @@ class ResponseMixin:
 
         if (
             assistant_msg.has_tool_calls()
-            and not clean_content
+            and not substantive
             and self._reasoning_effort == "none"
         ):
             tool_names = [tc.name for tc in assistant_msg.tool_calls]
-            assistant_msg.tool_calls = []
-            if message_obj.tool_calls:
-                message_obj.tool_calls = []
             # Вместо warning-сообщения: стираем (не добавляем) пустой ответ ассистента
-            # и перегенерируем со следующий ход с prefill 'Assistant:', чтобы модель начала
+            # и перегенерируем следующий ход с prefill, чтобы модель начала
             # с текстового комментария перед вызовом инструмента.
             # При активном reasoning это не нужно: модель уже «прокомментировала» ход в
             # reasoning_content, поэтому пустой вызов принимаем и исполняем как обычно.
-            self.on_system_msg(f"[NO COMMENT] Tool call `{tool_names[0]}` with no explanation before were rejected: rerunning with 'Assistant:' prefill.")
-            return clean_content, False, False, "Assistant:"
+            assistant_msg.tool_calls = []
+            if message_obj.tool_calls:
+                message_obj.tool_calls = []
+            self.on_system_msg(f"[NO COMMENT] Tool call `{tool_names[0]}` with no explanation before were rejected: rerunning with '{_NO_COMMENT_PREFILL}' prefill.")
+            return clean_content, False, False, _NO_COMMENT_PREFILL
 
         if not clean_content and not assistant_msg.has_tool_calls():
             self.on_system_msg("[EMPTY RESPONSE] Model returned no content. Discarding and retrying...")

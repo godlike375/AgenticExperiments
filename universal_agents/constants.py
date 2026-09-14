@@ -1,8 +1,8 @@
 """Общие константы фреймворка."""
 
 # Маркер, которым системные сообщения помечаются в истории и промптах
-ENVIRONMENT_PREFIX = '[[SYSTEM]]'
-ENVIRONMENT_PREFIX_END = '[[/SYSTEM]]'
+ENVIRONMENT_PREFIX = '<SYSTEM>'
+ENVIRONMENT_PREFIX_END = '</SYSTEM>'
 
 # Инструменты, которые нельзя отключить
 CORE_TOOLS = ("load_tool", "unload_tool")

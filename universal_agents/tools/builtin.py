@@ -189,3 +189,21 @@ def make_plan(agent: LLMAgent, plan: list) -> str:
     from universal_agents.task_tracker import set_plan
 
     return set_plan(agent, plan)
+
+
+@tool(
+    description="Answers any question or request that the system addressed to the model. "
+                "If a tool (e.g. edit_file) showed a preview and is awaiting a decision, call "
+                "answer in your very next message with your reply — the text is passed to the "
+                "pending operation, which interprets it (e.g. for edit_file: answer('yes') to "
+                "apply the edit, answer('no') to cancel). Never leave such a request answered "
+                "in plain text only — call this tool.",
+    short_description="answer to system",
+    text=("str", "Your reply to the pending question from the system"),
+)
+def answer(agent: LLMAgent, text: str) -> str:
+    op = agent.pop_pending_operation()
+    if not op:
+        return ok(f"Recorded: {text}")
+    result = op["resolve"](agent, text)
+    return ok(f" {result}") if result else ok(" Done.")

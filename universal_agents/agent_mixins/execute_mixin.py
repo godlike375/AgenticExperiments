@@ -116,6 +116,41 @@ class ExecuteMixin:
                             results.append(ToolResult.user_denied(tc.id, name))
                             continue
 
+                # Многофазное взаимодействие: dry_run → превью → answer() → реальное выполнение.
+                if tool_info.get('requires_model_confirmation', False):
+                    handler = tool_info['handler']
+                    dry_run_args = {**args_dict, "dry_run": "true"}
+                    try:
+                        if tool_info.get('has_agent_param') or tool_info.get('is_instance_method'):
+                            result = handler(self, **dry_run_args)
+                        else:
+                            result = handler(**dry_run_args)
+                    except GenerationInterrupted:
+                        raise
+                    except Exception as e:
+                        self.on_system_msg(f"⚠️ [ERROR] Tool '{name}' dry_run failed: {e}")
+                        results.append(ToolResult.error(tc.id, name, str(e)))
+                        continue
+
+                    # Инструмент обязан вернуть (preview, resolve, ask) из dry_run:
+                    # ask — строка с инструкцией зарезолвить операцию через 'answer',
+                    # которую инструмент составляет сам. Без ask инструмент сломан.
+                    if not (isinstance(result, tuple) and len(result) == 3):
+                        self.on_system_msg(f"⚠️ [ERROR] Tool '{name}' with requires_model_confirmation must return (preview, resolve, ask) from dry_run.")
+                        results.append(ToolResult.error(tc.id, name, "Tool configuration error: dry_run must return (preview, resolve, ask)."))
+                        continue
+                    preview, resolve, ask = result
+
+                    self.set_pending_operation({
+                        "resolve": resolve,
+                        "tool_name": name,
+                    })
+
+                    confirm_msg = f"{preview}\n\n{ask}"
+                    self.on_system_msg(f"[CONFIRM] Tool '{name}' awaits LLM confirmation.")
+                    results.append(ToolResult(tc.id, name, confirm_msg))
+                    continue
+
                 try:
                     handler = tool_info['handler']
                     if tool_info.get('has_agent_param') or tool_info.get('is_instance_method'):

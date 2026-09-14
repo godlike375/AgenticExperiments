@@ -134,6 +134,7 @@ class LLMAgent(
         self._auto_summarize_suppressed = False
         self.task_plan: list[str] = []
         self.task_plan_map: dict = {}
+        self._pending_operation: Optional[dict] = None
 
         # Авто-сохранение (защита от сбоев): один файл на диалог с меткой времени
         # запуска/сброса; перезаписывается при каждом снимке. Ротация оставляет
@@ -243,6 +244,19 @@ class LLMAgent(
             self.token_tracker.update_from_usage(usage)
 
     # --------------------------------------------------------
+    # Pending operations (для requires_model_confirmation)
+    # --------------------------------------------------------
+    def set_pending_operation(self, op: dict) -> None:
+        """Сохраняет отложенную операцию (handler + args) для подтверждения моделью."""
+        self._pending_operation = op
+
+    def pop_pending_operation(self) -> Optional[dict]:
+        """Извлекает и удаляет отложенную операцию. Возвращает None, если операций нет."""
+        op = self._pending_operation
+        self._pending_operation = None
+        return op
+
+    # --------------------------------------------------------
     # Авто-сохранение (защита от сбоев)
     # --------------------------------------------------------
     def _build_save_extras(self) -> dict:
@@ -326,6 +340,7 @@ class LLMAgent(
         self._last_response_id = None
         self._last_sent_msg_count = 0
         self._compacted_task_ids = set()
+        self._pending_operation = None
         self.reset_autosave_path()
         self._on_history_changed()
 
@@ -717,10 +732,33 @@ class LLMAgent(
 
             if rerun_prefill:
                 # [NO COMMENT]: модель вызвала инструмент без текста. Перегенерируем
-                # следующий ход с prefill (напр. 'AI:'), не добавляя пустой ответ в историю.
+                # следующий ход с prefill (напр. 'Assistant:'), не добавляя пустой ответ
+                # в историю. Этот блок стоит ДО guard'а pending-операции: иначе guard
+                # своим continue съел бы prefill и цикл шёл бы впустую (без 'Assistant:').
                 pending_prefill = rerun_prefill
                 self._last_response_id = None
                 self._last_sent_msg_count = 0
+                continue
+
+            if (self._pending_operation is not None
+                    and not message_obj.tool_calls
+                    and not tool_error_occurred):
+                # Модель ответила текстом, не вызвав 'answer' — ход неудачный.
+                # Стираем неудачный ответ и все предыдущие наги (как при зацикливании),
+                # чтобы мусор не копился в контексте, и перегенерируем с повышенной
+                # температурой.
+                self._erase_last_assistant()
+                self._drop_guard_nags()
+                self.history.add(UserMessage(
+                    f"{ENVIRONMENT_PREFIX} You can't continue unless you answer to the system question using 'answer' tool. "
+                    "Call it ritgh now!"
+                    f"{ENVIRONMENT_PREFIX_END}"
+                ))
+                self.on_render(self.history.get_all()[-1])
+                self._temp_override = Config.ERROR_RECOVERY_TEMP
+                self._last_response_id = None
+                self._last_sent_msg_count = 0
+                self._on_history_changed()
                 continue
 
             pending_prefill = None

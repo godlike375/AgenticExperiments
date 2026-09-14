@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from universal_agents.models import AssistantMessage, ToolResult
+from universal_agents.models import AssistantMessage, ToolResult, UserMessage
 
 
 class HistoryMixin:
@@ -36,6 +36,22 @@ class HistoryMixin:
             self.history.normalize()
             self._on_history_changed()
         return len(removed)
+
+    def _drop_guard_nags(self) -> int:
+        """Удаляет замыкающие UserMessage-наги guard'а answer-required («You can't continue...
+        ...answer»), чтобы после каждого срабатывания guard'а в истории оставался только
+        свежий наг, а не их накопление. Возвращает число удалённых."""
+        removed = 0
+        msgs = self.history.get_all()
+        while msgs and isinstance(msgs[-1], UserMessage):
+            content = getattr(msgs[-1], "content", "") or ""
+            if "You can't continue" not in content or "answer" not in content.lower():
+                break
+            self.history.remove_at({len(msgs) - 1})
+            self.history.normalize()
+            removed += 1
+            msgs = self.history.get_all()
+        return removed
 
     def _get_last_answer_text(self) -> Optional[str]:
         """Текст последнего текстового ответа ассистента из истории."""

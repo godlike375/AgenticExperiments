@@ -14,8 +14,8 @@ LOADABLE_TOOLS = [
     'run_bash_host'
 ]
 
-PRELOADED_TOOLS = ("load_tool", "make_plan", "have_done", 'read', 'edit_file', 'cwd', 'search',
-                   'run_powershell')
+PRELOADED_TOOLS = ("load_tool", 'read', 'edit_file', 'cwd', 'search',
+                   'run_powershell', 'answer')
 
 
 def build_allowed_tools(loadable: Iterable[str], preloaded: Iterable[str]) -> list[str]:

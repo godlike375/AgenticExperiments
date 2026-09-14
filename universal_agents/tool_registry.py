@@ -43,6 +43,7 @@ def build_tool_dict(func: Callable, is_instance_method: bool) -> dict:
         "is_instance_method": is_instance_method,
         "has_agent_param": getattr(func, '_has_agent_param', False),
         "requires_confirmation": getattr(func, '_requires_confirmation', False),
+        "requires_model_confirmation": getattr(func, '_requires_model_confirmation', False),
         "path_safety": getattr(func, '_path_safety', False),
         "safe_in_trusted": getattr(func, '_safe_in_trusted', False),
     }

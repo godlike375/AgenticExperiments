@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import datetime
+import difflib
 import os
 import re as _re
 import fnmatch as _fnmatch
+from pathlib import Path
 from typing import Optional
 
 from universal_agents.config import Config
@@ -84,18 +86,19 @@ def cwd(path: str = None):
     return os.getcwd()
 
 @tool(
-    description="Edits a file by line range: replaces the 1-based inclusive lines start_line..end_line with 'new'. Creates file with parent dirs if it doesn't exist",
+    description="Edits a file: the 1-based inclusive lines start_line..end_line are REPLACED with 'new_text'. The range can be one line or several lines — always a replace of that range, never insert/append elsewhere. Lines outside the range stay untouched. Creates file with parent dirs if it doesn't exist",
     short_description="edit file text",
     requires_confirmation=True,
+    requires_model_confirmation=True,
     safe_in_trusted=True,
-    path=("str", "File path. Will be auto-created if missing"),
+    path=("str", "File path. Auto-created if missing"),
     #old=("str", "Exact text to replace. Supports \\n for multiline blocks. If '' or nothing passed then replaces whole content. For new files use '' to set initial content"),
-    new=("str", "New text to replace the range with. Supports \\n. Be careful with indentation in the range."),
+    start_line=("int", "1-based inclusive start line of the range to replace with 'new_text'. Default 1"),
+    end_line=("int", "1-based inclusive end line of the range to replace with 'new_text'. If omitted: end of file when start_line omitted too, else a single line at start_line"),
+    new_text=("str", "New content that replaces the range start_line..end_line. Supports \\n. Do NOT re-include lines that exist outside the range — they are NOT deleted and would duplicate; include only what the range itself should become. Be careful to not break existing indentation."),
     #mode=("str", "'one' for 1 exclusive match, otherwise 'all' (default 'one')")
-    start_line=("int", "1-based inclusive start line of the range to replace with 'new'. Default 1"),
-    end_line=("int", "1-based inclusive end line of the range to replace with 'new'. If omitted: end of file when start_line omitted too, else a single line at start_line")
 )
-def edit_file(path: str, new: str, start_line: int = None, end_line: int = None):
+def edit_file(path: str, new_text: str, start_line: int = None, end_line: int = None, dry_run: str = ""):
     created_file = False
     if not os.path.isfile(path):
         # Создаём файл, если его нет
@@ -122,31 +125,113 @@ def edit_file(path: str, new: str, start_line: int = None, end_line: int = None)
     end = max(start, min(end, len(lines)))
 
     replaced_lines = lines[start - 1:end]
-    old_block = "\n".join(replaced_lines)
 
     head = lines[:start - 1]
     tail = lines[end:]
 
-    new_clean = new.rstrip('\n')
+    new_clean = new_text.rstrip('\n')
     if head or tail:
         new_content = "\n".join(head + [new_clean] + tail)
     else:
         new_content = new_clean
 
-    if new_content == content:
-        return f"Nothing changed: lines {start}..{end} already equal to '{new[:20]}...'"
+    if new_content == content or new_content == content.rstrip('\n'):
+        return f"Nothing changed: lines {start}..{end} already equal to '{new_text[:20]}...'"
+
+    if dry_run:
+        # Дифф изолируем на заменяемый диапазон: контекст (±1) берём только из
+        # стабильного head/tail, чтобы изменение не «протекало» на соседние строки.
+        preview = _make_diff_preview(
+            "\n".join(replaced_lines), new_clean, path,
+            replaced=len(replaced_lines),
+            added=len(new_clean.splitlines()),
+            context_before=head[-1] if head else "",
+            context_after=tail[0] if tail else "",
+        )
+
+        def resolve(agent, text):
+            raw = (text or "").strip().lower()
+            first = _re.sub(r"[^\w]+", "", raw.split(" ", 1)[0]) if raw else ""
+            if first in ("yes", "y", "true", "да"):
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(new_content)
+                return f"Replaced L{start}-{end} in {Path(path).name}"
+            return None
+
+        # Инструмент сам говорит модели, как ему ответить. execute_mixin лишь
+        # склеит это с превью. Ответ инструмента всегда должен вызывать 'answer'.
+        ask = (
+            f"{ENVIRONMENT_PREFIX} ATTENTION: this needs assistant's (AI) confirmation. Call 'answer' "
+            f"with text='yes' to apply it or text='no' to cancel. You can't continue with common prose {ENVIRONMENT_PREFIX_END}"
+        )
+        return preview, resolve, ask
 
     with open(path, "w", encoding="utf-8") as f:
         f.write(new_content)
 
-    result = [f"Replaced lines {start}-{end} with:"]
-    for line in old_block.splitlines():
-        result.append(f"   - {line}")
-    result.append("---")
-    for line in new_clean.splitlines():
-        result.append(f"   + {line}")
-
+    new_lines = new_clean.splitlines()
+    result = [f"L{start}-{end} → {len(new_lines)} lines:"]
+    for i, line in enumerate(new_lines):
+        result.append(f"+ L{start + i}: {line}")
     return "\n".join(result)
+
+
+def _make_diff_preview(old_text: str, new_text: str, path: str,
+                       replaced: int = 0, added: int = 0,
+                       context_before: str = "", context_after: str = "") -> str:
+    """Компактный git-style дифф для превью edit_file.
+
+    Только изменённые хунки, вокруг каждого изменения — один ряд контекста
+    (до и/или после, если существует). Маркеры как в git: ' ' — неизменный
+    контекст, '+' — добавлено, '-' — удалено. Лишние вспомогательные символы
+    не выводятся; строки — это буквальные строки файла.
+    context_before/context_after — явные строки контекста (из head/tail),
+    используются для ±1 строк вокруг диапазона замены, чтобы покрыть границы.
+    """
+    old_lines = old_text.splitlines()
+    new_lines = new_text.splitlines()
+    sm = difflib.SequenceMatcher(None, old_lines, new_lines)
+    changed = False
+    rows: list[tuple[str, str]] = []
+    # Дедупликация ТОЛЬКО подряд идущих контекстных строк одинакового
+    # содержимого (граница, общая для двух соседних хунков). Добавленные и
+    # удалённые строки НИКОГДА не схлопываются: каждая соответствует реальной
+    # строке файла, даже если текст повторяется (два `return False` подряд и т.п.).
+
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        if tag == "equal":
+            continue
+        changed = True
+        old_context_before = i1 - 1 if i1 > 0 else None
+        new_context_after = j2 if j2 < len(new_lines) else None
+
+        def _add_ctx(line: str):
+            if rows and rows[-1] == (" ", line):
+                return
+            rows.append((" ", line))
+
+        if context_before:
+            _add_ctx(context_before)
+        elif old_context_before is not None:
+            _add_ctx(old_lines[old_context_before])
+        for line in old_lines[i1:i2]:
+            rows.append(("-", line))
+        for line in new_lines[j1:j2]:
+            rows.append(("+", line))
+        if context_after and new_context_after is None:
+            _add_ctx(context_after)
+        elif new_context_after is not None:
+            _add_ctx(new_lines[new_context_after])
+
+    if not changed:
+        return f"--- {path}: -{replaced}+{added}"
+    parts = [f"--- {path}: -{replaced}+{added}"]
+    MAX_PREVIEW_LINES = 60
+    if len(rows) > MAX_PREVIEW_LINES:
+        rows = rows[:MAX_PREVIEW_LINES] + [(" ", f"... truncated ({len(rows)} lines total)")]
+    for mark, line in rows:
+        parts.append(f"{mark}{line}")
+    return "\n".join(parts)
 
 
 CHARS_PER_TOKEN = Config.CHARS_PER_TOKEN
@@ -598,8 +683,8 @@ def search(pattern: str, path: str = ".", include: str = None, exclude: str = No
         formatted = []
         for block in blocks:
             for i in block:
-                marker = "> " if matcher(lines[i]) else "  "
-                formatted.append(f"{i + 1:4d} |{marker}{lines[i].rstrip()}")
+                marker = ">" if matcher(lines[i]) else " "
+                formatted.append(f"{i + 1} {marker} {lines[i].rstrip()}")
             formatted.append("     ...")
 
         block_text = f"\n{filepath}:\n" + "\n".join(formatted)
