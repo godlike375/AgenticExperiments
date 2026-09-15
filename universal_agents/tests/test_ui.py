@@ -22,12 +22,19 @@ class TestCLIPollInput(unittest.TestCase):
         self.assertEqual(list(cli._line_queue), [])
 
     def test_ignores_empty_injected_line(self):
-        """Пустая строка ('\n', инжектированная _request_stop для разблокировки воркера)
-        не должна трактоваться как пользовательский ввод и вызывать повторное прерывание."""
+        """Пустая строка ('\n', инжектированная _request_stop для разблокировки)
+        не должна трактоваться как пользовательский ввод; она выбрасывается."""
         cli = self._make_cli()
         cli._line_queue.append("\n")
         self.assertIsNone(cli._poll_input())
-        # строка остаётся в очереди — её может прочитать ожидающий воркер (_get_line)
+        self.assertEqual(list(cli._line_queue), [])
+
+    def test_drains_wakeups_and_sees_text_behind_them(self):
+        """Накопленные '\n' не должны скрывать текст пользователя позади себя: иначе
+        во время генерации реальное сообщение не видно монитору (ввод «молчит»)."""
+        cli = self._make_cli()
+        cli._line_queue.extend(["\n", "продолжай\n", "\n"])
+        self.assertEqual(cli._poll_input(), "продолжай")
         self.assertEqual(list(cli._line_queue), ["\n"])
 
     def test_ignores_command(self):
@@ -40,6 +47,98 @@ class TestCLIPollInput(unittest.TestCase):
         cli = self._make_cli()
         cli._line_queue.append("q\n")
         self.assertEqual(cli._poll_input(), "q")
+
+
+class TestConfirmCoordination(unittest.TestCase):
+    """Подтверждение инструмента обслуживает главный поток монитора (а не гонка с ним):
+    ответ на (y/n) не может быть перехвачен как текст-прерывание."""
+
+    def _make_cli(self):
+        agent = LLMAgent(system_prompt="sys")
+        cli = CLI(agent)
+        cli._line_queue = collections.deque()
+        cli._line_lock = threading.Lock()
+        cli._line_cond = threading.Condition(cli._line_lock)
+        return cli, agent
+
+    def _wait_request(self, cli):
+        deadline = time.time() + 5
+        while cli._confirm_request is None and time.time() < deadline:
+            time.sleep(0.01)
+        return cli._confirm_request is not None
+
+    def test_agent_on_confirm_is_cli(self):
+        cli, agent = self._make_cli()
+        self.assertEqual(agent.on_confirm.__func__, cli._ask_confirm.__func__)
+
+    def test_confirm_y_returns_true(self):
+        cli, agent = self._make_cli()
+        result = {}
+
+        def worker():
+            result["answer"] = cli._ask_confirm("edit", {"path": "a.py"})
+
+        t = threading.Thread(target=worker, daemon=True)
+        t.start()
+        self.assertTrue(self._wait_request(cli))
+        cli._inject_line("y\n")
+        with mock.patch("universal_agents.ui.ConsoleUI.system_msg"):
+            cli._answer_next_confirm()
+        t.join(5)
+        self.assertTrue(result.get("answer"))
+
+    def test_confirm_any_text_denies_but_keeps_text_as_message(self):
+        cli, agent = self._make_cli()
+        result = {}
+
+        def worker():
+            result["answer"] = cli._ask_confirm("edit", {})
+
+        t = threading.Thread(target=worker, daemon=True)
+        t.start()
+        self.assertTrue(self._wait_request(cli))
+        cli._inject_line("не подтверждаю, сделай иначе\n")
+        with mock.patch("universal_agents.ui.ConsoleUI.system_msg"):
+            cli._answer_next_confirm()
+        t.join(5)
+        self.assertFalse(result.get("answer"))
+        # Текст не потерян — он станет сообщением пользователя после шага.
+        self.assertEqual(agent.take_pending_interrupt(), "не подтверждаю, сделай иначе")
+
+    def test_confirm_q_denies_and_requests_stop(self):
+        cli, agent = self._make_cli()
+        result = {}
+
+        def worker():
+            result["answer"] = cli._ask_confirm("edit", {})
+
+        t = threading.Thread(target=worker, daemon=True)
+        t.start()
+        self.assertTrue(self._wait_request(cli))
+        cli._inject_line("q\n")
+        with mock.patch("universal_agents.ui.ConsoleUI.system_msg"):
+            cli._answer_next_confirm()
+        t.join(5)
+        self.assertFalse(result.get("answer"))
+        self.assertTrue(agent.stop_event.is_set())
+
+    def test_ask_confirm_stops_if_stop_event_set_while_waiting(self):
+        cli, agent = self._make_cli()
+        result = {}
+        started = threading.Event()
+
+        def worker():
+            started.set()
+            result["answer"] = cli._ask_confirm("edit", {})
+
+        t = threading.Thread(target=worker, daemon=True)
+        t.start()
+        self.assertTrue(self._wait_request(cli))
+        # Монитор умер/не пришёл — но стоп-запрос всё равно разблокирует ожидание.
+        agent.request_stop()
+        t.join(5)
+        self.assertFalse(t.is_alive())
+        self.assertFalse(result.get("answer"))
 
 
 class TestCompactHistory(unittest.TestCase):

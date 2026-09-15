@@ -1,3 +1,5 @@
+import threading
+import time
 import unittest
 from types import SimpleNamespace
 from unittest import mock
@@ -5,6 +7,13 @@ from unittest import mock
 from universal_agents.config import Config
 from universal_agents.generation import GenerationParams
 from universal_agents.llm_client import LLMClient, StreamSession
+
+
+def _chunk(delta=None, usage=None):
+    return SimpleNamespace(
+        choices=[SimpleNamespace(delta=delta)],
+        usage=usage,
+    )
 
 
 class TestStream(unittest.TestCase):
@@ -163,3 +172,50 @@ class TestStreamSession(unittest.TestCase):
         self.assertTrue(stopped)
         self.assertEqual(session.acc.content, "ab")
         self.assertTrue(close_calls)
+
+    def test_consume_watchdog_covers_first_chunk_wait(self):
+        """Stop во время ожидания ПЕРВОГО чанка закрывает стрим и завершает consume.
+        До починки watchdog стартовал после первого чанка, и 'q' не работал, пока сервер
+        долго считал префилл (ввод выглядел замороженным)."""
+        released = threading.Event()
+
+        class BlockingStream:
+            def __next__(self):
+                while not released.wait(0.02):
+                    pass
+                raise StopIteration
+
+            def close(self):
+                released.set()
+
+        stop_evt = threading.Event()
+        with mock.patch("universal_agents.llm_client.LLMClient.stream", return_value=BlockingStream()):
+            session = StreamSession(
+                [{"role": "user", "content": "hi"}],
+                on_stream_chunk=lambda _: None,
+            )
+        result = {}
+
+        def consumer():
+            result["res"] = session.consume(stop_check=stop_evt.is_set)
+
+        t = threading.Thread(target=consumer, daemon=True)
+        t.start()
+        time.sleep(0.2)
+        stop_evt.set()
+        t.join(3)
+        self.assertFalse(t.is_alive(), "consume завис на ожидании первого чанка после stop")
+        self.assertTrue(released.is_set(), "watchdog не закрыл стрим на первой фазе")
+        self.assertIn("res", result)
+
+    def test_consume_stop_already_set_returns_stopped(self):
+        """Если stop запрошен ещё до начала потребления — блокирующий цикл не начинается."""
+        with mock.patch("universal_agents.llm_client.LLMClient.stream",
+                        return_value=iter([self._chunk(SimpleNamespace(content="never", tool_calls=None, reasoning_content=None))])):
+            session = StreamSession(
+                [{"role": "user", "content": "hi"}],
+                on_stream_chunk=lambda _: None,
+            )
+            error, stopped = session.consume(stop_check=lambda: True)
+        self.assertTrue(stopped)
+        self.assertEqual(error, "stopped")

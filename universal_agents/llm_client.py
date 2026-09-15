@@ -247,23 +247,25 @@ class StreamSession:
         Колбэки жизненного цикла после потребления (on_stream_end, on_reasoning_end) —
         контракт вызывающего (единый для обоих потребителей).
 
-        Watchdog стартует ПОСЛЕ первого чанка — это исключает гонку с error-генераторами,
-        где close() подавляет yield и превращает ошибку в пустой ответ. Для реальных
-        HTTP-стримов next() ограничен timeout параметра create(); watcher нужен для
-        отмены приостановленного стриминга в последующих чанках."""
+        Watchdog стартует ДО первого чанка: первый next() может блокироваться на время
+        префилла длинного контекста/сетевой задержки, и без него запрос остановки
+        пользователя ('q') некому обработать. Стриму с ошибкой создания (error-generator)
+        ранний watcher не мешает: тот не управляет реальным HTTP-соединением, а при
+        запрошенной остановке подавление его ошибки и не нужно.
+        """
         error = ""
         stopped = False
         _watch_done = threading.Event()
         try:
+            # Стоп уже запрошен до начала потребления — не начинаем блокирующий цикл.
+            if stop_check and stop_check():
+                return "stopped", True
             if on_stream_start:
                 on_stream_start()
-            first = next(self._raw, None)
-            if first is None:
-                return "empty stream", False
-            if isinstance(first, dict) and "error" in first:
-                return f"stream creation failed: {first['error']}", False
-            # Watchdog: закрывает соединение при остановке пользователя.
-            # Запускается после первого чанка, чтобы не гоняться с error-generator.
+            # Watchdog: закрывает соединение при остановке пользователя. Стартует ДО
+            # первого чанка, чтобы прервать долгий префилл/сетевую задержку первого
+            # next(). Закрытие стрима подавит и genuine-ошибку, и error-generator — но
+            # оба раза это происходит только когда пользователь сам запросил остановку.
             if stop_check is not None:
                 def _watcher():
                     while not _watch_done.is_set():
@@ -272,6 +274,11 @@ class StreamSession:
                             break
                         _watch_done.wait(0.05)
                 threading.Thread(target=_watcher, daemon=True).start()
+            first = next(self._raw, None)
+            if first is None:
+                return "empty stream", False
+            if isinstance(first, dict) and "error" in first:
+                return f"stream creation failed: {first['error']}", False
             self.acc.process(first)
             for chunk in self._raw:
                 self.acc.process(chunk)

@@ -45,20 +45,22 @@ class TestStreamInterrupt(unittest.TestCase):
 
     def test_stop_check_shortcuts_stream_returns_partial(self):
         agent = self.make_streaming_agent()
+        seen = []
+        agent.on_stream_chunk = seen.append
 
         def stream(*args, **kwargs):
             yield _chunk(_delta(content="hello"))
             yield _chunk(_delta(content=" world"))
             yield _chunk(_delta(content=" never seen"))
 
-        stop_calls = []
-
         def stop_check():
-            # останавливаем после второго чанка — третий не должен попасть в ответ
-            stop_calls.append(1)
-            return len(stop_calls) >= 2
+            # останавливаем после накопления "hello world" — третий чанк не должен
+            # попасть в ответ. Критерий по содержимому, а не по числу вызовов: watcher
+            # (закрывающий стрим) и основной цикл зовут stop_check на разных фазах.
+            return "hello world" in "".join(seen)
 
-        with mock.patch("universal_agents.agent.LLMClient.stream", side_effect=stream):
+        with mock.patch("universal_agents.agent.LLMClient.stream", side_effect=stream), \
+             mock.patch("universal_agents.llm_client.LLMClient.close_stream"):
             msg, err, usage = agent._call_with_streaming([], stop_check=stop_check)
 
         self.assertIsNone(err)

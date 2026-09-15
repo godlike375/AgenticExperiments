@@ -5,6 +5,7 @@ import sys
 import threading
 import time
 import collections
+from typing import Optional
 from universal_agents.models import Message, SystemMessage, UserMessage, AssistantMessage, ToolResult
 from universal_agents.rendering import render_message
 from universal_agents.agent import LLMAgent
@@ -107,6 +108,17 @@ class CLI:
         self.pending_prefill = None
         self.multiline = False
         self._monitor_active = False
+        # Запрос подтверждения инструмента: поток генерации ставит его и ждёт ответа,
+        # а главный поток монитора читает stdin и отвечает. Единый читатель ввода
+        # исключает гонку «подтверждение против перехвата текста», из-за которой ответ
+        # на "Execute? (y/n)" мог быть съеден монитором как текст-прерывание и
+        # подтверждение зависало навсегда, замораживая генерацию и весь ввод.
+        self._confirm_lock = threading.Lock()
+        self._confirm_cond = threading.Condition(self._confirm_lock)
+        self._confirm_request: Optional[tuple] = None  # (name, args) ожидающего подтверждения
+        self._confirm_answer: Optional[bool] = None
+        # Подтверждения идут через CLI, а не напрямую в stdin.
+        agent.on_confirm = self._ask_confirm
         self.commands = {
             "/regen": self.cmd_regen,
             "/list": self.cmd_list,
@@ -431,15 +443,70 @@ class CLI:
                 return self._line_queue.popleft()
             return ''
 
+    def _ask_confirm(self, name: str, args: dict) -> bool:
+        """Вызывается на потоке генерации, когда инструмент требует подтверждения.
+        Ставит запрос; ответ читает и возвращает главный поток монитора
+        (_answer_next_confirm). Вне CLI (нет stdin-очереди) — классический инпут."""
+        if getattr(self, "_line_queue", None) is None:
+            return ConsoleUI.confirm_action(name, args)
+        with self._confirm_cond:
+            self._confirm_request = (name, args)
+            self._confirm_answer = None
+            self._confirm_cond.notify_all()
+            while self._confirm_answer is None:
+                if self.agent.stop_event.is_set():
+                    self._confirm_request = None
+                    return False
+                self._confirm_cond.wait(timeout=0.2)
+            return self._confirm_answer
+
+    def _answer_next_confirm(self):
+        """Главный поток: печатает запрос подтверждения и читает ответ для потока
+        генерации. 'q'/стоп — отказ + запрос остановки. 'y' — да. Произвольный текст —
+        отказ, но строка не теряется: она становится текстом пользователя (pending
+        interrupt) и уйдёт в историю после завершения шага."""
+        with self._confirm_cond:
+            req = self._confirm_request
+        if req is None:
+            return
+        name, args = req
+        print(f"\n[WARNING] Tool '{name}' modifies state")
+        if args:
+            formatted_args = json.dumps(args, indent=2, ensure_ascii=False)
+            print(f"Arguments:\n{formatted_args}")
+        else:
+            print("Arguments: {} (None)")
+        raw = self._get_line()
+        resp = raw.strip().lower()
+        answer = False
+        stop = False
+        if resp == 'y':
+            answer = True
+        elif resp in ('q', 'stop', 'exit-gen', '!q'):
+            stop = True
+        elif raw.strip():
+            # Не ответ на подтверждение: отказываем, текст сохраняем как ввод
+            # пользователя (иначе сообщение, введённое во время промпта, потеряется).
+            self.agent.set_pending_interrupt(raw.strip())
+        with self._confirm_cond:
+            self._confirm_answer = answer
+            self._confirm_request = None
+            self._confirm_cond.notify_all()
+        if stop:
+            self._request_stop()
+
     def _poll_input(self):
-        """Неразрушающе проверяет очередь ввода: забирает строку, если это пользовательский текст.
-        Пустые строки (в т.ч. инжектированные ''/'\n' для разблокировки воркера) и команды
-        ('/...') не считаются вводом — они остаются в очереди. Возвращает строку или None."""
+        """Неразрушающе проверяет очередь ввода. Пустые строки (в т.ч. инжектированные
+        _request_stop '\n' для разблокировки) выбрасываются — они не несут ввода и иначе
+        блокируют видимость реального текста позади них. Команды ('/...') не считаются
+        вводом и остаются в очереди. Возвращает строку или None."""
         with self._line_lock:
+            while self._line_queue and not self._line_queue[0].strip():
+                self._line_queue.popleft()
             if not self._line_queue:
                 return None
             line = self._line_queue[0]
-            if not line.strip() or line.lstrip().startswith('/'):
+            if line.lstrip().startswith('/'):
                 return None
             self._line_queue.popleft()
             return line.strip()
@@ -479,8 +546,18 @@ class CLI:
                     while gen.is_alive():
                         if self.agent.stop_event.is_set():
                             break
+                        if self._confirm_request is not None:
+                            # Ждёт подтверждение инструмента — отвечаем до чтения текста,
+                            # чтобы ответ на (y/n) не был перехвачен как сообщение.
+                            self._answer_next_confirm()
+                            continue
                         line = self._poll_input()
                         if line is not None:
+                            if self._confirm_request is not None:
+                                # Подтверждение появилось, пока мы забирали строку:
+                                # возвращаем её в очередь — ответит _answer_next_confirm.
+                                self._inject_line(line)
+                                continue
                             if line.lower() in ('q', 'stop', 'exit-gen', '!q'):
                                 self._request_stop()
                                 break
