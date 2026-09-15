@@ -3,8 +3,15 @@
 import os
 from typing import Callable, Iterable, Union, Optional
 
-from universal_agents.constants import CORE_TOOLS
 from universal_agents.tool_registry import load_external_plugins, build_tool_dict
+from universal_agents.tools.builtin import (
+    have_done as _have_done_tool,
+    load_tool as _load_tool_tool,
+    unload_tool as _unload_tool_tool,
+)
+
+# Инструменты, которые нельзя отключить.
+CORE_TOOLS = (_load_tool_tool.__name__, _unload_tool_tool.__name__)
 
 
 def _tools_directory() -> str:
@@ -13,7 +20,7 @@ def _tools_directory() -> str:
 
 
 # Инструменты, управляемые системой (модель не грузит их через load_tool): have_done подключается только после успешного make_plan.
-MANAGED_TOOLS = {"have_done"}
+MANAGED_TOOLS = {_have_done_tool.__name__}
 
 
 class ToolManager:
@@ -101,8 +108,9 @@ class ToolManager:
             self._tools_map[name] = build_tool_dict(external_tools[name], is_instance_method=False)
 
             non_core = [n for n in self._tools_map if n not in CORE_TOOLS]
-            if len(non_core) >= 1 and "unload_tool" not in self._tools_map and "unload_tool" in external_tools:
-                self._tools_map["unload_tool"] = build_tool_dict(external_tools["unload_tool"], is_instance_method=False)
+            unload_name = _unload_tool_tool.__name__
+            if len(non_core) >= 1 and unload_name not in self._tools_map and unload_name in external_tools:
+                self._tools_map[unload_name] = build_tool_dict(external_tools[unload_name], is_instance_method=False)
 
             return f"'{name}' loaded."
 
@@ -116,8 +124,9 @@ class ToolManager:
         if name in external_tools:
             self._tools_map[name] = build_tool_dict(external_tools[name], is_instance_method=False)
             non_core = [n for n in self._tools_map if n not in CORE_TOOLS]
-            if len(non_core) >= 1 and "unload_tool" not in self._tools_map and "unload_tool" in external_tools:
-                self._tools_map["unload_tool"] = build_tool_dict(external_tools["unload_tool"], is_instance_method=False)
+            unload_name = _unload_tool_tool.__name__
+            if len(non_core) >= 1 and unload_name not in self._tools_map and unload_name in external_tools:
+                self._tools_map[unload_name] = build_tool_dict(external_tools[unload_name], is_instance_method=False)
             return f"'{name}' loaded."
         return f"Error '{name}' not found in loadable tools"
 
@@ -173,8 +182,9 @@ class ToolManager:
         self._pending_unload.clear()
 
         non_core = [n for n in self._tools_map if n not in CORE_TOOLS]
-        if len(non_core) == 0 and "unload_tool" in self._tools_map:
-            del self._tools_map["unload_tool"]
+        unload_name = _unload_tool_tool.__name__
+        if len(non_core) == 0 and unload_name in self._tools_map:
+            del self._tools_map[unload_name]
 
         return flushed
 
@@ -185,7 +195,7 @@ class ToolManager:
             func = self._tools_map[name].get("handler")
             desc = getattr(func, '_short_description', '') if func else ''
             lines.append(f'"{name}" ({desc});' if desc else name)
-        return "\n".join(lines)
+        return "LOADED TOOLS:\n" + "\n".join(lines)
 
     def list_available(self) -> str:
         """Список загружаемых (неактивных) инструментов из директории плагинов."""
@@ -199,14 +209,13 @@ class ToolManager:
             func = external_tools[name]
             desc = getattr(func, '_short_description', '')
             lines.append(f'"{name}" ({desc});' if desc else name)
-        #lines.append(f'\nTo load concrete tool use "load_tool" + "name" arg\n')
         return "\n".join(lines)
 
     # --------------------------------------------------------
     # Доверенные папки
     # --------------------------------------------------------
     def trust_dir(self, path: str) -> str:
-        """Добавляет директорию в доверенные (edit_file пропускает подтверждение)."""
+        """Добавляет директорию в доверенные (редакторы файлов пропускают подтверждение)."""
         abs_path = os.path.abspath(path)
         if not os.path.isdir(abs_path):
             return f"Error '{path}' is not a directory"

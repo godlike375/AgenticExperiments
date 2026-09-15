@@ -4,41 +4,7 @@ from unittest import mock
 
 from universal_agents.config import Config
 from universal_agents.generation import GenerationParams
-from universal_agents.llm_client import LLMClient
-
-
-class TestResponsesParsing(unittest.TestCase):
-    def test_parse_responses_output(self):
-        output = [
-            SimpleNamespace(type="message", content=[SimpleNamespace(type="output_text", text="Hello ")]),
-            SimpleNamespace(type="function_call", call_id="c1", name="read", arguments="{}"),
-        ]
-        response = SimpleNamespace(output=output, id="resp_1")
-        msg = LLMClient._parse_responses_output(response)
-        self.assertEqual(msg.content, "Hello ")
-        self.assertEqual(msg._response_id, "resp_1")
-        self.assertIsNotNone(msg.tool_calls)
-        tc = msg.tool_calls[0]
-        self.assertEqual(tc.name, "read")
-        self.assertEqual(tc.function.name, "read")
-        self.assertEqual(tc.arguments, "{}")
-
-    def test_parse_responses_output_string_content(self):
-        response = SimpleNamespace(
-            output=[SimpleNamespace(type="message", content="plain")],
-            id="resp_2",
-        )
-        msg = LLMClient._parse_responses_output(response)
-        self.assertEqual(msg.content, "plain")
-        self.assertIsNone(msg.tool_calls)
-
-    def test_extract_responses_usage(self):
-        usage = SimpleNamespace(input_tokens=10, output_tokens=5)
-        result = LLMClient._extract_responses_usage(SimpleNamespace(usage=usage))
-        self.assertEqual(result, {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15})
-
-    def test_extract_responses_usage_none(self):
-        self.assertIsNone(LLMClient._extract_responses_usage(SimpleNamespace(usage=None)))
+from universal_agents.llm_client import LLMClient, StreamSession
 
 
 class TestStream(unittest.TestCase):
@@ -109,10 +75,11 @@ class TestCall(unittest.TestCase):
     def test_stream_failure_no_blocking_fallback_when_stopped(self):
         """Если стрим не создался и пользователь запросил остановку, call() не должен
         скатываться в блокирующий _call_chat_completions (его прервать нельзя)."""
-        with mock.patch("universal_agents.llm_client.LLMClient._call_via_chat_stream", return_value=None), \
-                mock.patch("universal_agents.llm_client.LLMClient._call_chat_completions") as blocking, \
+        fake_client = mock.Mock()
+        fake_client.chat.completions.create.side_effect = RuntimeError("boom")
+        with mock.patch("universal_agents.llm_client.LLMClient.get_client", return_value=fake_client), \
                 mock.patch.object(Config, "STREAM_ENABLED", True), \
-                mock.patch.object(Config, "USE_RESPONSES_API", False):
+                mock.patch("universal_agents.llm_client.LLMClient._call_chat_completions") as blocking:
             result, err, usage = LLMClient.call(
                 [{"role": "user", "content": "hi"}],
                 callbacks={"on_stream_chunk": lambda c: None},
@@ -122,21 +89,77 @@ class TestCall(unittest.TestCase):
         self.assertIsNone(result)
         self.assertIn("stopped", err)
 
-    def test_chat_stream_creation_failure_keeps_error(self):
+    def test_stream_creation_failure_keeps_error_no_blocking_fallback(self):
         """Недоступный стрим возвращает кортеж ошибки (не None), чтобы call() пошёл по
         пути ошибки, а не в блокирующий обычный вызов."""
         fake_client = mock.Mock()
         fake_client.chat.completions.create.side_effect = RuntimeError("boom")
         with mock.patch("universal_agents.llm_client.LLMClient.get_client", return_value=fake_client), \
+                mock.patch.object(Config, "STREAM_ENABLED", True), \
                 mock.patch("universal_agents.llm_client.LLMClient._call_chat_completions") as blocking:
-            result, err, usage = LLMClient._call_via_chat_stream(
-                [{"role": "user", "content": "hi"}], 0.3, 10, None, None, None, None, None, None,
-                {"on_stream_chunk": lambda c: None}, None,
+            result, err, usage = LLMClient.call(
+                [{"role": "user", "content": "hi"}],
+                callbacks={"on_stream_chunk": lambda c: None},
             )
         blocking.assert_not_called()
         self.assertIsNone(result)
         self.assertIn("stream creation failed", err)
 
 
-if __name__ == "__main__":
-    unittest.main()
+class TestStreamSession(unittest.TestCase):
+    """StreamSession: единый потребитель стрима (watchdog + чанковый цикл)."""
+
+    def _chunk(self, delta=None, usage=None):
+        return SimpleNamespace(
+            choices=[SimpleNamespace(delta=delta)],
+            usage=usage,
+        )
+
+    def test_consume_returns_content(self):
+        fake_client = mock.Mock()
+        fake_client.chat.completions.create.return_value = iter([
+            self._chunk(SimpleNamespace(content="hello", tool_calls=None, reasoning_content=None)),
+            self._chunk(SimpleNamespace(content=" world", tool_calls=None, reasoning_content=None)),
+        ])
+        with mock.patch("universal_agents.llm_client.LLMClient.get_client", return_value=fake_client):
+            session = StreamSession(
+                [{"role": "user", "content": "hi"}],
+                on_stream_chunk=lambda _: None,
+            )
+            error, stopped = session.consume()
+        self.assertFalse(error)
+        self.assertFalse(stopped)
+        self.assertEqual(session.acc.content, "hello world")
+
+    def test_consume_stop_check_breaks_loop_and_closes(self):
+        """stop_check в цикле прерывает потребление: стрим закрывается, последующие
+        чанки не обрабатываются."""
+        processed = [0]
+
+        def generator():
+            for c in ["a", "b", "c"]:
+                processed[0] += 1
+                yield self._chunk(SimpleNamespace(content=c, tool_calls=None, reasoning_content=None))
+
+        close_calls = []
+        original_close = LLMClient.close_stream
+
+        def track_close(s):
+            close_calls.append(1)
+            original_close(s)
+
+        def stop():
+            return processed[0] >= 2
+
+        with mock.patch("universal_agents.llm_client.LLMClient.stream", return_value=generator()), \
+             mock.patch("universal_agents.llm_client.LLMClient.close_stream", side_effect=track_close):
+            session = StreamSession(
+                [{"role": "user", "content": "hi"}],
+                on_stream_chunk=lambda _: None,
+            )
+            error, stopped = session.consume(stop_check=stop)
+
+        self.assertFalse(error)
+        self.assertTrue(stopped)
+        self.assertEqual(session.acc.content, "ab")
+        self.assertTrue(close_calls)

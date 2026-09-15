@@ -8,7 +8,7 @@ from universal_agents.config import Config
 from universal_agents.models import SystemMessage, UserMessage, AssistantMessage, ToolResult
 
 if TYPE_CHECKING:
-    from universal_agents.agent import LLMAgent
+    from universal_agents.context import AgentContext
 
 
 def _hash_api_message(d) -> str:
@@ -24,7 +24,7 @@ def _hash_api_message(d) -> str:
     return hashlib.sha256(s.encode("utf-8")).hexdigest()
 
 
-def _check_prefix_hashes(agent: "LLMAgent", pairs: list) -> None:
+def _check_prefix_hashes(agent: "AgentContext", pairs: list) -> None:
     """Сравнивает хеши сообщений по id с прошлой итерацией. Изменение → сброс KV-кэша.
      Также проверяет tools и model — их смена тоже ломает кэш. Хранит состояние
      в _prev_prefix_hashes. Новые сообщения игнорируются.
@@ -87,7 +87,7 @@ def _format_closing_header() -> str:
     return " }\n\n"
 
 
-def prepare_messages_for_api(agent: LLMAgent, normalize: bool = True,
+def prepare_messages_for_api(agent: AgentContext, normalize: bool = True,
                              debug_hash_check: bool = False) -> list[dict]:
     """Готовит историю для API.
 `normalize=False` не сбрасывает кэш заголовков user-сообщений (для переиспользования KV).

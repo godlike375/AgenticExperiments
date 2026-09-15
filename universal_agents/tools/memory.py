@@ -8,7 +8,7 @@ from universal_agents.tool import tool
 from universal_agents.constants import ENVIRONMENT_PREFIX, ENVIRONMENT_PREFIX_END, err
 
 if TYPE_CHECKING:
-    from universal_agents.agent import LLMAgent
+    from universal_agents.context import AgentContext
 
 
 @tool(
@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     tool_name=("str", "Optional filter by tool name for role=tool"),
     limit=("int", "Max matches to show"),
 )
-def recall_search(agent: LLMAgent, query: str, role: str = "", tool_name: str = "", limit: int = 5) -> str:
+def recall_search(agent: AgentContext, query: str, role: str = "", tool_name: str = "", limit: int = 5) -> str:
     if not hasattr(agent, "archive"):
         return err(": archive is not available in this agent.")
     result = agent.archive.search(query, role=role, tool_name=tool_name, limit=limit)
@@ -39,7 +39,7 @@ def recall_search(agent: LLMAgent, query: str, role: str = "", tool_name: str = 
     from_seq=("int", "First message seq"),
     to_seq=("int", "Last message seq (inclusive)"),
 )
-def recall_read(agent: LLMAgent, from_seq: int, to_seq: int) -> str:
+def recall_read(agent: AgentContext, from_seq: int, to_seq: int) -> str:
     if not hasattr(agent, "archive"):
         return err(": archive is not available in this agent.")
     result = agent.archive.read_span(from_seq, to_seq)

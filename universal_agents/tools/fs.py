@@ -6,7 +6,7 @@ import os
 import re as _re
 import fnmatch as _fnmatch
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from universal_agents.config import Config
 from universal_agents.constants import (
@@ -17,6 +17,10 @@ from universal_agents.constants import (
 )
 from universal_agents.file_states import _content_hash
 from universal_agents.tool import tool
+from universal_agents.tools.builtin import answer_to_system
+
+if TYPE_CHECKING:
+    from universal_agents.context import AgentContext
 
 # Лимиты поиска: не «виснуть» и не съесть гигабайты на больших деревьях/бинарниках.
 SEARCH_MAX_FILE_SIZE = 1 * 1024 * 1024    # пропускать файлы крупнее 5 МБ
@@ -85,30 +89,95 @@ def cwd(path: str = None):
             raise RuntimeError(f"Error changing cwd: {e}")  # Было return, стало raise
     return os.getcwd()
 
+def _ensure_file_exists(path: str) -> bool:
+    """Создаёт файл (с родительскими папками), если его нет. Возвращает True, если создан."""
+    if os.path.isfile(path):
+        return False
+    try:
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("")
+        return True
+    except Exception as e:
+        raise RuntimeError(f"Failed to create file: {e}")
+
+
+def _apply_edit_result(
+    path: str,
+    content: str,
+    new_content: str,
+    new_clean: str,
+    replaced_lines: list[str],
+    *,
+    label: str,
+    report_start: int = 1,
+    report_text: Optional[str] = None,
+    context_before: str = "",
+    context_after: str = "",
+    dry_run: str = "",
+    nothing: str = "",
+) -> tuple | str:
+    """Финализация правки (общая для редакторов файлов): если dry_run — возвращает
+    (preview, resolve, ask) для подтверждения моделью через 'answer_to_system'; иначе пишет файл
+    и возвращает отчёт '+ L<n>: ...' (или report_text, если задан)."""
+    if new_content == content or new_content == content.rstrip('\n'):
+        return f"Nothing changed: {nothing}"
+
+    if dry_run:
+        # Дифф изолируем на заменяемый диапазон: контекст (±1) берём только из
+        # стабильного head/tail, чтобы изменение не «протекало» на соседние строки.
+        preview = _make_diff_preview(
+            "\n".join(replaced_lines), new_clean, path,
+            replaced=len(replaced_lines),
+            added=len(new_clean.splitlines()),
+            context_before=context_before,
+            context_after=context_after,
+        )
+
+        def resolve(agent, text):
+            raw = (text or "").strip().lower()
+            first = _re.sub(r"[^\w]+", "", raw.split(" ", 1)[0]) if raw else ""
+            if first in ("yes", "y", "true", "да"):
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(new_content)
+                return f"Replaced {label} in {Path(path).name}"
+            return None
+
+        # Инструмент сам говорит модели, как ему ответить. execute_mixin лишь
+        # склеит это с превью. Ответ инструмента всегда должен вызывать 'answer_to_system'.
+        ask = (
+            f"{ENVIRONMENT_PREFIX} ATTENTION: this needs assistant's (AI) confirmation. Call '{answer_to_system.__name__}' "
+            f"with text='yes' to apply it or text='no' to cancel. You can't continue with common prose {ENVIRONMENT_PREFIX_END}"
+        )
+        return preview, resolve, ask
+
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(new_content)
+
+    if report_text:
+        return report_text
+    new_lines = new_clean.splitlines()
+    result = [f"{label} → {len(new_lines)} lines:"]
+    for i, line in enumerate(new_lines):
+        result.append(f"+ L{report_start + i}: {line}")
+    return "\n".join(result)
+
+
 @tool(
     description="Edits a file: the 1-based inclusive lines start_line..end_line are REPLACED with 'new_text'. The range can be one line or several lines — always a replace of that range, never insert/append elsewhere. Lines outside the range stay untouched. Creates file with parent dirs if it doesn't exist",
-    short_description="edit file text",
+    short_description="edit file text by line range",
     requires_confirmation=True,
     requires_model_confirmation=True,
     safe_in_trusted=True,
     path=("str", "File path. Auto-created if missing"),
-    #old=("str", "Exact text to replace. Supports \\n for multiline blocks. If '' or nothing passed then replaces whole content. For new files use '' to set initial content"),
     start_line=("int", "1-based inclusive start line of the range to replace with 'new_text'. Default 1"),
     end_line=("int", "1-based inclusive end line of the range to replace with 'new_text'. If omitted: end of file when start_line omitted too, else a single line at start_line"),
     new_text=("str", "New content that replaces the range start_line..end_line. Supports \\n. Do NOT re-include lines that exist outside the range — they are NOT deleted and would duplicate; include only what the range itself should become. Be careful to not break existing indentation."),
-    #mode=("str", "'one' for 1 exclusive match, otherwise 'all' (default 'one')")
 )
-def edit_file(path: str, new_text: str, start_line: int = None, end_line: int = None, dry_run: str = ""):
-    created_file = False
-    if not os.path.isfile(path):
-        # Создаём файл, если его нет
-        try:
-            os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-            with open(path, "w", encoding="utf-8") as f:
-                f.write("")
-            created_file = True
-        except Exception as e:
-            raise RuntimeError(f"Failed to create file: {e}")
+def line_range_edit(path: str, new_text: str, start_line: int = None, end_line: int = None, dry_run: str = ""):
+    """Правка файла по диапазону строк (1-based, инклюзивно). Выделена из прежнего edit_file:
+    точный и предсказуемый способ править/создавать файлы, когда номера строк известны."""
+    _ensure_file_exists(path)
 
     with open(path, "r", encoding="utf-8") as f:
         content = f.read()
@@ -135,51 +204,103 @@ def edit_file(path: str, new_text: str, start_line: int = None, end_line: int = 
     else:
         new_content = new_clean
 
-    if new_content == content or new_content == content.rstrip('\n'):
-        return f"Nothing changed: lines {start}..{end} already equal to '{new_text[:20]}...'"
+    return _apply_edit_result(
+        path, content, new_content, new_clean, replaced_lines,
+        label=f"L{start}-{end}",
+        report_start=start,
+        context_before=head[-1] if head else "",
+        context_after=tail[0] if tail else "",
+        dry_run=dry_run,
+        nothing=f"lines {start}..{end}",
+    )
 
-    if dry_run:
-        # Дифф изолируем на заменяемый диапазон: контекст (±1) берём только из
-        # стабильного head/tail, чтобы изменение не «протекало» на соседние строки.
-        preview = _make_diff_preview(
-            "\n".join(replaced_lines), new_clean, path,
-            replaced=len(replaced_lines),
-            added=len(new_clean.splitlines()),
-            context_before=head[-1] if head else "",
-            context_after=tail[0] if tail else "",
+
+@tool(
+    description="Edits a file by searching the EXACT 'old' text and replacing it with 'new_text'. "
+                "Best for small precise changes when exact line numbers are unknown or shift often. "
+                "'old' is matched literally (newlines via \\n). mode='one' requires exactly one match; "
+                "mode='all' replaces every occurrence. Pass old='' to set the whole file content "
+                "(creates the file if missing).",
+    short_description="edit file text by exact match",
+    requires_confirmation=True,
+    requires_model_confirmation=True,
+    safe_in_trusted=True,
+    path=("str", "File path. Auto-created only in whole-file mode (old='')"),
+    old=("str", "Exact text to replace (can include \\n for multiline blocks). If '' — replaces whole file content"),
+    new_text=("str", "Replacement text for each occurrence of 'old'. Supports \\n. Keep indentation consistent"),
+    mode=("str", "'one' — exactly 1 match required (error otherwise); 'all' — replace every occurrence. Default 'one'"),
+)
+def match_replace_edit(path: str, old: str, new_text: str, mode: str = "one", dry_run: str = ""):
+    """Правка файла по точному совпадению подстроки (одиночному или всем). Компаньон
+    line_range_edit для правок «по образцу», когда номера строк неизвестны."""
+    old_text = old or ""
+    new_clean = new_text.rstrip('\n')
+
+    if not os.path.isfile(path):
+        # old='' подразумевает создание/перезапись файла целиком; иначе сопоставлять не с чем.
+        if old_text:
+            return err(f": file '{path}' does not exist — nothing to match. Use line_range_edit or pass old='' to create a new file")
+        _ensure_file_exists(path)
+
+    with open(path, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    if not old_text:
+        # Режим «весь файл»: для создания нового файла или полной перезаписи.
+        return _apply_edit_result(
+            path, content, new_clean, new_clean, content.splitlines(),
+            label="whole file",
+            report_start=1,
+            dry_run=dry_run,
+            nothing="whole file",
         )
 
-        def resolve(agent, text):
-            raw = (text or "").strip().lower()
-            first = _re.sub(r"[^\w]+", "", raw.split(" ", 1)[0]) if raw else ""
-            if first in ("yes", "y", "true", "да"):
-                with open(path, "w", encoding="utf-8") as f:
-                    f.write(new_content)
-                return f"Replaced L{start}-{end} in {Path(path).name}"
-            return None
-
-        # Инструмент сам говорит модели, как ему ответить. execute_mixin лишь
-        # склеит это с превью. Ответ инструмента всегда должен вызывать 'answer'.
-        ask = (
-            f"{ENVIRONMENT_PREFIX} ATTENTION: this needs assistant's (AI) confirmation. Call 'answer' "
-            f"with text='yes' to apply it or text='no' to cancel. You can't continue with common prose {ENVIRONMENT_PREFIX_END}"
+    occurrences = content.count(old_text)
+    if occurrences == 0:
+        return err(f": substring not found in '{Path(path).name}'")
+    if mode == "one" and occurrences > 1:
+        return err(
+            f": found {occurrences} matches in '{Path(path).name}'. "
+            f"Make 'old' more specific or pass mode='all'."
         )
-        return preview, resolve, ask
 
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(new_content)
+    if mode == "one":
+        index = content.index(old_text)
+        first_line = content[:index].count("\n") + 1
+        new_content = content[:index] + new_text + content[index + len(old_text):]
+        lines = content.splitlines()
+        num_old_lines = len(old_text.splitlines())
+        line_start0 = first_line - 1
+        line_end0 = min(len(lines) - 1, line_start0 + num_old_lines - 1)
+        replaced_lines = lines[line_start0:line_end0 + 1]
+        context_before = lines[line_start0 - 1] if line_start0 >= 1 else ""
+        context_after = lines[line_end0 + 1] if line_end0 + 1 < len(lines) else ""
+        return _apply_edit_result(
+            path, content, new_content, new_clean, replaced_lines,
+            label=f"1 occurrence at L{first_line}",
+            report_start=first_line,
+            context_before=context_before,
+            context_after=context_after,
+            dry_run=dry_run,
+            nothing="pattern equal to replacement",
+        )
 
-    new_lines = new_clean.splitlines()
-    result = [f"L{start}-{end} → {len(new_lines)} lines:"]
-    for i, line in enumerate(new_lines):
-        result.append(f"+ L{start + i}: {line}")
-    return "\n".join(result)
+    # mode='all': заменяем каждое вхождение; превью — дифф всего файла (видны все хунки).
+    new_content = content.replace(old_text, new_text)
+    return _apply_edit_result(
+        path, content, new_content, new_text.rstrip('\n'), content.splitlines(),
+        label=f"{occurrences} occurrences",
+        report_start=1,
+        report_text=f"Replaced {occurrences} occurrence(s) of {old_text[:30]!r} in {Path(path).name}",
+        dry_run=dry_run,
+        nothing="pattern equal to replacement",
+    )
 
 
 def _make_diff_preview(old_text: str, new_text: str, path: str,
                        replaced: int = 0, added: int = 0,
                        context_before: str = "", context_after: str = "") -> str:
-    """Компактный git-style дифф для превью edit_file.
+    """Компактный git-style дифф для превью правки файла.
 
     Только изменённые хунки, вокруг каждого изменения — один ряд контекста
     (до и/или после, если существует). Маркеры как в git: ' ' — неизменный
@@ -429,7 +550,7 @@ def _peripheral_indices(near: int, far: int, total: int, growth: float = 2.0) ->
       path=("str", "Optional path to file/dir (default '.'). Use '..' to open parent dir"),
       start_line=("int", "Optional 1-based start line. Omit (with end_line) to get the one-time structural skeleton of a large file instead of raw content"),
       end_line=("int", "Optional 1-based inclusive end line (supports negative values like Python slices)"))
-def read(agent: 'LLMAgent', path: str = '.', start_line: int = None, end_line: int = None):
+def read(agent: 'AgentContext', path: str = '.', start_line: int = None, end_line: int = None):
     if not os.path.exists(path):
         raise FileNotFoundError(f"Path not found: {path}")
     try:
@@ -530,7 +651,7 @@ def read(agent: 'LLMAgent', path: str = '.', start_line: int = None, end_line: i
                     return (
                         f"{ENVIRONMENT_PREFIX} File: {path}\nModified: {mtime}\nTotal lines: {total}\n"
                         f"Structure skeleton is temporarily unavailable (sub-agent returned empty). "
-                        f"Do NOT retry 'read' without range — read the file in portions using "
+                        f"Do NOT retry '{read.__name__}' without range — read the file in portions using "
                         f"start_line/end_line, e.g. read('{path}', start_line=1). "
                         f"Each call returns ~{Config.MAX_READ_CHARS_PER_CALL} chars."
                         f"{ENVIRONMENT_PREFIX_END}"
@@ -564,7 +685,7 @@ def _reread_err(path: str) -> str:
     )
 
 
-def _finish_read(agent: 'LLMAgent', path: str, raw: str, content: str, disk_hash: str) -> str:
+def _finish_read(agent: 'AgentContext', path: str, raw: str, content: str, disk_hash: str) -> str:
     """Для маленьких файлов: пропуск неизменённого + регистрация чтения (привязка к _execute_tools). Контент уже собран в read — здесь только проверка/учёт."""
     if agent.file_states.should_skip(path, disk_hash):
         return _reread_err(path)

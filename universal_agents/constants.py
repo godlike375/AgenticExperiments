@@ -4,9 +4,6 @@
 ENVIRONMENT_PREFIX = '<SYSTEM>'
 ENVIRONMENT_PREFIX_END = '</SYSTEM>'
 
-# Инструменты, которые нельзя отключить
-CORE_TOOLS = ("load_tool", "unload_tool")
-
 
 def err(msg: str) -> str:
     """Единый формат сообщения об ошибке (инвариант §2-4). ``msg`` — текст сразу после ``Error`` для побайтово точной замены."""

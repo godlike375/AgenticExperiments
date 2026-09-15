@@ -47,7 +47,7 @@ class ToolsMixin:
         return self.tools_manager.list_available()
 
     def trust_dir(self, path: str) -> str:
-        """Add a directory to trusted dirs (edit_file skips confirmation)."""
+        """Add a directory to trusted dirs (edit tools skip confirmation)."""
         return self.tools_manager.trust_dir(path)
 
     def untrust_dir(self, path: str) -> str:
@@ -59,7 +59,7 @@ class ToolsMixin:
         return self.tools_manager.is_path_trusted(path)
 
     def _auto_trust_git_root(self) -> None:
-        """При наличии валидного .git в текущей/родительской папке доверяем корень проекта: edit_file внутри него не запрашивает подтверждение (git позволяет откатить правки)."""
+        """При наличии валидного .git в текущей/родительской папке доверяем корень проекта: редакторы файлов внутри него не запрашивают подтверждение (git позволяет откатить правки)."""
         if not Config.AUTO_TRUST_GIT_ROOT:
             return
         root = find_project_root()

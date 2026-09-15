@@ -14,6 +14,11 @@ from universal_agents.task_tracker import DONE_TOOL, validate_task_mark_call
 from universal_agents.tool_parsing import parse_tool_args, is_error_content
 from universal_agents.subprocess_utils import set_interrupt_event, clear_interrupt_event
 from universal_agents.exceptions import GenerationInterrupted
+from universal_agents.tools.fs import read as _read_tool, search as _search_tool
+from universal_agents.tools.host_shell import (
+    run_bash_host as _run_bash_host_tool,
+    run_powershell as _run_powershell_tool,
+)
 
 
 class ExecuteMixin:
@@ -116,7 +121,7 @@ class ExecuteMixin:
                             results.append(ToolResult.user_denied(tc.id, name))
                             continue
 
-                # Многофазное взаимодействие: dry_run → превью → answer() → реальное выполнение.
+                # Многофазное взаимодействие: dry_run → превью → answer_to_system() → реальное выполнение.
                 if tool_info.get('requires_model_confirmation', False):
                     handler = tool_info['handler']
                     dry_run_args = {**args_dict, "dry_run": "true"}
@@ -164,7 +169,12 @@ class ExecuteMixin:
                         # Жёсткий лимит вывода любого инструмента — держим контекст в рамках.
                         # `read`, `search`, `run_powershell`, `run_bash_host` уже сами режут вывод
                         # (с подсказками по продолжению), поэтому их не трогаем.
-                        _self_truncating = ('read', 'search', 'run_powershell', 'run_bash_host')
+                        _self_truncating = (
+                            _read_tool.__name__,
+                            _search_tool.__name__,
+                            _run_powershell_tool.__name__,
+                            _run_bash_host_tool.__name__,
+                        )
                         if name not in _self_truncating and len(content) > Config.MAX_READ_CHARS_PER_CALL:
                             content = (
                                 content[:Config.MAX_READ_CHARS_PER_CALL]
@@ -173,11 +183,11 @@ class ExecuteMixin:
                             )
                         tr = ToolResult.success(tc.id, name, content)
                         self._tool_usage[name] = self._tool_usage.get(name, 0) + 1
-                        if name == 'read' and self._read_registrations:
+                        if name == _read_tool.__name__ and self._read_registrations:
                             self.file_states.mark_tool_call(self._read_registrations.pop(0), tr.tool_call_id)
                         # Чтение не пересжимаем в память: скелет уже компактный, диапазон/маленький
                         # файл — сырые строки, которые должны остаться в контексте как есть.
-                        if name == 'read':
+                        if name == _read_tool.__name__:
                             tr.skip_summarize = True
 
                     if not getattr(tr, 'skip_summarize', False):

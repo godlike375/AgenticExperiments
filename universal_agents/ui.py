@@ -266,8 +266,6 @@ class CLI:
             for name in loaded_tools:
                 if name not in self.agent._all_tools:
                     self.agent.load_tool(name)
-            self.agent._last_response_id = None
-            self.agent._last_sent_msg_count = 0
             # Сбрасываем отладочное состояние сверки хэшей префикса: после
             # подмены истории старые id объектов невалидны для сравнения.
             self.agent._prev_prefix_hashes = {}

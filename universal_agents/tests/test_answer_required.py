@@ -6,13 +6,20 @@ import unittest
 from unittest import mock
 
 from universal_agents.agent import LLMAgent
+from universal_agents.agent_mixins.response_mixin import _NO_COMMENT_PREFILL
+from universal_agents.config import Config
 from universal_agents.models import AssistantMessage, ToolCall
-from universal_agents.tools.fs import edit_file
-from universal_agents.tools.builtin import answer
+from universal_agents.tools.fs import line_range_edit
+from universal_agents.tools.builtin import answer_to_system
+
+from tests.conftest import make_agent as make_test_agent
+
+answer_tool_name = answer_to_system.__name__
+line_range_edit_tool_name = line_range_edit.__name__
 
 
 class TestAnswerRequiredGuard(unittest.TestCase):
-    """Если после edit_file модель ответила текстом без вызова 'answer',
+    """Если после edit-инструмента модель ответила текстом без вызова 'answer_to_system',
     цикл должен вколоть ошибку и продолжить, пока answer не будет вызван."""
 
     def setUp(self):
@@ -20,12 +27,9 @@ class TestAnswerRequiredGuard(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self._tmp, ignore_errors=True)
 
     def make_agent(self):
-        agent = LLMAgent(
+        agent = make_test_agent(
             system_prompt="You edit files. Always call answer to confirm edits.",
-            tools_config=None,
-            external_plugins={"edit_file": edit_file, "answer": answer},
-            disable_per_msg_summarization=True,
-            autosave_enabled=False,
+            external_plugins={line_range_edit_tool_name: line_range_edit, answer_tool_name: answer_to_system},
         )
         agent.trust_dir(self._tmp)
         return agent
@@ -37,7 +41,7 @@ class TestAnswerRequiredGuard(unittest.TestCase):
 
         edit_call = AssistantMessage(
             content="Отредактирую файл.",
-            tool_calls=[ToolCall(id="c1", name="edit_file", arguments=json.dumps({
+            tool_calls=[ToolCall(id="c1", name=line_range_edit_tool_name, arguments=json.dumps({
                 "path": path,
                 "new_text": "world\n",
                 "start_line": 1,
@@ -47,7 +51,7 @@ class TestAnswerRequiredGuard(unittest.TestCase):
         text_turn = AssistantMessage(content="Я отредактирую файл и подтверждаю правку, всё хорошо.")
         answer_call = AssistantMessage(
             content="Подтверждаю.",
-            tool_calls=[ToolCall(id="c2", name="answer", arguments='{"text": "yes"}')],
+            tool_calls=[ToolCall(id="c2", name=answer_tool_name, arguments='{"text": "yes"}')],
         )
 
         final_reply = AssistantMessage(content="Операция завершена.")
@@ -72,14 +76,14 @@ class TestAnswerRequiredGuard(unittest.TestCase):
 
     def test_text_answer_without_answer_tool_then_text_again_no_message(self):
         """Если модель упорно не вызывает answer, цикл продолжается (не обрывается),
-        пока она наконец не вызовет answer — здесь answer('no'), правка отменяется."""
+        пока она наконец не вызовет answer — здесь answer_to_system('no'), правка отменяется."""
         path = os.path.join(self._tmp, "x.txt")
         with open(path, "w", encoding="utf-8") as f:
             f.write("a\n")
 
         edit_call = AssistantMessage(
             content="Отредактирую файл.",
-            tool_calls=[ToolCall(id="c1", name="edit_file", arguments=json.dumps({
+            tool_calls=[ToolCall(id="c1", name=line_range_edit_tool_name, arguments=json.dumps({
                 "path": path,
                 "new_text": "b\n",
                 "start_line": 1,
@@ -90,7 +94,7 @@ class TestAnswerRequiredGuard(unittest.TestCase):
         text2 = AssistantMessage(content="Ладно, но вызвать инструмент не буду.")
         answer_no = AssistantMessage(
             content="Отменяю.",
-            tool_calls=[ToolCall(id="c2", name="answer", arguments='{"text": "no"}')],
+            tool_calls=[ToolCall(id="c2", name=answer_tool_name, arguments='{"text": "no"}')],
         )
         final_reply = AssistantMessage(content="Готово.")
 
@@ -122,16 +126,16 @@ class TestAnswerRequiredGuard(unittest.TestCase):
 
         edit_call = AssistantMessage(
             content="Отредактирую файл.",
-            tool_calls=[ToolCall(id="c1", name="edit_file", arguments=json.dumps({
+            tool_calls=[ToolCall(id="c1", name=line_range_edit_tool_name, arguments=json.dumps({
                 "path": path, "new_text": "b\n", "start_line": 1, "end_line": 1}))],
         )
         bare_answer = AssistantMessage(
             content="",
-            tool_calls=[ToolCall(id="c2", name="answer", arguments='{"text": "yes"}')],
+            tool_calls=[ToolCall(id="c2", name=answer_tool_name, arguments='{"text": "yes"}')],
         )
         aware_answer = AssistantMessage(
             content="Подтверждаю правку.",
-            tool_calls=[ToolCall(id="c3", name="answer", arguments='{"text": "yes"}')],
+            tool_calls=[ToolCall(id="c3", name=answer_tool_name, arguments='{"text": "yes"}')],
         )
         final_reply = AssistantMessage(content="Готово.")
 
@@ -156,7 +160,7 @@ class TestAnswerRequiredGuard(unittest.TestCase):
             self.assertEqual(f.read(), "b")
         self.assertIsNone(agent._pending_operation)
         # Голый answer был перегенерирован: до следующего вызова LLM дошёл prefill 'Assistant:'.
-        self.assertIn("Assistant:", seen)
+        self.assertIn(_NO_COMMENT_PREFILL, seen)
         # В истории есть только осознанный ответ модели (с текстом), а не голый вызов.
         msgs = agent.history.get_all()
         texts = [getattr(m, "content", "") or "" for m in msgs]
@@ -172,17 +176,17 @@ class TestAnswerRequiredGuard(unittest.TestCase):
 
         edit_call = AssistantMessage(
             content="Отредактирую файл.",
-            tool_calls=[ToolCall(id="c1", name="edit_file", arguments=json.dumps({
+            tool_calls=[ToolCall(id="c1", name=line_range_edit_tool_name, arguments=json.dumps({
                 "path": path, "new_text": "b\n", "start_line": 1, "end_line": 1}))],
         )
         bare_edit = AssistantMessage(
             content="",
-            tool_calls=[ToolCall(id="c2", name="edit_file", arguments=json.dumps({
+            tool_calls=[ToolCall(id="c2", name=line_range_edit_tool_name, arguments=json.dumps({
                 "path": path, "new_text": "c\n", "start_line": 1, "end_line": 1}))],
         )
         text_no_answer = AssistantMessage(content="Продолжу без ответа.")
         answer_call = AssistantMessage(
-            content="да", tool_calls=[ToolCall(id="c3", name="answer", arguments='{"text": "yes"}')],
+            content="да", tool_calls=[ToolCall(id="c3", name=answer_tool_name, arguments='{"text": "yes"}')],
         )
         final_reply = AssistantMessage(content="Готово.")
 
@@ -204,12 +208,12 @@ class TestAnswerRequiredGuard(unittest.TestCase):
             result = agent.chat("Измени файл", max_iter=10)
 
         self.assertIn("Готово", result)
-        # Применена первая правка (ответ 'yes'), голый повторный edit_file не исполнился.
+        # Применена первая правка (ответ 'yes'), голый повторный line_range_edit не исполнился.
         with open(path, encoding="utf-8") as f:
             self.assertEqual(f.read(), "b")
         self.assertIsNone(agent._pending_operation)
         # Prefill 'Assistant:' дошёл до следующего вызова LLM — guard его не съел.
-        self.assertIn("Assistant:", seen)
+        self.assertIn(_NO_COMMENT_PREFILL, seen)
         # Guard всё равно сработал после перегенерации (модель так и не ответила).
         msgs = agent.history.get_all()
         texts = [getattr(m, "content", "") or "" for m in msgs]
@@ -225,20 +229,20 @@ class TestAnswerRequiredGuard(unittest.TestCase):
 
         edit_call = AssistantMessage(
             content="Отредактирую файл.",
-            tool_calls=[ToolCall(id="c1", name="edit_file", arguments=json.dumps({
+            tool_calls=[ToolCall(id="c1", name=line_range_edit_tool_name, arguments=json.dumps({
                 "path": path, "new_text": "b\n", "start_line": 1, "end_line": 1}))],
         )
         bare_answer = AssistantMessage(
             content="",
-            tool_calls=[ToolCall(id="c2", name="answer", arguments='{"text": "yes"}')],
+            tool_calls=[ToolCall(id="c2", name=answer_tool_name, arguments='{"text": "yes"}')],
         )
         prefilled_bare = AssistantMessage(
-            content="Assistant:",
-            tool_calls=[ToolCall(id="c3", name="answer", arguments='{"text": "yes"}')],
+            content=_NO_COMMENT_PREFILL,
+            tool_calls=[ToolCall(id="c3", name=answer_tool_name, arguments='{"text": "yes"}')],
         )
         aware_answer = AssistantMessage(
             content="Подтверждаю правку.",
-            tool_calls=[ToolCall(id="c4", name="answer", arguments='{"text": "yes"}')],
+            tool_calls=[ToolCall(id="c4", name=answer_tool_name, arguments='{"text": "yes"}')],
         )
         final_reply = AssistantMessage(content="Готово.")
 
@@ -262,8 +266,114 @@ class TestAnswerRequiredGuard(unittest.TestCase):
             self.assertEqual(f.read(), "b")
         # Исполнился ровно один answer — только осознанный (с настоящим текстом).
         msgs = agent.history.get_all()
-        answers = [m for m in msgs if m.to_api_dict()["role"] == "tool" and m.name == "answer"]
+        answers = [m for m in msgs if m.to_api_dict()["role"] == "tool" and m.name == answer_tool_name]
         self.assertEqual(len(answers), 1)
+
+    def test_answer_without_pending_returns_error(self):
+        """answer_to_system() без вопроса от системы — ошибка, а не молчаливое 'Recorded'.
+        Модель должна видеть явный отказ и ответить текстом."""
+        agent = LLMAgent(
+            system_prompt="You are helpful.",
+            external_plugins={answer_tool_name: answer_to_system},
+            disable_per_msg_summarization=True,
+            autosave_enabled=False,
+        )
+        rogue_answer = AssistantMessage(
+            content="Помогу!",
+            tool_calls=[ToolCall(id="c1", name=answer_tool_name, arguments='{"text": "Привет"}')],
+        )
+        final_reply = AssistantMessage(content="Я умею работать с файлами.")
+
+        with mock.patch(
+            "universal_agents.agent.LLMClient.call",
+            side_effect=[(rogue_answer, None, None), (final_reply, None, None)],
+        ):
+            result = agent.chat("Расскажи что умеешь", max_iter=10)
+
+        self.assertIn("Я умею работать с файлами", result)
+        # В истории остался результат инструмента с явной ошибкой (не 'Recorded').
+        msgs = agent.history.get_all()
+        tool_results = [m.content for m in msgs if m.to_api_dict()["role"] == "tool"]
+        self.assertTrue(any("requires a pending" in c for c in tool_results))
+        self.assertTrue(all("Recorded" not in c for c in tool_results))
+
+    def test_bare_answer_without_pending_does_not_loop(self):
+        """Голый answer_to_system() без pending-операции перегенерируется через
+        [NO COMMENT] не больше NO_COMMENT_RETRIES раз, затем принимается как есть:
+        инструмент возвращает ошибку, и цикл завершается текстовым ответом — без
+        бесконечного зацикливания."""
+        agent = LLMAgent(
+            system_prompt="You are helpful.",
+            external_plugins={answer_tool_name: answer_to_system},
+            disable_per_msg_summarization=True,
+            autosave_enabled=False,
+        )
+        bare_answer_tpl = {
+            "content": "",
+            "tool_calls": [ToolCall(id="c1", name=answer_tool_name, arguments='{"text": "yes"}')],
+        }
+        final_reply = AssistantMessage(content="Всё, готово.")
+
+        seen = []
+        # Первые (NO_COMMENT_RETRIES+1) сообщений — голый answer: первые N отвергаются
+        # и перегенерируются с prefill, последний исполняется как есть (ретраи исчерпаны)
+        # и возвращает ошибку инструмента. Объекты создаём заново: обработчик мутирует
+        # message_obj (стирает tool_calls) при каждом rerun.
+        retries = Config.NO_COMMENT_RETRIES
+
+        def fresh_bare_answer():
+            return (AssistantMessage(content=bare_answer_tpl["content"], tool_calls=list(bare_answer_tpl["tool_calls"])), None, None)
+
+        responses = [fresh_bare_answer() for _ in range(retries + 1)] + [(final_reply, None, None)]
+
+        def fake_call(messages, prefill=None, **kwargs):
+            seen.append(prefill)
+            return responses.pop(0)
+
+        with mock.patch("universal_agents.agent.LLMClient.call", side_effect=fake_call):
+            result = agent.chat("Привет", max_iter=10)
+
+        self.assertIn("Всё, готово", result)
+        # Голый answer перегенерировался ровно NO_COMMENT_RETRIES раз с prefill.
+        self.assertEqual(seen.count(_NO_COMMENT_PREFILL), retries)
+        # Инструмент исполнился один раз (когда ретраи кончились) и вернул ошибку.
+        msgs = agent.history.get_all()
+        answers = [m for m in msgs if m.to_api_dict()["role"] == "tool" and m.name == answer_tool_name]
+        self.assertEqual(len(answers), 1)
+        self.assertTrue(any("requires a pending" in m.content for m in answers))
+
+    def test_answer_with_pending_still_works(self):
+        """answer_to_system() после вопроса системы (pending) работает как раньше."""
+        path = os.path.join(self._tmp, "p.txt")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("a\n")
+
+        edit_call = AssistantMessage(
+            content="Отредактирую.",
+            tool_calls=[ToolCall(id="c1", name=line_range_edit_tool_name, arguments=json.dumps({
+                "path": path, "new_text": "b\n", "start_line": 1, "end_line": 1}))],
+        )
+        answer_yes = AssistantMessage(
+            content="Подтверждаю.",
+            tool_calls=[ToolCall(id="c2", name=answer_tool_name, arguments='{"text": "yes"}')],
+        )
+        final_reply = AssistantMessage(content="Готово.")
+
+        with mock.patch(
+            "universal_agents.agent.LLMClient.call",
+            side_effect=[(edit_call, None, None), (answer_yes, None, None), (final_reply, None, None)],
+        ):
+            agent = self.make_agent()
+            result = agent.chat("Измени p.txt", max_iter=10)
+
+        self.assertIn("Готово", result)
+        with open(path, encoding="utf-8") as f:
+            self.assertEqual(f.read(), "b")
+        # Правка применена — answer с pending не вернул ошибку.
+        msgs = agent.history.get_all()
+        answers = [m for m in msgs if m.to_api_dict()["role"] == "tool" and m.name == answer_tool_name]
+        self.assertEqual(len(answers), 1)
+        self.assertFalse(any("requires a pending" in m.content for m in answers))
 
 if __name__ == "__main__":
     unittest.main()

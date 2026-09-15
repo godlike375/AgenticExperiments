@@ -1,4 +1,5 @@
 import unittest
+import threading
 from unittest import mock
 from types import SimpleNamespace
 
@@ -33,6 +34,7 @@ class FakeAgent(MemoryMixin):
         self.task_plan = []
         self.task_plan_map = {}
         self._compacted_task_ids = set()
+        self.stop_event = threading.Event()
         # Реальный service_llm_call поверх мок-агента: транспорт перехватывается
         # через mock.patch("...LLMClient.call"), как в test_compressors.py.
         from universal_agents.llm_client import LLMClient
@@ -58,7 +60,7 @@ def _compression_router(summary_text=SUMMARY_TEXT, calls=None):
         if calls is not None:
             calls.append(msgs)
         prompt = msgs[-1]["content"]
-        if "Write the full session summary from the beginning" in prompt:
+        if "Fill these sections of the very detailed session summary" in prompt:
             return (SimpleNamespace(content=summary_text, tool_calls=None), None, None)
         return (SimpleNamespace(content="ok", tool_calls=None), None, None)
     return fake_call
@@ -85,7 +87,7 @@ class TestFirstCompaction(unittest.TestCase):
 
     def _run(self):
         with mock.patch(
-            "universal_agents.compressors.LLMClient.call",
+            "universal_agents.llm_client.LLMClient.call",
             side_effect=_compression_router(),
         ):
             self.agent._auto_summarize_dialogue()
@@ -122,7 +124,7 @@ class TestFirstCompaction(unittest.TestCase):
             return (SimpleNamespace(content="", tool_calls=None), "boom", None)
 
         before = len(self.agent.history)
-        with mock.patch("universal_agents.compressors.LLMClient.call", side_effect=broken):
+        with mock.patch("universal_agents.llm_client.LLMClient.call", side_effect=broken):
             self.agent._auto_summarize_dialogue()
         self.assertEqual(len(self.agent.history), before)
         self.assertFalse(_summary_msgs(self.agent.history))
@@ -134,7 +136,7 @@ class TestSecondCompaction(unittest.TestCase):
         self.agent = FakeAgent()
         _seed_dialog(self.agent)
         with mock.patch(
-            "universal_agents.compressors.LLMClient.call",
+            "universal_agents.llm_client.LLMClient.call",
             side_effect=_compression_router(),
         ):
             self.agent._auto_summarize_dialogue()
@@ -144,7 +146,7 @@ class TestSecondCompaction(unittest.TestCase):
 
     def test_single_summary_after_second_run(self):
         with mock.patch(
-            "universal_agents.compressors.LLMClient.call",
+            "universal_agents.llm_client.LLMClient.call",
             side_effect=_compression_router(),
         ):
             self.agent._auto_summarize_dialogue()
@@ -158,28 +160,30 @@ class TestSecondCompaction(unittest.TestCase):
     def test_prompt_includes_existing_notes_and_segment(self):
         captured = []
         with mock.patch(
-            "universal_agents.compressors.LLMClient.call",
+            "universal_agents.llm_client.LLMClient.call",
             side_effect=_compression_router(calls=captured),
         ):
             self.agent._auto_summarize_dialogue()
         msgs = captured[-1]
         instruction = msgs[-1]["content"]
-        # Старые заметки поданы отдельным блоком для слияния
-        self.assertIn("EXISTING SUMMARY:", instruction)
-        self.assertIn("Задача: отчёт о дельфинах.", instruction)
-        # Полная история (включая новый сегмент) — структурированными сообщениями
+        # Старые заметки передаются через полную историю, а не отдельным блоком в инструкции
         full_text = "\n".join(
             m["content"] for m in msgs
             if isinstance(m.get("content"), str)
         )
+        self.assertIn("Задача: отчёт о дельфинах.", full_text)
         self.assertIn("go on", full_text)
-        # инструкция не дублирует обёртку старого саммари
+        # Инструкция напоминает принести свежие вещи, но не дублирует обёртку старого саммари
+        self.assertIn(
+            "If it's not the first summary then do your best to bring fresh things into this new detailed summary.",
+            instruction,
+        )
         self.assertNotIn(f"{SUMMARY_MARKER}:", instruction)
 
     def test_old_summary_archived_before_rewrite(self):
         archive_len_before = len(self.agent.archive)
         with mock.patch(
-            "universal_agents.compressors.LLMClient.call",
+            "universal_agents.llm_client.LLMClient.call",
             side_effect=_compression_router(),
         ):
             self.agent._auto_summarize_dialogue()
@@ -191,7 +195,7 @@ class TestSecondCompaction(unittest.TestCase):
         self.agent.on_system_msg = notes.append
         before = len(self.agent.history)
         with mock.patch(
-            "universal_agents.compressors.LLMClient.call",
+            "universal_agents.llm_client.LLMClient.call",
             side_effect=lambda msgs, **kw: (None, "boom", None),
         ):
             self.agent._auto_summarize_dialogue()
@@ -208,7 +212,7 @@ class TestUnsafeBoundary(unittest.TestCase):
         _seed_dialog(agent)
         agent.history.add(AssistantMessage(content="text answer only"))
         before = len(agent.history)
-        with mock.patch("universal_agents.compressors.LLMClient.call", side_effect=_compression_router()):
+        with mock.patch("universal_agents.llm_client.LLMClient.call", side_effect=_compression_router()):
             agent._auto_summarize_dialogue()
         self.assertEqual(len(agent.history), before)
 
@@ -218,7 +222,7 @@ class TestPersistenceRoundTrip(unittest.TestCase):
         import tempfile, os
         agent = FakeAgent()
         _seed_dialog(agent)
-        with mock.patch("universal_agents.compressors.LLMClient.call", side_effect=_compression_router()):
+        with mock.patch("universal_agents.llm_client.LLMClient.call", side_effect=_compression_router()):
             agent._auto_summarize_dialogue()
         agent.archive.append_messages(agent.history.get_all()[1:2])
         agent.task_plan = ["t1"]
@@ -266,11 +270,10 @@ class TestRecallTools(unittest.TestCase):
 
         agent = FakeAgent()
         _seed_dialog(agent)
-        with mock.patch("universal_agents.compressors.LLMClient.call", side_effect=_compression_router()):
+        with mock.patch("universal_agents.llm_client.LLMClient.call", side_effect=_compression_router()):
             agent._auto_summarize_dialogue()
 
         out = mem_tools.recall_search(agent, query="dolphins")
-        self.assertIn("[[SYSTEM]]", out)
         self.assertIn("seq=", out)
         out_read = mem_tools.recall_read(agent, from_seq=2, to_seq=2)
         self.assertIn("#2", out_read)

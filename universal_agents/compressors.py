@@ -8,13 +8,16 @@ from universal_agents.constants import (
     SUMMARY_PREFIX_AI,
     SUMMARY_PREFIX_TOOL_CALL,
     SUMMARY_PREFIX_TOOL_RESULT,
+    SUMMARY_PREFIX_TOOL_NAMED,
+    SUMMARY_MARKER,
 )
 from universal_agents.models import UserMessage, AssistantMessage, ToolResult
 from universal_agents.llm_client import TokenUsageTracker
 from universal_agents.context_builder import prepare_messages_for_api
+from universal_agents.tools.fs import read as _read_tool
 
 if TYPE_CHECKING:
-    from universal_agents.agent import LLMAgent
+    from universal_agents.context import AgentContext
 
 SECTION_GUIDE = """
 * 1.1 Ключевой контекст, сущности и связи.
@@ -82,7 +85,7 @@ def _find_existing_summary(messages: list, end_id: int) -> Optional[dict]:
     return None
 
 
-def _report_service_error(agent: LLMAgent, context: str, err, msg_obj=None) -> None:
+def _report_service_error(agent: AgentContext, context: str, err, msg_obj=None) -> None:
     """Ошибки служебных LLM-вызовов не тонут — выводятся в system-канал."""
     if err:
         agent.on_system_msg(f"[llm-service] Error in {context}: {err}")
@@ -90,7 +93,7 @@ def _report_service_error(agent: LLMAgent, context: str, err, msg_obj=None) -> N
         agent.on_system_msg(f"[llm-service] {context}: empty response from LLM")
 
 
-def _dense_summarize_message(agent: LLMAgent, content: str) -> Optional[str]:
+def _dense_summarize_message(agent: AgentContext, content: str) -> Optional[str]:
     """Плотное безпотерьное саммари одного сообщения (per-message режим); складывается в рабочую память."""
     content = (content or "").strip()
     if not content:
@@ -114,7 +117,7 @@ def _dense_summarize_message(agent: LLMAgent, content: str) -> Optional[str]:
 
 
 def _build_from_per_message_summaries(
-    agent: LLMAgent, start_id: Optional[int], end_id: Optional[int],
+    agent: AgentContext, start_id: Optional[int], end_id: Optional[int],
     truncate_result_ratio: float = 0.0, truncate_result_min_chars: int = 0,
 ) -> Optional[str]:
     """Собирает короткий диалог из накопленных per-message саммари (без саммари — исходный контент); None, если саммари нет."""
@@ -163,7 +166,7 @@ def _build_from_per_message_summaries(
 
 
 def _draft_task_summary(
-    agent: LLMAgent, history_msgs: list[dict], task_id: str, task_title: str
+    agent: AgentContext, history_msgs: list[dict], task_id: str, task_title: str
 ) -> Optional[str]:
     """Черновик саммари завершённой подзадачи по её сегменту истории."""
     prompt = (
@@ -189,7 +192,7 @@ def _draft_task_summary(
 
 
 def _review_task_summary(
-    agent: LLMAgent, history_msgs: list[dict], draft: str, task_id: str, task_title: str
+    agent: AgentContext, history_msgs: list[dict], draft: str, task_id: str, task_title: str
 ) -> Optional[str]:
     """Review-проход: прунинг устаревшего + добавление пропущенного в черновике."""
     review_prompt = (
@@ -212,7 +215,7 @@ def _review_task_summary(
     return msg_obj.content.strip()
 
 
-def synthesize_task_goal(agent: LLMAgent, tool_name: str) -> str:
+def synthesize_task_goal(agent: AgentContext, tool_name: str) -> str:
     """Формулирует через LLM точную цель анализа вывода конкретного инструмента."""
     agent.on_system_msg(f"[GOAL SYNTHESIS] Analyzing conversation history to formulate goal for '{tool_name}'...")
 
@@ -248,7 +251,7 @@ def synthesize_task_goal(agent: LLMAgent, tool_name: str) -> str:
     return synthesized_goal
 
 
-def auto_compress_tool_result(agent: LLMAgent, tool_result: ToolResult) -> None:
+def auto_compress_tool_result(agent: AgentContext, tool_result: ToolResult) -> None:
     """Автоматически сжимает длинный вывод инструмента перед добавлением в историю (порционный анализ)."""
     if tool_result.is_error or tool_result.is_user_denied:
         return
@@ -291,7 +294,7 @@ def auto_compress_tool_result(agent: LLMAgent, tool_result: ToolResult) -> None:
         )
 
 
-def chunk_and_summarize_large_text(agent: LLMAgent, text: str, tool_name: str, task_goal: str) -> str:
+def chunk_and_summarize_large_text(agent: AgentContext, text: str, tool_name: str, task_goal: str) -> str:
     """Инкрементально собирает факты по чанкам и синтезирует их в единый отчёт."""
     agent.on_system_msg(f"[CHUNK ANALYZER] Starting chunked analysis of {len(text)} chars for tool '{tool_name}'...")
 
@@ -399,7 +402,7 @@ def chunk_and_summarize_large_text(agent: LLMAgent, text: str, tool_name: str, t
 
 
 def summarize_history_plain(
-    agent: LLMAgent,
+    agent: AgentContext,
     history_msgs: list[dict],
     temp: float = 0.1,
     extra_instruction: str = None,
@@ -423,3 +426,215 @@ def summarize_history_plain(
         _report_service_error(agent, "dialog plain summary", err, msg_obj)
         return None
     return msg_obj.content.strip()
+
+
+# ============================================================
+# SummaryService — единая точка для всех видов суммаризации
+# ============================================================
+
+
+def _raw_summary(content: str) -> str:
+    """Извлекает чистый текст саммари из содержимого summary-сообщения (убирая обёртку [[SYSTEM]] и служебный префикс), чтобы сравнивать старую и новую саммари на тождественность."""
+    s = content or ""
+    marker = f": [{SUMMARY_MARKER}]:"
+    if marker in s:
+        s = s.split(marker, 1)[1]
+    s = s.replace(ENVIRONMENT_PREFIX, "").replace(ENVIRONMENT_PREFIX_END, "")
+    return s.strip()
+
+
+def _validate_summary_sections(text: str, include_73: bool = False) -> str | None:
+    """Проверяет, что саммари содержит все обязательные разделы (1.1-7.2, опционально 7.3).
+    Возвращает строку с перечнем отсутствующих разделов или None, если всё на месте."""
+    required = _REQUIRED_SECTION_IDS_WITH_73 if include_73 else _REQUIRED_SECTION_IDS
+    missing = [sec for sec in required if not _re.search(r'\b' + _re.escape(sec) + r'\b', text)]
+    return ", ".join(missing) if missing else None
+
+
+class SummaryService:
+    """Единственная точка для суммаризации: per-message плотные саммари рабочих нот
+    (summarize_if_long) и компактизация диалога в session summary (compact_segment).
+
+    Инкапсулирует: порог длины (MIN_TOKENS_TO_SUMMARIZE), префиксы хранения,
+    retry-логику компакции (буст температуры, проверку обязательных разделов,
+    детект повтора). Миксин MemoryMixin вызывает сервис вместо собственной логики.
+    """
+
+    @staticmethod
+    def summarize_if_long(agent: AgentContext, msg) -> None:
+        """Плотное саммари одного длинного сообщения в рабочую память (вне контекста);
+        только для контента длиннее порога. Понимает UserMessage/AssistantMessage/ToolResult
+        (выбирает префикс хранения по роли; для read заменяет контент прямо в результате).
+        Ничего не делает, если суммаризация выключена/невыгодна/ошибочна."""
+        if not Config.PER_MSG_SUMMARIES_ENABLED:
+            return
+        is_tool = isinstance(msg, ToolResult)
+        if is_tool and (msg.is_error or msg.is_user_denied):
+            return
+        if getattr(msg, "skip_summarize", False):
+            return
+        content = (msg.content or "").strip()
+        MIN_CHARS = int(MIN_TOKENS_TO_SUMMARIZE * CHARS_PER_TOKEN)
+        if len(content) < MIN_CHARS:
+            return
+        summary = _dense_summarize_message(agent, content)
+        if not summary:
+            return
+
+        if is_tool:
+            stored = SUMMARY_PREFIX_TOOL_NAMED.format(name=msg.name) + f" {summary}"
+            if len(stored) >= len(content):
+                return
+            if msg.name == _read_tool.__name__:
+                msg.content = summary
+                agent.on_system_msg(
+                    f"[READ SUMMARIZED] read result replaced with summary "
+                    f"({len(content)} -> {len(summary)} chars)."
+                )
+                return
+            agent.history.set_per_msg_summary(msg, stored)
+            agent.on_system_msg(
+                f"[PER-MSG SUMMARY] Tool '{msg.name}' output ({len(content)} chars) "
+                f"summarized into working memory ({len(summary)} chars)."
+            )
+            return
+
+        if isinstance(msg, UserMessage):
+            prefix, kind = SUMMARY_PREFIX_USER, "User message"
+        else:
+            prefix, kind = SUMMARY_PREFIX_AI, "Assistant message"
+        stored = f"{prefix} {summary}"
+        if len(stored) >= len(content):
+            return
+        agent.history.set_per_msg_summary(msg, stored)
+        agent.on_system_msg(
+            f"[PER-MSG SUMMARY] {kind} ({len(content)} chars) "
+            f"summarized into working memory ({len(summary)} chars)."
+        )
+
+    @staticmethod
+    def compact_segment(agent: AgentContext, force: bool = False) -> bool:
+        """Компакция: сегмент уходит в архив, вместо него — session summary (UserMessage после system prompt).
+        Первая компакция пишет заметки с нуля, повторные правят по SEARCH/REPLACE; при неудаче история не трогается.
+
+        force=True — принудительная компакция (команда /compact_history): сжимает даже на ассистентской границе.
+        Возвращает True, если история реально сжата."""
+        preserve_last = Config.AUTO_SUMMARY_PRESERVE_LAST
+
+        # Остановка пользователя: не начинаем долгую компакцию и не трогаем историю.
+        if agent.stop_event.is_set():
+            agent._auto_summarize_suppressed = True
+            return False
+
+        # --- Точка срабатывания: только на «безопасных» границах (force — сжимаем в любом месте) ---
+        popped_calls = agent.history.pop_pending_tool_calls()
+
+        last = agent.history.get_last_message()
+        if not (isinstance(last, ToolResult) or isinstance(last, UserMessage)):
+            if not force:
+                return False
+            agent.on_system_msg(
+                "[COMPACT-HISTORY] Forced compaction on an assistant-message boundary "
+                "(the last response will be preserved)."
+            )
+
+        tag = "COMPACT-HISTORY" if force else "AUTO-SUMMARY"
+        if popped_calls:
+            agent.on_system_msg(
+                f"[{tag}] Removed {popped_calls} pending tool call(s) before "
+                f"summarizing; assistant will re-invoke after compression."
+            )
+
+        messages = agent.history.get_all()
+        start_id = Config.AFTER_SYSTEM_PROMPT
+        end_id = len(messages) - 1 - preserve_last
+        if start_id > end_id:
+            if force:
+                agent.on_system_msg("[COMPACT-HISTORY] Nothing to compress: history is too short.")
+            return False
+
+        original_len = agent.history.content_len(start_id, end_id)
+
+        # --- 1. Архивация оригиналов ДО удаления (recall остаётся возможен) ---
+        if Config.MEMORY_ARCHIVE_ENABLED and hasattr(agent, "archive"):
+            added = agent.archive.append_messages(messages[start_id:end_id + 1])
+            agent.on_system_msg(f"[ARCHIVE] Stored {added} original message(s) for recall.")
+
+        # Один вызов LLM: переписываем заметки с нуля. Подаём полную историю как structured API-сообщения
+        # (system prompt первым) в ТОМ ЖЕ формате, что и диалог, иначе префикс разойдётся и KV-кэш сбросится.
+        history_msgs = prepare_messages_for_api(agent, normalize=False)
+        FORBID_TOOLS_MSG = (
+            f"{ENVIRONMENT_PREFIX} Возможно, ты попытался вызвать инструмент, но здесь "
+            f"инструменты ЗАПРЕЩЕНЫ — сгенерируй саммари ТОЛЬКО текстом, без вызовов "
+            f"инструментов. Попробуй ещё раз.{ENVIRONMENT_PREFIX_END}"
+        )
+        # Старая саммари (для детекта повтора: новая не должна быть ей тождественна).
+        prev_summary = agent.history.get_session_summary()
+
+        summary_text = None
+        include_73 = prev_summary is not None
+        for attempt in range(1, Config.AUTO_SUMMARY_MAX_RETRIES + 1):
+            # Пользователь запросил остановку — прекращаем ретраи, не открывая новые стримы.
+            if agent.stop_event.is_set():
+                agent._auto_summarize_suppressed = True
+                agent.on_system_msg(
+                    "[AUTO-SUMMARY] Compaction stopped by user; history left unchanged."
+                )
+                return False
+            # Лёгкий рост температуры между попытками, чтобы не повторять ту же ошибку.
+            if (prev_summary is not None and summary_text is not None
+                    and _raw_summary(summary_text) == _raw_summary(prev_summary)):
+                temp = Config.SUMMARY_DUPLICATE_TEMP
+            else:
+                temp = Config.TEMP + 0.2 * (attempt - 1)
+            extra = FORBID_TOOLS_MSG if attempt > 1 else None
+            summary_text = summarize_history_plain(
+                agent, history_msgs, temp=temp, extra_instruction=extra,
+                include_new_to_previous=include_73,
+            )
+            if summary_text:
+                # Повтор саммари: модель проигнорировала новый контент и вернула старую —
+                # заставляем перегенерировать (как и при других повторах), с бустом температуры.
+                if prev_summary is not None and _raw_summary(summary_text) == _raw_summary(prev_summary):
+                    agent.on_system_msg(
+                        f"[AUTO-SUMMARY] New summary is identical to the existing one "
+                        f"(attempt {attempt}/{Config.AUTO_SUMMARY_MAX_RETRIES}); "
+                        f"regenerating with temperature boost ({Config.SUMMARY_DUPLICATE_TEMP})."
+                    )
+                    continue
+                # Проверяем, что саммари содержит все обязательные разделы (1.1-7.2/7.3).
+                missing = _validate_summary_sections(summary_text, include_73=include_73)
+                if missing:
+                    agent.on_system_msg(
+                        f"[AUTO-SUMMARY] Summary is missing sections: {missing} "
+                        f"(attempt {attempt}/{Config.AUTO_SUMMARY_MAX_RETRIES}); "
+                        f"retrying with temperature boost."
+                    )
+                    continue
+                break
+            agent.on_system_msg(
+                f"[AUTO-SUMMARY] Compression call failed (attempt {attempt}/"
+                f"{Config.AUTO_SUMMARY_MAX_RETRIES}); retrying..."
+            )
+        if not summary_text:
+            agent._auto_summarize_suppressed = True
+            agent.on_system_msg(
+                "[AUTO-SUMMARY] Compression call failed after "
+                f"{Config.AUTO_SUMMARY_MAX_RETRIES} attempts; history left unchanged."
+            )
+            return False
+
+        # --- 3. Удаляем сегмент из истории, оставляя текст как контекст ---
+        agent.history.compress_old_messages(summary_text, preserve_last)
+
+        agent._on_history_changed()
+        agent.history.prune_per_msg_summaries()
+
+        new_len = agent.history.content_len(1, len(agent.history) - 1)
+        final_reduction = 1.0 - (new_len / max(original_len, 1))
+        agent._auto_summarize_suppressed = False
+        agent.on_system_msg(
+            f"[{tag}] Session summary written "
+            f"(-{final_reduction:.0%}); originals archived for recall."
+        )
+        return True

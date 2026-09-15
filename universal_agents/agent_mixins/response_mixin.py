@@ -10,7 +10,7 @@ from universal_agents.tool_parsing import tc_name, tc_args, detect_broken_call, 
 
 # Prefill для перегенерации голого вызова инструмента без пояснения.
 # 'Assistant:' — стартовая приставка, после которой модель должна написать текст.
-_NO_COMMENT_PREFILL = "Assistant:"
+_NO_COMMENT_PREFILL = 'LLM:\n"'
 
 
 class ResponseMixin:
@@ -81,15 +81,22 @@ class ResponseMixin:
             self.on_render(tr)
             self._emit_token_info()
 
-    def _process_llm_response(self, message_obj) -> tuple[str, bool, bool, Optional[str]]:
+    def _process_llm_response(self, message_obj, no_comment_retry_left: int = 1,
+                              reasoning_effort: Optional[str] = None) -> tuple[str, bool, bool, Optional[str]]:
         """Обрабатывает сырой ответ LLM. Возвращает (text, tool_error, broken_call, rerun_prefill);
-        rerun_prefill непуст, когда следующий ход надо перегенерировать с указанным prefill (напр. 'Assistant:')."""
+        rerun_prefill непуст, когда следующий ход надо перегенерировать с указанным prefill (_NO_COMMENT_PREFILL).
+        no_comment_retry_left — сколько раз ещё можно перегенерировать голый вызов инструмента
+        без пояснения; агенту достаётся из TurnState (Config.NO_COMMENT_RETRIES).
+        reasoning_effort — ожидаемое значение хода из API (отличает «модель уже прокомментировала
+        ход в reasoning_content»); по умолчанию берётся текущее состояние агента."""
+        if reasoning_effort is None:
+            reasoning_effort = self._reasoning_effort
         if not message_obj:
             return "Empty response", True, False, None
 
         content = message_obj.content or ""
         clean_content = content.strip()
-        # Впрыснутый prefill («Assistant:») сам по себе объяснением не считается:
+        # Впрыснутый prefill сам по себе объяснением не считается:
         # модель должна написать текст сама. Обычно prefill попадает в content как
         # отдельное сообщение (тогда substantive == clean_content); если же шлюз
         # приклеил его к ответу — срезаем маркер перед проверкой.
@@ -118,19 +125,31 @@ class ResponseMixin:
         if (
             assistant_msg.has_tool_calls()
             and not substantive
-            and self._reasoning_effort == "none"
+            and reasoning_effort == "none"
         ):
             tool_names = [tc.name for tc in assistant_msg.tool_calls]
-            # Вместо warning-сообщения: стираем (не добавляем) пустой ответ ассистента
-            # и перегенерируем следующий ход с prefill, чтобы модель начала
-            # с текстового комментария перед вызовом инструмента.
-            # При активном reasoning это не нужно: модель уже «прокомментировала» ход в
-            # reasoning_content, поэтому пустой вызов принимаем и исполняем как обычно.
-            assistant_msg.tool_calls = []
-            if message_obj.tool_calls:
-                message_obj.tool_calls = []
-            self.on_system_msg(f"[NO COMMENT] Tool call `{tool_names[0]}` with no explanation before were rejected: rerunning with '{_NO_COMMENT_PREFILL}' prefill.")
-            return clean_content, False, False, _NO_COMMENT_PREFILL
+            # Голый вызов инструмента без пояснения (reasoning выключен): стираем
+            # (не добавляем) пустой ответ ассистента и перегенерируем следующий ход
+            # с prefill, чтобы модель начала с текстового комментария перед вызовом.
+            # При активном reasoning это не нужно — модель уже прокомментировала ход
+            # в reasoning_content. Лимит ретраев у агента; пока они есть (попытка
+            # считается только когда prefill реально запрошен) — см. NO_COMMENT_RETRIES.
+            if no_comment_retry_left > 0:
+                assistant_msg.tool_calls = []
+                if message_obj.tool_calls:
+                    message_obj.tool_calls = []
+                self.on_system_msg(
+                    f"[NO COMMENT] Tool call `{tool_names[0]}` with no explanation before were rejected: "
+                    f"rerunning with '{_NO_COMMENT_PREFILL}' prefill "
+                    f"({no_comment_retry_left} retr{'y' if no_comment_retry_left == 1 else 'ies'} left)."
+                )
+                return clean_content, False, False, _NO_COMMENT_PREFILL
+            # Ретраи исчерпаны (это касается и answer_to_system без pending-задачи):
+            # принимаем голый вызов как есть — инструмент сам вернёт явную ошибку или
+            # выполнится без комментария, и цикл не зациклится.
+            self.on_system_msg(
+                f"[NO COMMENT] No retries left for bare tool call `{tool_names[0]}`, executing as-is."
+            )
 
         if not clean_content and not assistant_msg.has_tool_calls():
             self.on_system_msg("[EMPTY RESPONSE] Model returned no content. Discarding and retrying...")

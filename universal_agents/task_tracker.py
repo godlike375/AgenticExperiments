@@ -8,12 +8,17 @@ from universal_agents.config import Config
 from universal_agents.constants import ENVIRONMENT_PREFIX, ENVIRONMENT_PREFIX_END, err, ok
 from universal_agents.models import AssistantMessage, UserMessage, ToolResult
 from universal_agents.tool_parsing import parse_tool_args
+from universal_agents.tools.builtin import (
+    have_done as _have_done_tool,
+    load_tool as _load_tool_tool,
+    make_plan as _make_plan_tool,
+)
 
 if TYPE_CHECKING:
-    from universal_agents.agent import LLMAgent
+    from universal_agents.context import AgentContext
 
-DONE_TOOL = "have_done"
-PLAN_TOOL = "make_plan"
+DONE_TOOL = _have_done_tool.__name__
+PLAN_TOOL = _make_plan_tool.__name__
 
 
 # ---------------------------------------------------------------------------
@@ -26,7 +31,7 @@ def plan_leaf_sequence(plan_map: dict) -> list[str]:
     return list(plan_map.keys())
 
 
-def set_plan(agent: LLMAgent, plan_list: list) -> str:
+def set_plan(agent: AgentContext, plan_list: list) -> str:
     """Обработчик make_plan. Сохраняет плоский план на агенте и возвращает порядок."""
     if not isinstance(plan_list, list) or not plan_list:
         return err(": make_plan expects a non-empty list of {id, title} tasks.")
@@ -48,15 +53,15 @@ def set_plan(agent: LLMAgent, plan_list: list) -> str:
     tm = getattr(agent, "tools_manager", None)
     if tm is not None:
         try:
-            if "have_done" not in getattr(agent, "_all_tools", {}):
-                tm.force_load("have_done")
+            if DONE_TOOL not in getattr(agent, "_all_tools", {}):
+                tm.force_load(DONE_TOOL)
         except Exception as e:
-            agent.on_system_msg(f"[TASK PLAN] Failed to attach have_done tool: {e}")
+            agent.on_system_msg(f"[TASK PLAN] Failed to attach {DONE_TOOL} tool: {e}")
     order = plan_leaf_sequence(meta)
     order_str = " -> ".join(order) or "(empty)"
     return (
         f"{ENVIRONMENT_PREFIX} Plan set ({len(meta)} tasks). Execution order: "
-        f"{order_str}. Execute each task REALLY (with real tools: read/search/edit_file/run_bash "
+        f"{order_str}. Execute each task REALLY (with real tools: read/search/line_range_edit/run_bash "
         f"etc.) and only then mark it done with have_done, strictly in this order. "
         f"Do NOT mark a task done without actually doing it."
         f"{ENVIRONMENT_PREFIX_END}"
@@ -68,7 +73,7 @@ def set_plan(agent: LLMAgent, plan_list: list) -> str:
 # ---------------------------------------------------------------------------
 
 
-def mark_task_done(agent: LLMAgent, task_id: str) -> str:
+def mark_task_done(agent: AgentContext, task_id: str) -> str:
     """Обработчик have_done. Информационное подтверждение (не блокирует)."""
     tid = (task_id or "").strip()
     if not tid:
@@ -101,7 +106,7 @@ def _last_plan_position(history: list) -> int:
 
 
 # Инструменты-маркеры, которые НЕ считаются реальной работой.
-_META_TOOLS = {PLAN_TOOL, DONE_TOOL, "load_tool"}
+_META_TOOLS = {PLAN_TOOL, DONE_TOOL, _load_tool_tool.__name__}
 
 
 def _last_real_work_position(history: list, after: int) -> int:
@@ -200,7 +205,7 @@ def validate_task_mark_call(history_before: list, args: dict, plan_map: dict,
     if _last_real_work_position(history_before, segment_after) == -1:
         return (
             f"NO-WORK-DONE: you marked '{tid}' as done, but performed NO actual work since the "
-            f"previous task (no read/search/edit_file/run_bash/run_powershell calls for this task). "
+            f"previous task (no read/search/line_range_edit/run_bash/run_powershell calls for this task). "
             f"Execute this task REALLY with real tools first, then call have_done. "
             f"Do NOT fabricate summaries or mark tasks done without doing the work."
         )
@@ -212,7 +217,7 @@ def validate_task_mark_call(history_before: list, args: dict, plan_map: dict,
 # ---------------------------------------------------------------------------
 
 
-def compact_completed_tasks(agent: LLMAgent) -> int:
+def compact_completed_tasks(agent: AgentContext) -> int:
     """Компактизирует завершённые задачи (по одной за проход, с самой поздней); возвращает число."""
     if not Config.TASK_COMPACTION_ENABLED:
         return 0
@@ -265,7 +270,7 @@ def _leaf_block(history: list, leaf: str, leaves: list, plan_pos: int) -> tuple:
     return start, end
 
 
-def _compact_one_group(agent: LLMAgent) -> Optional[str]:
+def _compact_one_group(agent: AgentContext) -> Optional[str]:
     compacted: set[str] = agent._compacted_task_ids
     plan_map = getattr(agent, "task_plan_map", None) or {}
     if not plan_map:
@@ -319,7 +324,7 @@ def _compact_one_group(agent: LLMAgent) -> Optional[str]:
     return leaf
 
 
-def summarize_task_segment(agent: LLMAgent, segment_msgs: list, task_id: str, task_title: str) -> Optional[str]:
+def summarize_task_segment(agent: AgentContext, segment_msgs: list, task_id: str, task_title: str) -> Optional[str]:
     """Суммаризация сегмента истории через LLM: черновик + review."""
     from universal_agents.compressors import _review_task_summary, _draft_task_summary
     from universal_agents.context_builder import prepare_messages_for_api
@@ -340,7 +345,7 @@ def summarize_task_segment(agent: LLMAgent, segment_msgs: list, task_id: str, ta
 # ---------------------------------------------------------------------------
 
 
-def plan_state_to_dict(agent: "LLMAgent") -> dict:
+def plan_state_to_dict(agent: "AgentContext") -> dict:
     return {
         "task_plan": list(getattr(agent, "task_plan", None) or []),
         "task_plan_map": dict(getattr(agent, "task_plan_map", None) or {}),
@@ -348,7 +353,7 @@ def plan_state_to_dict(agent: "LLMAgent") -> dict:
     }
 
 
-def restore_plan_state(agent: "LLMAgent", data: dict | None) -> None:
+def restore_plan_state(agent: "AgentContext", data: dict | None) -> None:
     if not isinstance(data, dict):
         return
     agent.task_plan = list(data.get("task_plan") or [])

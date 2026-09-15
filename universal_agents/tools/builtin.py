@@ -7,12 +7,12 @@ from universal_agents.config import Config
 from universal_agents.models import UserMessage, AssistantMessage, ToolResult, SystemMessage
 
 if TYPE_CHECKING:
-    from universal_agents.agent import LLMAgent
+    from universal_agents.context import AgentContext
 
 
 @tool(description="Get short indexed current history with ids",
        short_description="show history")
-def get_messages(agent: LLMAgent, chars_per_message: int = 30) -> str:
+def get_messages(agent: AgentContext, chars_per_message: int = 30) -> str:
     history = agent.history
     if len(history) <= Config.AFTER_SYSTEM_PROMPT:
         return ok(" История пока пустая.")
@@ -56,7 +56,7 @@ def get_messages(agent: LLMAgent, chars_per_message: int = 30) -> str:
     old=("str", "Optional exact substr to replace. Empty str replaces whole text"),
     new=("str", "Text to insert in place of old"),
 )
-def edit_message(agent: LLMAgent, id: int, new: str, old: str = '') -> str:
+def edit_message(agent: AgentContext, id: int, new: str, old: str = '') -> str:
     result = agent.history.edit_message(id, new, old)
     tm = getattr(agent, "tools_manager", None)
     if tm is not None:
@@ -71,7 +71,7 @@ def edit_message(agent: LLMAgent, id: int, new: str, old: str = '') -> str:
     start_id=("int", "Starting message ID to delete"),
     end_id=("int", "Optional ending message ID (-1 for last)"),
 )
-def delete_messages(agent: LLMAgent, start_id: int, end_id: int = -1) -> str:
+def delete_messages(agent: AgentContext, start_id: int, end_id: int = -1) -> str:
     result = agent.history.delete_range(start_id, end_id)
     tm = getattr(agent, "tools_manager", None)
     if tm is not None:
@@ -87,7 +87,7 @@ def delete_messages(agent: LLMAgent, start_id: int, end_id: int = -1) -> str:
     start_id=("int", "Start index of messages to summarize"),
     end_id=("int", "End index (inclusive). Use -1 for last message"),
 )
-def summarize_messages(agent: LLMAgent, start_id: int, end_id: int = -1) -> str:
+def summarize_messages(agent: AgentContext, start_id: int, end_id: int = -1) -> str:
     history = agent.history
     if end_id == -1 or end_id >= len(history):
         end_id = len(history) - 3
@@ -141,7 +141,7 @@ def summarize_messages(agent: LLMAgent, start_id: int, end_id: int = -1) -> str:
     task=("str", "Clear task description with all necessary context"),
     max_iter=("int", "Optional max tool calls for sub-agent"),
 )
-def delegate_to_subagent(agent: LLMAgent, task: str, max_iter: int = None) -> str:
+def delegate_to_subagent(agent: AgentContext, task: str, max_iter: int = None) -> str:
     from universal_agents.sub_agent import run_subagent_once
 
     task_with_context = (
@@ -158,8 +158,19 @@ def delegate_to_subagent(agent: LLMAgent, task: str, max_iter: int = None) -> st
     short_description="load/list tools",
     name=("str", "Specific tool name to load"),
 )
-def load_tool(agent: LLMAgent, name: str = "") -> str:
+def load_tool(agent: AgentContext, name: str = "") -> str:
     return agent.load_tool(name)
+
+
+@tool(
+    description="Unload a previously loaded tool by name to free context space. "
+                "The tool stays available until the next history change (KV-cache safe), "
+                "after which it is removed. Core tools cannot be unloaded.",
+    short_description="unload tool",
+    name=("str", "Name of the tool to unload"),
+)
+def unload_tool(agent: AgentContext, name: str) -> str:
+    return agent.unload_tool(name)
 
 
 @tool(
@@ -171,7 +182,7 @@ def load_tool(agent: LLMAgent, name: str = "") -> str:
     short_description="mark task done",
     id=("str", "Task id by the plan")
 )
-def have_done(agent: LLMAgent, id: str) -> str:
+def have_done(agent: AgentContext, id: str) -> str:
     from universal_agents.task_tracker import mark_task_done
 
     return mark_task_done(agent, id)
@@ -185,25 +196,25 @@ def have_done(agent: LLMAgent, id: str) -> str:
     short_description="make a plan",
     plan=("list", "List of {id, title} dicts, in execution order"),
 )
-def make_plan(agent: LLMAgent, plan: list) -> str:
+def make_plan(agent: AgentContext, plan: list) -> str:
     from universal_agents.task_tracker import set_plan
 
     return set_plan(agent, plan)
 
 
 @tool(
-    description="Answers any question or request that the system addressed to the model. "
-                "If a tool (e.g. edit_file) showed a preview and is awaiting a decision, call "
-                "answer in your very next message with your reply — the text is passed to the "
-                "pending operation, which interprets it (e.g. for edit_file: answer('yes') to "
-                "apply the edit, answer('no') to cancel). Never leave such a request answered "
-                "in plain text only — call this tool.",
+    description="Answers pending system questions to the assistant. "
+                "If a tool showed a preview and is awaiting a decision/confirmation, call "
+                "this tool with your reply text.",
     short_description="answer to system",
     text=("str", "Your reply to the pending question from the system"),
 )
-def answer(agent: LLMAgent, text: str) -> str:
+def answer_to_system(agent: AgentContext, text: str) -> str:
     op = agent.pop_pending_operation()
     if not op:
-        return ok(f"Recorded: {text}")
+        return err(
+            f": {answer_to_system.__name__}() requires a pending question from the system. "
+            "There is no pending system question right now — answer in plain text instead. "
+        )
     result = op["resolve"](agent, text)
     return ok(f" {result}") if result else ok(" Done.")

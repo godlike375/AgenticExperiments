@@ -4,12 +4,15 @@ from types import SimpleNamespace
 from unittest import mock
 
 from universal_agents.task_tracker import (
+    DONE_TOOL,
+    PLAN_TOOL,
     plan_leaf_sequence,
     validate_task_mark_call,
     set_plan,
     mark_task_done,
     compact_completed_tasks,
 )
+from universal_agents.tools.fs import read as _read_tool
 from universal_agents.constants import ENVIRONMENT_PREFIX
 from universal_agents.history import ChatHistory
 from universal_agents.models import UserMessage, AssistantMessage, ToolResult, ToolCall
@@ -19,7 +22,7 @@ def _done(tid, summary=""):
     args = {"id": tid, "summary": summary}
     return ToolCall(
         id=f"call_done_{tid}",
-        name="have_done",
+        name=DONE_TOOL,
         arguments=json.dumps(args, ensure_ascii=False),
     )
 
@@ -29,24 +32,24 @@ def _assistant_done(tid, summary=""):
 
 
 def _done_result(tid):
-    return ToolResult.success(f"call_done_{tid}", "have_done", "ok")
+    return ToolResult.success(f"call_done_{tid}", DONE_TOOL, "ok")
 
 
 def _plan_call(plan_list):
     return ToolCall(
         id="call_plan",
-        name="make_plan",
+        name=PLAN_TOOL,
         arguments=json.dumps({"plan": plan_list}, ensure_ascii=False),
     )
 
 
 def _work(path="a"):
     """Сообщение с реальным вызовом инструмента (read)."""
-    return AssistantMessage(content="", tool_calls=[ToolCall(f"r_{path}", "read", json.dumps({"path": path}))])
+    return AssistantMessage(content="", tool_calls=[ToolCall(f"r_{path}", _read_tool.__name__, json.dumps({"path": path}))])
 
 
 def _work_result(path="a"):
-    return ToolResult.success(f"r_{path}", "read", "file contents")
+    return ToolResult.success(f"r_{path}", _read_tool.__name__, "file contents")
 
 
 def _make_agent():
@@ -57,7 +60,7 @@ def _make_agent():
         {"id": "A2", "title": "A2"},
         {"id": "B1", "title": "B1"},
     ])]))
-    h.add(ToolResult.success("c0", "make_plan", "Plan set"))
+    h.add(ToolResult.success("c0", PLAN_TOOL, "Plan set"))
     h.add(AssistantMessage(content=("A1 work (long content) " * 40)))
     h.add(_assistant_done("A1", "done A1"))
     h.add(_done_result("A1"))
@@ -134,7 +137,7 @@ class TestOrderValidation(unittest.TestCase):
         h = ChatHistory("sys")
         h.add(UserMessage("do X"))
         h.add(AssistantMessage(content="", tool_calls=[_plan_call(plan_list)]))
-        h.add(ToolResult.success("c0", "make_plan", "Plan set"))
+        h.add(ToolResult.success("c0", PLAN_TOOL, "Plan set"))
         plan_map = {e["id"]: {"title": e.get("title", "")} for e in plan_list}
         return h, plan_map
 
@@ -192,14 +195,14 @@ class TestOrderValidation(unittest.TestCase):
         h.add(UserMessage("test"))
         planA = [{"id": "A1"}, {"id": "A2"}, {"id": "A3"}]
         h.add(AssistantMessage(content="", tool_calls=[_plan_call(planA)]))
-        h.add(ToolResult.success("c", "make_plan", "Plan set"))
+        h.add(ToolResult.success("c", PLAN_TOOL, "Plan set"))
         h.add(_assistant_done("A1"))
-        h.add(ToolResult.success("c", "have_done", "ok"))
+        h.add(ToolResult.success("c", DONE_TOOL, "ok"))
         # Новый план переиспользует те же id, но порядок: A3,A1,A2
         planB = [{"id": "A3"}, {"id": "A1"}, {"id": "A2"}]
         pm_b = {e["id"]: {"title": ""} for e in planB}
         h.add(AssistantMessage(content="", tool_calls=[_plan_call(planB)]))
-        h.add(ToolResult.success("c", "make_plan", "Plan set"))
+        h.add(ToolResult.success("c", PLAN_TOOL, "Plan set"))
         h.add(_work("w1"))
         h.add(_work_result("w1"))
         self.assertIsNone(validate_task_mark_call(h.get_all(), {"id": "A3"}, pm_b, set()))
@@ -236,7 +239,7 @@ class TestOrderValidation(unittest.TestCase):
         # после него следующей задачей всё ещё остаётся A1, а не A2.
         h, pm = self._history(self.PLAN)
         h.add(_assistant_done("A1"))  # отклонённый вызов (без успешного ToolResult)
-        h.add(ToolResult.error("x", "have_done", "NO-WORK-DONE"))
+        h.add(ToolResult.error("x", DONE_TOOL, "NO-WORK-DONE"))
         err = validate_task_mark_call(h.get_all(), {"id": "A1"}, pm, set())
         # всё ещё A1 (нет успешного done-маркера), а не OUT-OF-ORDER на A2
         self.assertIsNotNone(err)
@@ -246,8 +249,8 @@ class TestOrderValidation(unittest.TestCase):
     def test_accepts_done_after_real_work(self):
         h, pm = self._history(self.PLAN)
         # реальная работа: вызов read между планом и have_done
-        h.add(AssistantMessage(content="", tool_calls=[ToolCall("r", "read", '{"path":"a"}')]))
-        h.add(ToolResult.success("r", "read", "file contents"))
+        h.add(AssistantMessage(content="", tool_calls=[ToolCall("r", _read_tool.__name__, '{"path":"a"}')]))
+        h.add(ToolResult.success("r", _read_tool.__name__, "file contents"))
         self.assertIsNone(validate_task_mark_call(h.get_all(), {"id": "A1"}, pm, set()))
         h.add(_assistant_done("A1"))
         h.add(_done_result("A1"))
@@ -256,8 +259,8 @@ class TestOrderValidation(unittest.TestCase):
         self.assertIsNotNone(err)
         self.assertIn("NO-WORK-DONE", err)
         # добавляем работу для A2
-        h.add(AssistantMessage(content="", tool_calls=[ToolCall("r", "read", '{"path":"b"}')]))
-        h.add(ToolResult.success("r", "read", "more"))
+        h.add(AssistantMessage(content="", tool_calls=[ToolCall("r", _read_tool.__name__, '{"path":"b"}')]))
+        h.add(ToolResult.success("r", _read_tool.__name__, "more"))
         self.assertIsNone(validate_task_mark_call(h.get_all(), {"id": "A2"}, pm, set()))
 
 
@@ -278,10 +281,10 @@ class TestCompaction(unittest.TestCase):
         # маркеры make_plan и have_done сохраняются (не компактизируются)
         remaining = [m for m in agent.history if isinstance(m, AssistantMessage) and m.has_tool_calls()]
         self.assertTrue(
-            any(any(tc.name == "make_plan" for tc in m.tool_calls) for m in remaining)
+            any(any(tc.name == PLAN_TOOL for tc in m.tool_calls) for m in remaining)
         )
         done_calls = [
-            tc.name for m in remaining for tc in m.tool_calls if tc.name == "have_done"
+            tc.name for m in remaining for tc in m.tool_calls if tc.name == DONE_TOOL
         ]
         # A1 и A2 размечены и их have_done-маркеры остаются в истории
         self.assertEqual(len(done_calls), 2)
@@ -293,12 +296,12 @@ class TestCompaction(unittest.TestCase):
             {"id": "A1", "title": "A1"},
             {"id": "B1", "title": "B1"},
         ])]))
-        h.add(ToolResult.success("c0", "make_plan", "Plan set"))
+        h.add(ToolResult.success("c0", PLAN_TOOL, "Plan set"))
         h.add(AssistantMessage(content=("A1 work " * 500)))
         long_summary = "x" * 5000
         h.add(_assistant_done("A1", long_summary))
         h.add(ToolResult.success(
-            "call_done_A1", "have_done",
+            "call_done_A1", DONE_TOOL,
             f"Task 'A1' marked done. Summary recorded: {long_summary}",
         ))
         agent = SimpleNamespace(
@@ -317,7 +320,7 @@ class TestCompaction(unittest.TestCase):
             return_value="dense",
         ):
             compact_completed_tasks(agent)
-        hd_msgs = [m for m in agent.history if isinstance(m, ToolResult) and m.name == "have_done"]
+        hd_msgs = [m for m in agent.history if isinstance(m, ToolResult) and m.name == DONE_TOOL]
         self.assertEqual(len(hd_msgs), 1)
         self.assertIn("summary compacted", hd_msgs[0].content)
         self.assertLess(len(hd_msgs[0].content), 100)
@@ -359,7 +362,7 @@ class TestCompaction(unittest.TestCase):
         self.assertTrue(any(isinstance(m, UserMessage) for m in msgs))
         self.assertTrue(
             any(isinstance(m, AssistantMessage) and m.has_tool_calls()
-                and any(tc.name == "make_plan" for tc in m.tool_calls)
+                and any(tc.name == PLAN_TOOL for tc in m.tool_calls)
                 for m in msgs)
         )
 

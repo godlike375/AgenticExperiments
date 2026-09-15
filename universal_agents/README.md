@@ -68,7 +68,7 @@ universal_agents/
     ├── __init__.py      # Маркер подпакета
     ├── builtin.py       # get_messages, edit_message, delete_messages,
     │                     #   summarize_messages, delegate_to_subagent
-    ├── fs.py            # cwd, read, edit_file (работа с файловой системой)
+    ├── fs.py            # cwd, read, line_range_edit, match_replace_edit (работа с файловой системой)
     └── sandbox.py       # start_sandbox, run_bash, run_python, stop_sandbox
 ```
 
@@ -266,7 +266,8 @@ def greet(name: str) -> str:
 **Файловая система (`tools/fs.py`)**
 - `cwd` — получить/сменить рабочую директорию
 - `read` — прочитать файл (или диапазон строк), либо структурное саммари большого файла
-- `edit_file` *(подтверждение)* — точная замена подстроки / создание файла с выводом diff
+- `line_range_edit` *(подтверждение)* — заменить диапазон строк 1-based / создать файл, с выводом diff
+- `match_replace_edit` *(подтверждение)* — точная замена подстроки (одиночная или все вхождения), с выводом diff
 
 **Песочница (`tools/sandbox.py`)** — требует Docker
 - `start_sandbox` — запустить изолированный контейнер для репозитория

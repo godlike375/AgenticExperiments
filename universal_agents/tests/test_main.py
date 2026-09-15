@@ -27,7 +27,6 @@ class TestBuildAllowedTools(unittest.TestCase):
         )
         self.assertIn("make_plan", allowed)
         self.assertIn("have_done", allowed)
-        self.assertNotIn("make_plan", ["run_bash_host"])
 
 
 if __name__ == "__main__":

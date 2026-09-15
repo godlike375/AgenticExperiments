@@ -5,6 +5,8 @@ from openai import OpenAI
 from universal_agents.config import Config, CHARS_PER_TOKEN
 from universal_agents.generation import GenerationParams
 from universal_agents.tool_parsing import normalize_args, build_tool_calls
+from universal_agents.tools.builtin import make_plan as _make_plan_tool
+from universal_agents.exceptions import GenerationInterrupted
 
 
 def jaccard_similarity(a: str, b: str) -> float:
@@ -104,7 +106,7 @@ class LoopDetector:
                 # make_plan особый случай: повтор с теми же аргументами = зацикливание, с другими = ревизия плана (вызовы после него не повтор).
                 found_plan = False
                 for tc in msg.tool_calls:
-                    if getattr(tc, "name", "") == "make_plan":
+                    if getattr(tc, "name", "") == _make_plan_tool.__name__:
                         found_plan = True
                         if self.normalize_args(tc.arguments) == norm_args:
                             return True
@@ -202,9 +204,95 @@ class StreamAccumulator:
         )
 
 
+class StreamSession:
+    """Единый блокирующий потребитель стрима. Создаёт raw-соединение через
+    LLMClient.stream и пожирает его до конца/остановки, наполняя StreamAccumulator.
+    Watchdog и чанковый цикл — в одном месте (единая точка для обоих потребителей:
+    LLMClient.call и StreamingMixin._call_with_streaming)."""
+
+    def __init__(self, messages, temp=None, timeout=None, tools=None, prefill=None,
+                 top_p=None, frequency_penalty=None, presence_penalty=None,
+                 max_tokens=None, params=None, reasoning_effort="none",
+                 on_stream_chunk=None, on_reasoning_start=None, on_reasoning_chunk=None):
+        self.acc = StreamAccumulator(
+            prefill=prefill,
+            on_stream_chunk=on_stream_chunk,
+            on_reasoning_start=on_reasoning_start,
+            on_reasoning_chunk=on_reasoning_chunk,
+        )
+        self._raw = LLMClient.stream(
+            messages,
+            temp=temp, timeout=timeout, tools=tools, prefill=prefill,
+            top_p=top_p, frequency_penalty=frequency_penalty,
+            presence_penalty=presence_penalty, max_tokens=max_tokens,
+            params=params,
+            reasoning_effort=reasoning_effort,
+        )
+
+    def consume(self, stop_check=None, stop_on_chunk=None, on_stream_start=None):
+        """Блокирующе потребляет стрим.
+
+        stop_check — пользовательская остановка (watchdog закрывает соединение, ловит
+        ошибку; в цикле — закрывает соединение и break).
+        stop_on_chunk — внутренний критерий (напр. расхождение), вызывается ПОСЛЕ
+        каждого обработанного чанка; True прерывает потребление (stream НЕ закрывается
+        намеренно — watcher закроет через _watch_done).
+        on_stream_start — вызывается ДО первого чанка (единый порядок; старый
+        StreamingMixin запускал UI-отрисовку позже, но это безопасная унификация).
+
+        Возвращает (error, stopped):
+        - error непуст → сбой соединения или создания (stop_on_chunk не достигнут).
+        - stopped=True → прерывание по stop_check или stop_on_chunk (error пуст).
+
+        Колбэки жизненного цикла после потребления (on_stream_end, on_reasoning_end) —
+        контракт вызывающего (единый для обоих потребителей).
+
+        Watchdog стартует ПОСЛЕ первого чанка — это исключает гонку с error-генераторами,
+        где close() подавляет yield и превращает ошибку в пустой ответ. Для реальных
+        HTTP-стримов next() ограничен timeout параметра create(); watcher нужен для
+        отмены приостановленного стриминга в последующих чанках."""
+        error = ""
+        stopped = False
+        _watch_done = threading.Event()
+        try:
+            if on_stream_start:
+                on_stream_start()
+            first = next(self._raw, None)
+            if first is None:
+                return "empty stream", False
+            if isinstance(first, dict) and "error" in first:
+                return f"stream creation failed: {first['error']}", False
+            # Watchdog: закрывает соединение при остановке пользователя.
+            # Запускается после первого чанка, чтобы не гоняться с error-generator.
+            if stop_check is not None:
+                def _watcher():
+                    while not _watch_done.is_set():
+                        if stop_check():
+                            LLMClient.close_stream(self._raw)
+                            break
+                        _watch_done.wait(0.05)
+                threading.Thread(target=_watcher, daemon=True).start()
+            self.acc.process(first)
+            for chunk in self._raw:
+                self.acc.process(chunk)
+                if stop_check and stop_check():
+                    LLMClient.close_stream(self._raw)
+                    stopped = True
+                    break
+                if stop_on_chunk and stop_on_chunk():
+                    stopped = True
+                    break
+        except Exception as e:
+            if isinstance(e, GenerationInterrupted):
+                raise
+            error = str(e)
+        finally:
+            _watch_done.set()
+        return error, stopped
+
+
 class LLMClient:
     _client = None
-    _active_stream = None
 
     @classmethod
     def get_client(cls) -> OpenAI:
@@ -215,8 +303,7 @@ class LLMClient:
     @classmethod
     def close_stream(cls, stream) -> None:
         """Закрывает конкретное соединение стрима. Watchdog'и закрывают ИМЕННО свой
-        стрим (а не глобальный _active_stream), чтобы отмена одного запроса не рубила
-        чужой параллельный стрим — например, компакцию, стартовавшую следом."""
+        стрим — чтобы отмена одного запроса не рубила чужой параллельный стрим."""
         if stream is None:
             return
         try:
@@ -229,15 +316,6 @@ class LLMClient:
         except Exception:
             pass
 
-    @classmethod
-    def cancel_active(cls) -> None:
-        """Принудительно прерывает активный запрос: закрывает соединение стрима.
-        Вызывается из watchdog-потока при запросе остановки пользователем (фаза
-        префилла, когда чанков ещё нет и обычный stop_check не срабатывает)."""
-        s = cls._active_stream
-        cls._active_stream = None
-        cls.close_stream(s)
-
     @staticmethod
     def call(
         messages: list[dict],
@@ -249,13 +327,12 @@ class LLMClient:
         frequency_penalty: float = None,
         presence_penalty: float = None,
         max_tokens: int = None,
-        previous_response_id: str = None,
         params: GenerationParams = None,
         callbacks: Optional[dict] = None,
         stop_check: Optional[Callable[[], bool]] = None,
         reasoning_effort: str = "none",
     ):
-        """Единая точка обращения к LLM. При заданных стриминговых колбэках и STREAM_ENABLED (не Responses API) идёт через стриминг; previous_response_id при стриминге игнорируется."""
+        """Единая точка обращения к LLM. При заданных стриминговых колбэках и STREAM_ENABLED идёт через стриминг; иначе — обычный chat.completions вызов."""
         temp, timeout, top_p, frequency_penalty, presence_penalty, max_tokens = LLMClient._resolve_params(
             params, temp, timeout, top_p, frequency_penalty, presence_penalty, max_tokens
         )
@@ -265,40 +342,39 @@ class LLMClient:
         cb = callbacks or {}
         want_stream = (
             Config.STREAM_ENABLED
-            and not Config.USE_RESPONSES_API
             and bool(cb.get("on_stream_chunk") or cb.get("on_reasoning_chunk"))
         )
         if want_stream:
-            streamed = LLMClient._call_via_chat_stream(
-                messages_to_send, temp, timeout, tools, prefill, top_p,
-                frequency_penalty, presence_penalty, max_tokens, cb, stop_check,
+            session = StreamSession(
+                messages_to_send, temp=temp, timeout=timeout, tools=tools,
+                prefill=prefill, top_p=top_p, frequency_penalty=frequency_penalty,
+                presence_penalty=presence_penalty, max_tokens=max_tokens,
                 reasoning_effort=reasoning_effort,
+                on_stream_chunk=cb.get("on_stream_chunk"),
+                on_reasoning_start=cb.get("on_reasoning_start"),
+                on_reasoning_chunk=cb.get("on_reasoning_chunk"),
             )
-            if streamed is not None:
-                return streamed
-            # Пользователь запросил остановку: НЕ скатываемся в блокирующий вызов,
-            # который невозможно прервать (иначе llm-service «глохнет» на разрыв).
-            if stop_check and stop_check():
-                return None, "stopped: stream unavailable and stop requested", None
+            error, stopped = session.consume(
+                stop_check=stop_check,
+                on_stream_start=cb.get("on_stream_start"),
+            )
+            end_cb = cb.get("on_stream_end")
+            reasoning_end_cb = cb.get("on_reasoning_end")
+            if error:
+                if end_cb:
+                    end_cb()
+                if session.acc.reasoning_started and reasoning_end_cb:
+                    reasoning_end_cb()
+                if stop_check and stop_check():
+                    return None, "stopped: stream unavailable and stop requested", None
+                return None, error, None
+            if end_cb:
+                end_cb()
+            if session.acc.reasoning_started and reasoning_end_cb:
+                reasoning_end_cb()
+            return session.acc.build_message(prefill), None, session.acc.usage
 
         result = None
-        if Config.USE_RESPONSES_API:
-            if previous_response_id is not None:
-                msg, err, usage = LLMClient._call_responses_api(
-                    messages_to_send, temp, timeout, tools, top_p,
-                    frequency_penalty, presence_penalty, max_tokens, previous_response_id,
-                    reasoning_effort=reasoning_effort,
-                )
-                if not err and msg and (msg.content or msg.tool_calls):
-                    result = (msg, err, usage)
-            if result is None:
-                msg, err, usage = LLMClient._call_responses_api(
-                    messages_to_send, temp, timeout, tools, top_p,
-                    frequency_penalty, presence_penalty, max_tokens,
-                    reasoning_effort=reasoning_effort,
-                )
-                if not err and msg and (msg.content or msg.tool_calls):
-                    result = (msg, err, usage)
         if result is None:
             # Не-стриминговый путь: не начинаем блокирующий вызов, если пользователь
             # уже запросил остановку (такой вызов прервать невозможно).
@@ -403,153 +479,6 @@ class LLMClient:
             return None, str(e), None
 
     @staticmethod
-    def _call_via_chat_stream(messages_to_send, temp, timeout, tools, prefill, top_p,
-                              frequency_penalty, presence_penalty, max_tokens, cb,
-                              stop_check=None, reasoning_effort="none"):
-        """Блокирующе потребляет стрим и собирает (msg, err, usage); None, если стрим не создался (откат на обычный вызов). stop_check — вызывается после каждого чанка; True прерывает стрим (возвращает накопленное)."""
-        try:
-            raw = LLMClient.get_client().chat.completions.create(
-                messages=messages_to_send,
-                **LLMClient._chat_kwargs(temp, timeout, tools, top_p,
-                                         frequency_penalty, presence_penalty, max_tokens,
-                                         reasoning_effort=reasoning_effort),
-                stream=True,
-                stream_options={"include_usage": True},
-            )
-        except Exception as e:
-            def error_generator(err=str(e)):
-                yield {"error": err}
-            raw = error_generator()
-
-        acc = StreamAccumulator(
-            prefill=prefill,
-            on_stream_chunk=cb.get("on_stream_chunk"),
-            on_reasoning_start=cb.get("on_reasoning_start"),
-            on_reasoning_chunk=cb.get("on_reasoning_chunk"),
-        )
-        start_cb = cb.get("on_stream_start")
-        end_cb = cb.get("on_stream_end")
-        reasoning_end_cb = cb.get("on_reasoning_end")
-
-        # Watchdog: закрывает соединение при остановке пользователя, в т.ч. во время
-        # префилла (до появления первого чанка), когда stop_check в цикле ещё не сработал.
-        LLMClient._active_stream = raw
-        _watch_done = threading.Event()
-        _watch = None
-        if stop_check is not None:
-            def _watcher():
-                while not _watch_done.is_set():
-                    if stop_check():
-                        LLMClient.close_stream(raw)
-                        break
-                    _watch_done.wait(0.05)
-            _watch = threading.Thread(target=_watcher, daemon=True)
-            _watch.start()
-
-        try:
-            if start_cb:
-                start_cb()
-            first = next(raw, None)
-            if isinstance(first, dict) and "error" in first:
-                if end_cb:
-                    end_cb()
-                # Возвращаем ошибку ТОЛЬКО как кортеж: None здесь приводил к бесшовному
-                # откату в блокирующий _call_chat_completions, который stop'ом не
-                # прерывается — llm-service «не останавливался» при недоступном стриме.
-                return None, f"stream creation failed: {first['error']}", None
-            acc.process(first)
-            for chunk in raw:
-                acc.process(chunk)
-                if stop_check and stop_check():
-                    LLMClient.close_stream(raw)
-                    break
-        except Exception as e:
-            if end_cb:
-                end_cb()
-            if acc.reasoning_started and reasoning_end_cb:
-                reasoning_end_cb()
-            return None, str(e), None
-        finally:
-            _watch_done.set()
-            if LLMClient._active_stream is raw:
-                LLMClient._active_stream = None
-        if end_cb:
-            end_cb()
-        if acc.reasoning_started and reasoning_end_cb:
-            reasoning_end_cb()
-        return acc.build_message(prefill), None, acc.usage
-
-    @staticmethod
-    def _call_responses_api(messages_to_send, temp, timeout, tools, top_p,
-                            frequency_penalty, presence_penalty, max_tokens,
-                            previous_response_id=None, reasoning_effort="none"):
-        try:
-            kwargs = {
-                "model": Config.MODEL_NAME,
-                "input": messages_to_send,
-                "temperature": temp if temp is not None else Config.TEMP,
-                "max_output_tokens": max_tokens if max_tokens is not None else Config.MAX_OUTPUT_TOKENS,
-                "timeout": timeout if timeout is not None else Config.TIMEOUT,
-                "reasoning_effort": reasoning_effort,
-            }
-            if previous_response_id is not None:
-                kwargs["previous_response_id"] = previous_response_id
-            if tools:
-                kwargs["tools"] = tools
-            if top_p is not None:
-                kwargs["top_p"] = top_p
-
-            response = LLMClient.get_client().responses.create(**kwargs)
-            msg = LLMClient._parse_responses_output(response)
-            if msg and prefill:
-                msg.content = apply_prefill(msg.content, prefill)
-            return msg, None, LLMClient._extract_responses_usage(response)
-        except Exception as e:
-            return None, str(e), None
-
-    @staticmethod
-    def _parse_responses_output(response):
-        from types import SimpleNamespace
-        text_content = ""
-        tool_calls = []
-        for item in response.output:
-            if item.type == "message":
-                if hasattr(item, 'content') and item.content:
-                    if isinstance(item.content, list):
-                        for part in item.content:
-                            if hasattr(part, 'type') and part.type == "output_text":
-                                text_content += part.text
-                            elif hasattr(part, 'text'):
-                                text_content += part.text
-                    elif isinstance(item.content, str):
-                        text_content += item.content
-            elif item.type == "function_call":
-                tool_calls.append(SimpleNamespace(
-                    id=item.call_id,
-                    name=item.name,
-                    arguments=item.arguments,
-                    function=SimpleNamespace(name=item.name, arguments=item.arguments)
-                ))
-
-        msg = SimpleNamespace(
-            content=text_content,
-            tool_calls=tool_calls if tool_calls else None,
-        )
-        msg._response_id = response.id
-        return msg
-
-    @staticmethod
-    def _extract_responses_usage(response):
-        if not hasattr(response, 'usage') or not response.usage:
-            return None
-        usage = response.usage
-        return build_usage_dict(
-            getattr(usage, 'input_tokens', 0),
-            getattr(usage, 'output_tokens', 0),
-        )
-
-
-    @staticmethod
     def stream(
         messages: list[dict],
         temp: float = None,
@@ -560,12 +489,10 @@ class LLMClient:
         frequency_penalty: float = None,
         presence_penalty: float = None,
         max_tokens: int = None,
-        previous_response_id: str = None,
         params: GenerationParams = None,
         reasoning_effort: str = "none",
     ):
         """Streaming version of call() - returns generator of chunks.
-        Note: previous_response_id is ignored for streaming (Responses API streaming not yet supported).
         """
         temp, timeout, top_p, frequency_penalty, presence_penalty, max_tokens = LLMClient._resolve_params(
             params, temp, timeout, top_p, frequency_penalty, presence_penalty, max_tokens

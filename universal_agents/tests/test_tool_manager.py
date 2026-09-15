@@ -5,6 +5,7 @@ from unittest import mock
 
 from universal_agents.tool import tool
 from universal_agents.tool_manager import ToolManager
+from universal_agents.tools.builtin import unload_tool as real_unload_tool
 
 
 @tool(description="alpha tool")
@@ -170,6 +171,15 @@ class TestToolManagerListLoaded(unittest.TestCase):
         text = tm.list_loaded()
         self.assertIn("alpha", text)
         self.assertNotIn("(alpha", text)
+
+
+class TestRealUnloadTool(unittest.TestCase):
+    def test_unload_tool_delegates_to_agent(self):
+        agent = mock.Mock()
+        agent.unload_tool.return_value = "unloaded"
+        result = real_unload_tool(agent, "some_tool")
+        self.assertEqual(result, "unloaded")
+        agent.unload_tool.assert_called_once_with("some_tool")
 
 
 if __name__ == "__main__":

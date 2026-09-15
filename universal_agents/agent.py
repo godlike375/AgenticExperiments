@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import threading
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Iterable, Union, Callable, Optional
 
@@ -16,6 +17,7 @@ from universal_agents.sub_agent import SubAgent
 from universal_agents.context_builder import prepare_messages_for_api, get_effective_prefill
 from universal_agents.file_states import FileStateTracker
 from universal_agents.tool_parsing import tc_name, tc_args
+from universal_agents.tools.builtin import answer_to_system
 
 from universal_agents.agent_mixins import (
     ToolsMixin,
@@ -30,6 +32,73 @@ from universal_agents.exceptions import GenerationInterrupted
 
 # Предел последовательных ошибок инструментов за один chat() до сдачи (§1)
 MAX_CONSECUTIVE_ERRORS = 5
+
+
+@dataclass
+class TurnState:
+    """Состояние одного хода генерации (_run_turn_loop): счётчики ретраев и prefill.
+
+    Инкапсулирует всю мутируемую state-machine хода, чтобы тело цикла не жонглировало
+    счётчиками вперемешку. Поведение идентично прежним локальным переменным.
+    """
+
+    prefill: Optional[str] = None
+    consecutive_errors: int = 0
+    tool_error_retries_left: int = field(default_factory=lambda: Config.ERROR_RECOVERY_RETRIES)
+    broken_regen_left: int = field(default_factory=lambda: Config.BROKEN_CALL_REGEN_RETRIES)
+    broken_fix_left: int = field(default_factory=lambda: Config.BROKEN_CALL_FIX_RETRIES)
+    no_comment_retries_left: int = field(default_factory=lambda: Config.NO_COMMENT_RETRIES)
+
+    def has_prefill(self) -> bool:
+        """Есть ли prefill для следующего шага (после [NO COMMENT] или из старта хода)."""
+        return self.prefill is not None
+
+    def step_prefill(self) -> Optional[str]:
+        """Возвращает prefill для текущего шага (без сброса — живёт до явного clear/set)."""
+        return self.prefill
+
+    def set_prefill(self, value: Optional[str]) -> None:
+        """Откладывает prefill для следующего шага (из [NO COMMENT] rerun_prefill)."""
+        self.prefill = value
+
+    def clear_prefill(self) -> None:
+        """Сбрасывает prefill после успешного нетривиального шага."""
+        self.prefill = None
+
+    def can_retry_broken_regen(self) -> bool:
+        """Остались ли попытки регенерации сломанного вызова; декрементирует счётчик."""
+        if self.broken_regen_left > 0:
+            self.broken_regen_left -= 1
+            return True
+        return False
+
+    def can_retry_broken_fix(self) -> bool:
+        """Остались ли попытки фикс-инъекции; декрементирует счётчик."""
+        if self.broken_fix_left > 0:
+            self.broken_fix_left -= 1
+            return True
+        return False
+
+    def can_retry_tool_error(self) -> bool:
+        """Остались ли попытки восстановления после ошибки инструмента; декрементирует счётчик."""
+        if self.tool_error_retries_left > 0:
+            self.tool_error_retries_left -= 1
+            return True
+        return False
+
+    def record_tool_error(self) -> None:
+        """Фиксирует очередную последовательную ошибку инструмента."""
+        self.consecutive_errors += 1
+
+    def record_tool_success(self) -> None:
+        """Сбрасывает счётчик последовательных ошибок и возвращает ретраи."""
+        self.consecutive_errors = 0
+        self.tool_error_retries_left = Config.ERROR_RECOVERY_RETRIES
+
+    @property
+    def max_errors_reached(self) -> bool:
+        """Достигнут ли лимит последовательных ошибок за один ход."""
+        return self.consecutive_errors >= MAX_CONSECUTIVE_ERRORS
 
 
 class LLMAgent(
@@ -126,8 +195,6 @@ class LLMAgent(
         self.streaming_enabled = streaming_enabled if streaming_enabled is not None else Config.STREAM_ENABLED
         self._tool_usage: dict[str, int] = {}
         self._max_generation_attempts = max_generation_attempts
-        self._last_response_id: Optional[str] = None
-        self._last_sent_msg_count: int = 0
         self._depth: int = 0
         self._disable_per_msg_summarization = disable_per_msg_summarization
         self._compacted_task_ids: set[str] = set()
@@ -162,11 +229,11 @@ class LLMAgent(
 
     @property
     def _reasoning_effort(self) -> str:
-        """Вычисляет текущий reasoning_effort на основе состояния thinking-тогглов. Если включён один из тогглов — возвращает 'low'; иначе 'none'. Разовый тоггл (_thinking_once) сбрасывается после вычисления."""
-        if self._thinking_once:
-            self._thinking_once = False
-            return "low"
-        if self._thinking_enabled:
+        """Вычисляет текущий reasoning_effort на основе состояния thinking-тогглов: 'low' если
+        включён постоянный toggle или задан разовый (_thinking_once); иначе 'none'. Свойство
+        чистое — разовый toggle потребляется один раз в начале хода (_run_turn_loop), чтобы
+        API и обработчик ответа за весь ход видели один и тот же reasoning_effort."""
+        if self._thinking_once or self._thinking_enabled:
             return "low"
         return "none"
 
@@ -337,8 +404,6 @@ class LLMAgent(
             system_prompt,
             self.token_tracker.max_context_tokens if self.token_tracker else Config.MAX_CONTEXT_TOKENS,
         )
-        self._last_response_id = None
-        self._last_sent_msg_count = 0
         self._compacted_task_ids = set()
         self._pending_operation = None
         self.reset_autosave_path()
@@ -378,7 +443,6 @@ class LLMAgent(
         self,
         messages: list[dict],
         prefill: Optional[str] = None,
-        previous_response_id: Optional[str] = None,
         params: GenerationParams = None,
         watch_prefix: Optional[str] = None,
         watch_continue_temp: Optional[float] = None,
@@ -392,7 +456,6 @@ class LLMAgent(
                 messages,
                 prefill=prefill,
                 tools=tools,
-                previous_response_id=previous_response_id,
                 params=params,
                 watch_prefix=watch_prefix,
                 watch_continue_temp=watch_continue_temp,
@@ -403,7 +466,6 @@ class LLMAgent(
             messages,
             tools=tools,
             prefill=prefill,
-            previous_response_id=previous_response_id,
             params=params,
             stop_check=stop_check,
             reasoning_effort=reasoning_effort,
@@ -472,10 +534,9 @@ class LLMAgent(
         self,
         messages_to_send: list[dict],
         step_prefill: Optional[str] = None,
-        prev_response_id: Optional[str] = None,
-        all_messages_len: int = 0,
         is_duplicate_fn: Callable = None,
         boost: bool = True,
+        reasoning_effort: str = None,
     ) -> tuple:
         """До max_generation_attempts попыток генерации (§1), отбрасывая дубликаты и бустя температуру; логика повторов собрана здесь. is_duplicate_fn по умолчанию — self._detect_duplicate; boost=False оставляет детект без буста. Возвращает (message_obj, api_error_occurred)."""
         if is_duplicate_fn is None:
@@ -489,7 +550,7 @@ class LLMAgent(
         last_retry_warning: Optional[str] = None
         dup_watch_target: Optional[str] = None
         api_error_occurred = False
-        effective_reasoning_effort = self._reasoning_effort
+        effective_reasoning_effort = reasoning_effort if reasoning_effort is not None else self._reasoning_effort
 
         for attempt in range(max_generation_attempts):
             attempt_params = self._gen_params
@@ -506,7 +567,6 @@ class LLMAgent(
             message_obj, err, usage = self._call_llm(
                 active_messages,
                 prefill=step_prefill,
-                previous_response_id=prev_response_id,
                 params=attempt_params,
                 watch_prefix=dup_watch_target,
                 watch_continue_temp=Config.DUPLICATE_CONTINUATION_TEMP if dup_watch_target is not None else None,
@@ -550,10 +610,6 @@ class LLMAgent(
                 )
                 continue
 
-            # Ответ принят — фиксируем позицию контекста для возможного продолжения через previous_response_id.
-            if hasattr(message_obj, '_response_id'):
-                self._last_response_id = message_obj._response_id
-            self._last_sent_msg_count = all_messages_len
             break
         else:
             self.on_system_msg(
@@ -563,7 +619,7 @@ class LLMAgent(
         return message_obj, api_error_occurred
 
     def _recover(self, kind: str, retries_left: int = 0, erased_count: int = 0) -> None:
-        """Единая точка восстановления после сбоя (§1): сбрасывает позицию контекста (_last_response_id/_last_sent_msg_count), для 'broken_call'/'tool_error' активирует буст температуры. kind: 'broken_call'/'broken_fix'/'tool_error'/'api_error'/'giveup'/'error_limit' — см. код."""
+        """Единая точка восстановления после сбоя (§1): для 'broken_call'/'tool_error' активирует буст температуры. kind: 'broken_call'/'broken_fix'/'tool_error'/'api_error'/'giveup'/'error_limit' — см. код."""
         if kind == 'api_error':
             self.history.normalize(is_error_recovery=True)
             self.on_system_msg("⚠️ [RECOVERY] API error occurred. Role sequence restored. Handing control to user.")
@@ -583,8 +639,6 @@ class LLMAgent(
             )
             return
 
-        self._last_response_id = None
-        self._last_sent_msg_count = 0
         if kind == 'broken_call':
             self._temp_override = Config.ERROR_RECOVERY_TEMP
             self.on_system_msg(
@@ -642,8 +696,6 @@ class LLMAgent(
         last.content = (last.content or "") + f"\n\n{INTERRUPT_HEADER}\n\n{user_text}"
         self._on_history_changed()
         self._autosave()
-        self._last_response_id = None
-        self._last_sent_msg_count = 0
         self.clear_stop()
         return True
 
@@ -664,19 +716,22 @@ class LLMAgent(
         if self._per_msg_enabled:
             self._maybe_summarize_user_message(user_msg)
         self._autosave()
-        self._last_response_id = None
-        self._last_sent_msg_count = 0
         self.clear_stop()
 
     def _run_turn_loop(self, max_iter: int, prefill: str = None) -> str:
         current_prefill = get_effective_prefill(prefill)
-        pending_prefill = current_prefill  # prefill для следующего шага; 'Assistant:' после [NO COMMENT]
-        consecutive_errors = 0
-        tool_error_retries_left = Config.ERROR_RECOVERY_RETRIES
-        broken_regen_left = Config.BROKEN_CALL_REGEN_RETRIES
-        broken_fix_left = Config.BROKEN_CALL_FIX_RETRIES
+        # Разовый thinking-тоггл (_thinking_once) фиксируется ОДИН раз за ход: и API
+        # (call_with_retries), и обработчик ответа (_process_llm_response) должны видеть
+        # одинаковый reasoning_effort. Раньше геттер _reasoning_effort сбрасывал
+        # _thinking_once при первом чтении (сайд-эффект в property), из-за чего второе
+        # чтение — в NO COMMENT-ветке обработчика — расходилось с отправленным в API.
+        turn_reasoning = self._reasoning_effort
+        self._thinking_once = False
+        # Состояние хода: prefill для следующего шага ('Assistant:' после [NO COMMENT]
+        # или стартовый current_prefill) + счётчики ретраев/ошибок.
+        state = TurnState(prefill=current_prefill)
 
-        for i in range(max_iter):
+        for _ in range(max_iter):
             # Пользователь ввёл новый текст, пока выполнялся инструмент (сценарий В):
             # завершаем ход на чистой границе истории, чтобы вставка сообщения и новая
             # генерация произошли сразу после результата инструмента.
@@ -689,24 +744,16 @@ class LLMAgent(
                 self.clear_stop()
                 self._autosave()
                 return ""
-            step_prefill = pending_prefill
+            step_prefill = state.step_prefill()
             all_messages = prepare_messages_for_api(
                 self, debug_hash_check=Config.DEBUG_PREFIX_HASH_CHECK
             )
 
-            if i == 0 or self._last_response_id is None:
-                messages_to_send = all_messages
-                prev_response_id = None
-            else:
-                messages_to_send = all_messages[self._last_sent_msg_count:]
-                prev_response_id = self._last_response_id
-
             try:
                 message_obj, api_error_occurred = self.call_with_retries(
-                    messages_to_send,
+                    all_messages,
                     step_prefill=step_prefill,
-                    prev_response_id=prev_response_id,
-                    all_messages_len=len(all_messages),
+                    reasoning_effort=turn_reasoning,
                 )
             except GenerationInterrupted:
                 self.on_system_msg("⏹ Generation stopped by user — control returned to you.")
@@ -719,7 +766,11 @@ class LLMAgent(
                 return ""
 
             try:
-                result_text, tool_error_occurred, broken_call, rerun_prefill = self._process_llm_response(message_obj)
+                result_text, tool_error_occurred, broken_call, rerun_prefill = self._process_llm_response(
+                    message_obj,
+                    no_comment_retry_left=state.no_comment_retries_left,
+                    reasoning_effort=turn_reasoning,
+                )
             except GenerationInterrupted:
                 # Пользователь прервал выполнение инструмента: убираем висящий вызов
                 # ассистента без результата, чтобы история осталась валидной для API.
@@ -732,56 +783,52 @@ class LLMAgent(
 
             if rerun_prefill:
                 # [NO COMMENT]: модель вызвала инструмент без текста. Перегенерируем
-                # следующий ход с prefill (напр. 'Assistant:'), не добавляя пустой ответ
-                # в историю. Этот блок стоит ДО guard'а pending-операции: иначе guard
-                # своим continue съел бы prefill и цикл шёл бы впустую (без 'Assistant:').
-                pending_prefill = rerun_prefill
-                self._last_response_id = None
-                self._last_sent_msg_count = 0
+                # следующий ход с prefill, не добавляя пустой ответ в историю (лимит —
+                # NO_COMMENT_RETRIES, задаётся в TurnState). Этот блок стоит ДО guard'а
+                # pending-операции: иначе guard своим continue съел бы prefill и цикл шёл
+                # бы впустую (без prefill). Когда попытки исчерпаны, _process_llm_response
+                # возвращает None и вызов исполняется как есть.
+                state.no_comment_retries_left -= 1
+                state.set_prefill(rerun_prefill)
                 continue
 
             if (self._pending_operation is not None
                     and not message_obj.tool_calls
                     and not tool_error_occurred):
-                # Модель ответила текстом, не вызвав 'answer' — ход неудачный.
+                # Модель ответила текстом, не вызвав 'answer_to_system' — ход неудачный.
                 # Стираем неудачный ответ и все предыдущие наги (как при зацикливании),
                 # чтобы мусор не копился в контексте, и перегенерируем с повышенной
                 # температурой.
                 self._erase_last_assistant()
                 self._drop_guard_nags()
                 self.history.add(UserMessage(
-                    f"{ENVIRONMENT_PREFIX} You can't continue unless you answer to the system question using 'answer' tool. "
+                    f"{ENVIRONMENT_PREFIX} You can't continue unless you answer to the system question using '{answer_to_system.__name__}' tool. "
                     "Call it ritgh now!"
                     f"{ENVIRONMENT_PREFIX_END}"
                 ))
                 self.on_render(self.history.get_all()[-1])
                 self._temp_override = Config.ERROR_RECOVERY_TEMP
-                self._last_response_id = None
-                self._last_sent_msg_count = 0
                 self._on_history_changed()
                 continue
 
-            pending_prefill = None
+            state.clear_prefill()
 
             if broken_call:
-                if broken_regen_left > 0:
-                    broken_regen_left -= 1
+                if state.can_retry_broken_regen():
                     self._erase_last_assistant()
-                    self._recover('broken_call', retries_left=broken_regen_left)
+                    self._recover('broken_call', retries_left=state.broken_regen_left)
                     continue
-                if broken_fix_left > 0:
-                    broken_fix_left -= 1
+                if state.can_retry_broken_fix():
                     self.history.add(UserMessage(self._build_broken_call_fix()))
                     self.on_render(self.history.get_all()[-1])
-                    self._recover('broken_fix', retries_left=broken_fix_left)
+                    self._recover('broken_fix', retries_left=state.broken_fix_left)
                     continue
                 self._recover('broken_giveup')
                 return ""
 
-            if tool_error_occurred and tool_error_retries_left > 0:
-                tool_error_retries_left -= 1
+            if tool_error_occurred and state.can_retry_tool_error():
                 erased = self._erase_last_failed_tool_call()
-                self._recover('tool_error', retries_left=tool_error_retries_left, erased_count=erased)
+                self._recover('tool_error', retries_left=state.tool_error_retries_left, erased_count=erased)
                 continue
 
             self._compact_completed_tasks()
@@ -795,12 +842,11 @@ class LLMAgent(
                 self._auto_summarize_dialogue()
 
             if tool_error_occurred:
-                consecutive_errors += 1
+                state.record_tool_error()
             else:
-                consecutive_errors = 0
-                tool_error_retries_left = Config.ERROR_RECOVERY_RETRIES
+                state.record_tool_success()
 
-            if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+            if state.max_errors_reached:
                 self._recover('error_limit', retries_left=MAX_CONSECUTIVE_ERRORS)
                 return ""
 

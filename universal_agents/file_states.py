@@ -39,12 +39,14 @@ class FileStateTracker:
             st["tool_call_id"] = tool_call_id
 
     def _find_read_result(self, tool_call_id: str):
-        """Ищет в истории ToolResult инструмента 'read' по tool_call_id."""
+        """Ищет в истории ToolResult инструмента read по tool_call_id."""
+        from universal_agents.tools.fs import read as _read_tool
+
         if not self._history or not tool_call_id:
             return None
         for msg in self._history.get_all():
             if (
-                getattr(msg, 'name', None) == 'read'
+                getattr(msg, 'name', None) == _read_tool.__name__
                 and getattr(msg, 'tool_call_id', None) == tool_call_id
             ):
                 return msg

@@ -39,6 +39,12 @@ class UserMessage(Message):
     is_summary: bool = False
     _cached_header: Optional[str] = field(default=None, init=False, repr=False)
 
+    def reset_header_cache(self) -> None:
+        """Сбрасывает кэш заголовка user-сообщения: следующий prepare_messages_for_api
+        соберёт header заново (актуальный токен-бюджет и т.п.). Единственная точка
+        инвалидации кэша."""
+        self._cached_header = None
+
     def to_api_dict(self) -> dict[str, Any]:
         return {"role": "user", "content": self.content}
 

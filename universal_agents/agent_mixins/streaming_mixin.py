@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import threading
 from typing import Callable
 
 from universal_agents.config import Config
 from universal_agents.generation import GenerationParams
-from universal_agents.llm_client import LLMClient, StreamAccumulator
+from universal_agents.llm_client import LLMClient, StreamAccumulator, StreamSession
 from universal_agents.tool_parsing import build_tool_calls
 from universal_agents.exceptions import GenerationInterrupted
 
@@ -33,7 +32,6 @@ class StreamingMixin:
         messages: list[dict],
         prefill: str = None,
         tools: list[dict] = None,
-        previous_response_id: str = None,
         params: GenerationParams = None,
         watch_prefix: str = None,
         watch_continue_temp: float = None,
@@ -42,90 +40,55 @@ class StreamingMixin:
     ) -> tuple:
         """Вызов LLM со streaming (возвращает (message_obj, error, usage)). Если задан watch_prefix, при расхождении с прежним ответом генерация на горячей температуре прерывается и достраивается спокойной температурой (watch_continue_temp) — буст не успевает вызвать галлюцинации. stop_check — вызывается после каждого чанка; True прерывает стрим."""
         try:
-            stream = LLMClient.stream(
+            session = StreamSession(
                 messages,
                 tools=tools,
                 prefill=prefill,
-                previous_response_id=previous_response_id,
                 params=params,
                 reasoning_effort=reasoning_effort,
+                on_stream_chunk=self.on_stream_chunk,
+                on_reasoning_start=self.on_reasoning_start,
+                on_reasoning_chunk=self.on_reasoning_chunk,
             )
-
-            # Watchdog: закрывает соединение при остановке пользователя, в т.ч. во время
-            # префилла (до первого чанка), когда stop_check в цикле ниже ещё не сработал.
-            LLMClient._active_stream = stream
-            _watch_done = threading.Event()
-            if stop_check is not None:
-                def _watcher():
-                    while not _watch_done.is_set():
-                        if stop_check():
-                            LLMClient.close_stream(stream)
-                            break
-                        _watch_done.wait(0.05)
-                threading.Thread(target=_watcher, daemon=True).start()
-
-            try:
-                acc = StreamAccumulator(
-                    prefill=prefill,
-                    on_stream_chunk=self.on_stream_chunk,
-                    on_reasoning_start=self.on_reasoning_start,
-                    on_reasoning_chunk=self.on_reasoning_chunk,
-                )
-
-                first_chunk = next(stream)
-                if isinstance(first_chunk, dict) and "error" in first_chunk:
-                    return None, first_chunk["error"], None
-
-                if self.on_stream_start:
-                    self.on_stream_start()
-
-                acc.process(first_chunk)
-                diverged = self._watch_diverged(watch_prefix, prefill, acc.content)
-
-                if not diverged:
-                    for chunk in stream:
-                        if acc.process(chunk) and self._watch_diverged(watch_prefix, prefill, acc.content):
-                            diverged = True
-                            break
-                        if stop_check and stop_check():
-                            break
-
-                if self.on_stream_end:
-                    self.on_stream_end()
-                if acc.reasoning_started and self.on_reasoning_end:
-                    self.on_reasoning_end()
-
-                if diverged:
-                    return self._continue_stream_after_divergence(
-                        messages, tools, prefill, acc, watch_continue_temp,
-                        reasoning_effort=reasoning_effort, stop_check=stop_check,
-                    )
-
-                message_obj = self._assemble_assistant_message(
-                    acc.content,
-                    build_tool_calls(acc.tool_calls_data),
-                    acc.reasoning,
-                    prefill=prefill,
-                    streamed=True,
-                )
-
-                return message_obj, None, acc.usage
-
-            except Exception as e:
-                if isinstance(e, GenerationInterrupted):
-                    raise
-                if stop_check and stop_check():
-                    raise GenerationInterrupted()
-                return None, str(e), None
-            finally:
-                _watch_done.set()
-                if LLMClient._active_stream is stream:
-                    LLMClient._active_stream = None
-
+            error, _stopped = session.consume(
+                stop_check=stop_check,
+                stop_on_chunk=(
+                    (lambda: self._watch_diverged(watch_prefix, prefill, session.acc.content))
+                    if watch_prefix else None
+                ),
+                on_stream_start=self.on_stream_start,
+            )
         except Exception as e:
             if isinstance(e, GenerationInterrupted):
                 raise
+            if stop_check and stop_check():
+                raise GenerationInterrupted()
             return None, str(e), None
+
+        if error:
+            if stop_check and stop_check():
+                raise GenerationInterrupted()
+            return None, error, None
+
+        if self.on_stream_end:
+            self.on_stream_end()
+        if session.acc.reasoning_started and self.on_reasoning_end:
+            self.on_reasoning_end()
+
+        if self._watch_diverged(watch_prefix, prefill, session.acc.content):
+            return self._continue_stream_after_divergence(
+                messages, tools, prefill, session.acc, watch_continue_temp,
+                reasoning_effort=reasoning_effort, stop_check=stop_check,
+            )
+
+        message_obj = self._assemble_assistant_message(
+            session.acc.content,
+            build_tool_calls(session.acc.tool_calls_data),
+            session.acc.reasoning,
+            prefill=prefill,
+            streamed=True,
+        )
+        return message_obj, None, session.acc.usage
 
     def _continue_stream_after_divergence(
         self,
