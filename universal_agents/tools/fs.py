@@ -541,6 +541,64 @@ def _peripheral_indices(near: int, far: int, total: int, growth: float = 2.0) ->
     return sorted(out)
 
 
+def _build_portion_content(
+    path: str, mtime: str, lines: list[str], total: int,
+    start: int, actual_end: int, truncated: bool,
+) -> str:
+    """Собирает вывод порционного чтения: фокус-диапазон [start..actual_end] целиком
+    («центральное зрение») + редкая периферия до краёв файла («периферийное зрение»).
+    Общая для ranged read (start_line/end_line) и для первого батча большого файла,
+    когда структурный скелет выключен (BIG_FILE_SKELETON=False)."""
+    focus_idx = range(start, actual_end + 1)
+    peripheral: set[int] = set()
+    focus_size = actual_end - start + 1
+    peri_span = int(Config.PERIPHERAL_SIDE_FACTOR * focus_size)
+    if start - 1 >= 1:
+        left_far = 1 if peri_span <= 0 else max(1, start - peri_span)
+        peripheral.update(_peripheral_indices(start - 1, left_far, total, Config.PERIPHERAL_GAP_GROWTH))
+    if actual_end + 1 <= total:
+        right_far = total if peri_span <= 0 else min(total, actual_end + peri_span)
+        peripheral.update(_peripheral_indices(actual_end + 1, right_far, total, Config.PERIPHERAL_GAP_GROWTH))
+    peripheral -= set(focus_idx)
+    # Локальный контекст периферии: вокруг каждой выбранной строки
+    # добавляем ±N соседей (без строк фокуса).
+    if Config.PERIPHERAL_LINE_CONTEXT:
+        ctx = int(Config.PERIPHERAL_LINE_CONTEXT)
+        extra: set[int] = set()
+        for p in peripheral:
+            for d in range(-ctx, ctx + 1):
+                j = p + d
+                if 1 <= j <= total and not (start <= j <= actual_end):
+                    extra.add(j)
+        peripheral |= extra
+    # Собираем строки: фокус + периферия, упорядоченно по номеру,
+    # чтобы сохранить пространственную картину файла. Периферийные
+    # строки (маркер '~') обрезаются по длине (только контекст).
+    included = sorted(set(focus_idx) | peripheral)
+    max_peri = Config.PERIPHERAL_MAX_LINE_CHARS
+    numbered = []
+    for i in included:
+        is_focus = start <= i <= actual_end
+        line = lines[i - 1]
+        if not is_focus and max_peri and len(line) > max_peri:
+            line = line[:max_peri] + "..."
+        marker = "" if is_focus else "~"
+        numbered.append(f"{marker}{i} {line}")
+    focus_note = (
+        f"Full focus lines {start}-{actual_end}/{total}. "
+        f"'~' marks sparse peripheral context lines (exponential vision)."
+    )
+    return (
+        f"{ENVIRONMENT_PREFIX} File: {path}\nModified: {mtime}\n"
+        f"{focus_note}\n---\n"
+        + ("\n".join(numbered) if numbered else "")
+        + (f"\n{ENVIRONMENT_PREFIX} Output limit is ~{Config.MAX_READ_CHARS_PER_CALL} chars. "
+           f"Use start_line={actual_end + 1} to continue.{ENVIRONMENT_PREFIX_END}"
+           if truncated else "")
+        + f"\n{ENVIRONMENT_PREFIX_END}"
+    )
+
+
 @tool(description="Reads a file or shows a directory tree. Small files are returned fully. "
                   "Large files WITHOUT start_line/end_line return a structural skeleton exactly once "
                   "To read actual code "
@@ -570,58 +628,7 @@ def read(agent: 'AgentContext', path: str = '.', start_line: int = None, end_lin
                     return err(f": start_line {start} is beyond the end of the file ({total} lines).")
                 selected, truncated = _limit_read_chunk(lines[start - 1:end])
                 actual_end = start + len(selected) - 1
-                # «Центральное зрение»: запрошенный фокус-диапазон — чётко и целиком.
-                focus_idx = range(start, actual_end + 1)
-                # «Периферийное зрение»: вокруг фокуса до краёв файла, экспоненциально
-                # реже — даёт контекст, не выгружая весь файл.
-                peripheral: set[int] = set()
-                focus_size = actual_end - start + 1
-                peri_span = int(Config.PERIPHERAL_SIDE_FACTOR * focus_size)
-                if start - 1 >= 1:
-                    left_far = 1 if peri_span <= 0 else max(1, start - peri_span)
-                    peripheral.update(_peripheral_indices(start - 1, left_far, total, Config.PERIPHERAL_GAP_GROWTH))
-                if actual_end + 1 <= total:
-                    right_far = total if peri_span <= 0 else min(total, actual_end + peri_span)
-                    peripheral.update(_peripheral_indices(actual_end + 1, right_far, total, Config.PERIPHERAL_GAP_GROWTH))
-                peripheral -= set(focus_idx)
-                # Локальный контекст периферии: вокруг каждой выбранной строки
-                # добавляем ±N соседей (без строк фокуса).
-                if Config.PERIPHERAL_LINE_CONTEXT:
-                    ctx = int(Config.PERIPHERAL_LINE_CONTEXT)
-                    extra: set[int] = set()
-                    for p in peripheral:
-                        for d in range(-ctx, ctx + 1):
-                            j = p + d
-                            if 1 <= j <= total and not (start <= j <= actual_end):
-                                extra.add(j)
-                    peripheral |= extra
-                # Собираем строки: фокус + периферия, упорядоченно по номеру,
-                # чтобы сохранить пространственную картину файла. Периферийные
-                # строки (маркер '~') обрезаются по длине (только контекст).
-                included = sorted(set(focus_idx) | peripheral)
-                max_peri = Config.PERIPHERAL_MAX_LINE_CHARS
-                numbered = []
-                for i in included:
-                    is_focus = start <= i <= actual_end
-                    line = lines[i - 1]
-                    if not is_focus and max_peri and len(line) > max_peri:
-                        line = line[:max_peri] + "..."
-                    marker = "" if is_focus else "~"
-                    numbered.append(f"{marker}{i} {line}")
-                focus_note = (
-                    f"Full focus lines {start}-{actual_end}/{total}. "
-                    f"'~' marks sparse peripheral context lines (exponential vision)."
-                )
-                content = (
-                    f"{ENVIRONMENT_PREFIX} File: {path}\nModified: {mtime}\n"
-                    f"{focus_note}\n---\n"
-                    + ("\n".join(numbered) if numbered else "")
-                    + (f"\n{ENVIRONMENT_PREFIX} Output limit is ~{Config.MAX_READ_CHARS_PER_CALL} chars. "
-                       f"Use start_line={actual_end + 1} to continue.{ENVIRONMENT_PREFIX_END}"
-                       if truncated else "")
-                    + f"\n{ENVIRONMENT_PREFIX_END}"
-                )
-                return content
+                return _build_portion_content(path, mtime, lines, total, start, actual_end, truncated)
             # Без диапазона
             raw, read_err = _read_text(path)
             if read_err:
@@ -634,11 +641,18 @@ def read(agent: 'AgentContext', path: str = '.', start_line: int = None, end_lin
                 numbered = [f"{i+1} {line}" for i, line in enumerate(lines)]
                 content = header + "Content:\n---\n" + ("\n".join(numbered) if numbered else "") + f"\n{ENVIRONMENT_PREFIX_END}"
                 return _finish_read(agent, path, raw, content, disk_hash)
-            # БОЛЬШОЙ файл: ровно один раз отдаём скелет; повторные целиком-файловые чтения без изменений запрещены.
+            # БОЛЬШОЙ файл: ровно один раз отдаём скелет (или первый батч, если скелет выключен);
+            # повторные целиком-файловые чтения без изменений запрещены.
             if agent.file_states.should_skip(path, disk_hash):
                 return _reread_err(path)
-            structure = ""
-            if Config.BIG_FILE_SKELETON:
+            if not Config.BIG_FILE_SKELETON:
+                # Структуризация отключена: вместо структуры отдаём «пачку» строк файла
+                # от 1 до лимита по строкам/символам + периферию до краёв — как при
+                # порционном чтении с неявным start_line=1.
+                selected, truncated = _limit_read_chunk(lines)
+                actual_end = len(selected)
+                content = _build_portion_content(path, mtime, lines, total, 1, actual_end, truncated)
+            else:
                 structure = _summarize_file(raw, agent)
                 if structure is None:
                     # Генерация скелета не удалась (например, сбой субагента) — НЕ возвращаем
@@ -656,15 +670,15 @@ def read(agent: 'AgentContext', path: str = '.', start_line: int = None, end_lin
                         f"Each call returns ~{Config.MAX_READ_CHARS_PER_CALL} chars."
                         f"{ENVIRONMENT_PREFIX_END}"
                     )
-            structure_block = (
-                f"Content structure:\n---\n{structure}\n"
-                if structure else ""
-            )
-            content = (
-                header + f"Total lines: {total}\n"
-                f"{structure_block}"
-                f"\n{ENVIRONMENT_PREFIX_END}"
-            )
+                structure_block = (
+                    f"Content structure:\n---\n{structure}\n"
+                    if structure else ""
+                )
+                content = (
+                    header + f"Total lines: {total}\n"
+                    f"{structure_block}"
+                    f"\n{ENVIRONMENT_PREFIX_END}"
+                )
             agent.file_states.record(path, disk_hash, _content_hash(content))
             agent._read_registrations.append(path)
             return content
