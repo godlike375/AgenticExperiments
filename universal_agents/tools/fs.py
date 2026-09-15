@@ -17,7 +17,7 @@ from universal_agents.constants import (
 )
 from universal_agents.file_states import _content_hash
 from universal_agents.tool import tool
-from universal_agents.tools.builtin import answer_to_system
+from universal_agents.tools import builtin as _builtin
 
 if TYPE_CHECKING:
     from universal_agents.context import AgentContext
@@ -146,7 +146,7 @@ def _apply_edit_result(
         # Инструмент сам говорит модели, как ему ответить. execute_mixin лишь
         # склеит это с превью. Ответ инструмента всегда должен вызывать 'answer_to_system'.
         ask = (
-            f"{ENVIRONMENT_PREFIX} ATTENTION: this needs assistant's (AI) confirmation. Call '{answer_to_system.__name__}' "
+            f"{ENVIRONMENT_PREFIX} ATTENTION: this needs assistant's (AI) confirmation. Call '{_builtin.answer_to_system.__name__}' "
             f"with text='yes' to apply it or text='no' to cancel. You can't continue with common prose {ENVIRONMENT_PREFIX_END}"
         )
         return preview, resolve, ask
