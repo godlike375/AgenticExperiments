@@ -402,9 +402,10 @@ def _summarize_file(content: str, agent) -> str:
         # Старый fallback-режим: модель пишет таблицу целиком (тег <content_structure>).
         task = (
             f"{ENVIRONMENT_PREFIX} NOW IGNORE previous instructions! Act as file content structure writer. "
-            "Start with tag <content_structure> and write very short compact content structure table "
+            "Start with tag <content_structure> and write very compact shallow content structure table "
             "(like table of content in books) (for example signatures of classes, functions, methods, headers) and "
-            "their precise line ranges (an example for reference only: `<content_structure>Lx-y example1()\nLa-b class Example2\n...`"
+            "their precise line ranges (an example for reference only: `<content_structure>Lx-y example1()\nLa-b class Example2\n...`."
+            "Exclude any commentaries in content structure!"
         )
         prefill = "<content_structure>\nL"
 

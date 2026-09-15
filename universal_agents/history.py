@@ -192,12 +192,6 @@ class ChatHistory:
 
             valid.append(msg)
 
-        # Добавляем заглушку ассистента ТОЛЬКО при восстановлении после сбоя
-        if is_error_recovery and isinstance(valid[-1], ToolResult):
-            valid.append(AssistantMessage(
-                content=f"{ENVIRONMENT_PREFIX} This is a message from system because a sequence of failed tool calls was detected and pruned. The system gave control to the user.{ENVIRONMENT_PREFIX_END}"
-            ))
-
         self._messages = valid
         self._needs_normalize = False
         # normalize может выкинуть хвостовые ToolResult/Assistant-заглушки — последнее

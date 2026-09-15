@@ -15,7 +15,7 @@ class Config:
     API_URL: str = "http://192.168.50.196:1234/v1"
     MODEL_NAME: str = ""
     AFTER_SYSTEM_PROMPT: int = 1  # Index after which dialog starts (0 = system)
-    BOOST_TEMP: float = 1.7
+    BOOST_TEMP: float = 1.4
     ERROR_RECOVERY_TEMP: float = 1.2
     MAX_LOOP_RETRIES: int = 3  # попыток перегенерации при повторяющемся вызове/ответе
     # Порог Jaccard-схожести по множеству слов для признания текстового ответа повтором.
@@ -28,7 +28,7 @@ class Config:
     # Сколько дублей подряд игнорировать ДО вставки NAG: первые попытки просто
     # отбрасывают ответ и бустят температуру; только после этого порога в контекст
     # добавляется предупреждающая инструкция (NAG) для перегенерации.
-    DUPLICATE_NAG_THRESHOLD: int = 2
+    DUPLICATE_NAG_THRESHOLD: int = 3
     ERROR_RECOVERY_RETRIES: int = 0  # попыток перегенерации после ошибки инструмента
     BROKEN_CALL_REGEN_RETRIES: int = 2  # попыток перегенерации при обнаружении сломанного вызова
     BROKEN_CALL_FIX_RETRIES: int = 2    # попыток «починить» вызов через промпт после неудачной регенерации
