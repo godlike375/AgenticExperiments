@@ -788,7 +788,6 @@ class LLMAgent(
                 # pending-операции: иначе guard своим continue съел бы prefill и цикл шёл
                 # бы впустую (без prefill). Когда попытки исчерпаны, _process_llm_response
                 # возвращает None и вызов исполняется как есть.
-                state.no_comment_retries_left -= 1
                 state.set_prefill(rerun_prefill)
                 continue
 

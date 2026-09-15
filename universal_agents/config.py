@@ -28,11 +28,11 @@ class Config:
     SUMMARY_DUPLICATE_TEMP: float = round(BOOST_TEMP / 2, 2)  # буст при тождественном повторе саммари (мягче полного BOOST_TEMP)
 
     # Параметры генерации
-    MAX_CONTEXT_TOKENS: int = 50000
-    TEMP: float = 0.38
+    MAX_CONTEXT_TOKENS: int = 66000
+    TEMP: float = 0.4
     TOP_P: float = 0.935
-    FREQUENCY_PENALTY: float = 0.0
-    PRESENCE_PENALTY: float = 0.0
+    FREQUENCY_PENALTY: float = 0.02
+    PRESENCE_PENALTY: float = 0.02
     MAX_OUTPUT_TOKENS: int = min(32000, int(MAX_CONTEXT_TOKENS / 1.5))
     TIMEOUT: int = 1800
     MAX_ITER: int = 250
