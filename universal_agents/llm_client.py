@@ -1,3 +1,4 @@
+import hashlib
 import threading
 from typing import Optional, Callable
 from types import SimpleNamespace
@@ -18,6 +19,13 @@ def jaccard_similarity(a: str, b: str) -> float:
     if not set_a or not set_b:
         return 0.0
     return len(set_a & set_b) / len(set_a | set_b)
+
+
+def text_hash(text: str) -> str:
+    """SHA-256 хэш очищенного (по краям) текста. Единая «память повторов»: если хэш
+    нового ответа ассистента совпал с хэшем сообщения из истории (текста или
+    reasoning-блока) — это повтор, независимо от того, сколько итераций назад он был."""
+    return hashlib.sha256(text.strip().encode("utf-8")).hexdigest()
 
 
 def build_usage_dict(prompt_tokens: int, completion_tokens: int, total_tokens: Optional[int] = None) -> dict:

@@ -9,7 +9,7 @@ from typing import Iterable, Union, Callable, Optional
 from universal_agents.constants import ENVIRONMENT_PREFIX, ENVIRONMENT_PREFIX_END, INTERRUPT_HEADER
 from universal_agents.config import Config
 from universal_agents.models import UserMessage, AssistantMessage, ToolResult
-from universal_agents.llm_client import LLMClient, TokenUsageTracker, LoopDetector, jaccard_similarity
+from universal_agents.llm_client import LLMClient, TokenUsageTracker, LoopDetector, jaccard_similarity, text_hash
 from universal_agents.history import ChatHistory
 from universal_agents.generation import GenerationParams
 from universal_agents.tool_manager import ToolManager
@@ -32,6 +32,14 @@ from universal_agents.exceptions import GenerationInterrupted
 
 # Предел последовательных ошибок инструментов за один chat() до сдачи (§1)
 MAX_CONSECUTIVE_ERRORS = 5
+
+# Наг за повторённый ответ: вшивается в конец последнего сообщения при детекции повтора
+# ответа или reasoning-блока (тот же механизм устранения повтора из §1).
+_REPEAT_ANSWER_NAG = (
+    f"\n\n{ENVIRONMENT_PREFIX} Your previous answer was the same to the latest one. "
+    f"Please do NOT repeat it again and answer differently."
+    f"{ENVIRONMENT_PREFIX_END}"
+)
 
 
 @dataclass
@@ -502,8 +510,55 @@ class LLMAgent(
     # --------------------------------------------------------
     # Главный цикл
     # --------------------------------------------------------
+    def _get_prior_text_hashes(self) -> tuple[set[str], set[str]]:
+        """Хэши текстов и reasoning-блоков всех AssistantMessage истории.
+
+        Это «память повторов»: повтор любого из этих текстов новым ответом — зацикливание,
+        независимо от того, сколько итераций назад он был (в т.ч. сотни). Хэши считаются
+        на лету по текущей истории — редактирование/сжатие/загрузка/компакция автоматически
+        актуализируют набор, дрейфа состояния нет. Возвращает (text_hashes, reasoning_hashes).
+        """
+        min_chars = Config.DUPLICATE_TEXT_MIN_CHARS
+        text_hashes: set[str] = set()
+        reasoning_hashes: set[str] = set()
+        for msg in self.history.get_all():
+            if not isinstance(msg, AssistantMessage):
+                continue
+            content = (msg.content or "").strip()
+            if content and (min_chars <= 0 or len(content) >= min_chars):
+                text_hashes.add(text_hash(content))
+            reasoning = (msg.reasoning_content or "").strip()
+            if reasoning and (min_chars <= 0 or len(reasoning) >= min_chars):
+                reasoning_hashes.add(text_hash(reasoning))
+        return text_hashes, reasoning_hashes
+
     def _detect_duplicate(self, message_obj) -> Optional[tuple]:
-        """Дефолтный детектор дубликатов (§1): повторный вызов инструмента или повтор текстового ответа; возвращает None или ('tool_call', (name, args))/('answer', prev_answer)."""
+        """Дефолтный детектор дубликатов (§1): повтор текста или reasoning-блока где угодно
+        в истории (не только у предыдущего ответа — но то же устранение повтора), повторный
+        вызов инструмента, повтор предыдущего текстового ответа; возвращает None или
+        ('tool_call', (name, args))/('answer', text)/('reasoning', text)."""
+        content = (message_obj.content or "").strip()
+        reasoning = (getattr(message_obj, 'reasoning_content', '') or '').strip()
+
+        # Точный повтор текста или reasoning где угодно в истории, включая сообщения с
+        # вызовами инструментов: модель, вызывающая разные инструменты, обязана менять и
+        # сопроводительный текст (иначе это «пластинка», см. prefill 'LLM:\\n"').
+        min_chars = Config.DUPLICATE_TEXT_MIN_CHARS
+        if content or reasoning:
+            prior_text, prior_reasoning = self._get_prior_text_hashes()
+            if (
+                content
+                and (min_chars <= 0 or len(content) >= min_chars)
+                and text_hash(content) in prior_text
+            ):
+                return 'answer', content
+            if (
+                reasoning
+                and (min_chars <= 0 or len(reasoning) >= min_chars)
+                and text_hash(reasoning) in prior_reasoning
+            ):
+                return 'reasoning', reasoning
+
         if message_obj.tool_calls:
             current_history = self.history.get_all()
             seen_in_batch: set[str] = set()
@@ -519,7 +574,7 @@ class LLMAgent(
                     return 'tool_call', (tc_name(tc), tc_args(tc))
             return None
 
-        answer_text = (message_obj.content or "").strip()
+        answer_text = content
         prev_answer = self._get_last_answer_text()
         if (
             answer_text
@@ -549,6 +604,7 @@ class LLMAgent(
         message_obj = None
         last_retry_warning: Optional[str] = None
         dup_watch_target: Optional[str] = None
+        dup_count = 0
         api_error_occurred = False
         effective_reasoning_effort = reasoning_effort if reasoning_effort is not None else self._reasoning_effort
 
@@ -588,32 +644,43 @@ class LLMAgent(
 
             duplicate = is_duplicate_fn(message_obj)
             if duplicate is not None:
+                dup_count += 1
                 kind, payload = duplicate
                 if kind == 'tool_call':
                     dup_name, dup_args = payload
-                    last_retry_warning = self._build_duplicate_warning(dup_name, dup_args)
                     tag, reason = 'PROACTIVE LOOP DETECTED', f"Intercepted duplicate call to '{dup_name}'"
+                elif kind == 'reasoning':
+                    # Повтор reasoning-блока из истории. Без watch-достройки: стриминговый
+                    # watch сравнивает контент, не reasoning.
+                    dup_watch_target = None
+                    tag, reason = 'REPEATED REASONING DETECTED', 'Model repeated a reasoning block from history'
                 else:
-                    last_retry_warning = (
-                        f"\n\n{ENVIRONMENT_PREFIX} Your previous answer was the same to the latest one. "
-                        f"Please do NOT repeat it again and answer differently."
-                        f"{ENVIRONMENT_PREFIX_END}"
-                    )
                     dup_watch_target = payload
                     tag, reason = 'DUPLICATE ANSWER DETECTED', 'Model repeated the previous answer verbatim'
+                # Эскалация: первые дубли просто отбрасываются с бустом температуры, NAG
+                # вставляется только после DUPLICATE_NAG_THRESHOLD дублей подряд — чтобы не
+                # тратить токены и не раздражать модель голосом предупреждений при единичных сбоях.
+                if dup_count >= Config.DUPLICATE_NAG_THRESHOLD:
+                    last_retry_warning = _REPEAT_ANSWER_NAG if kind != 'tool_call' else self._build_duplicate_warning(dup_name, dup_args)
+                else:
+                    last_retry_warning = None
                 if boost:
                     self._temp_override = Config.BOOST_TEMP
                 self.on_system_msg(
                     f"[{tag}] {reason}. "
-                    f"Discarding response. Activating temperature boost ({Config.BOOST_TEMP}) "
-                    f"and injecting temporary warning. Attempt {attempt + 1}/{max_generation_attempts}."
+                    f"Discarding response. Activating temperature boost ({Config.BOOST_TEMP})"
+                    + (f" and injecting temporary warning." if last_retry_warning else ".")
+                    + f" Attempt {attempt + 1}/{max_generation_attempts}."
                 )
                 continue
 
             break
         else:
+            # Дубли не вылечились за max_generation_attempts попыток. Дубль НЕ пропускается
+            # как есть — сдаём ход пользователю, а не платим за повторный ответ.
+            message_obj = None
             self.on_system_msg(
-                "[PROACTIVE LOOP DETECTOR] Max re-generation attempts reached. Proceeding to execution safety nets."
+                "[PROACTIVE LOOP DETECTOR] Max re-generation attempts reached. Handing control to user."
             )
 
         return message_obj, api_error_occurred
@@ -623,6 +690,13 @@ class LLMAgent(
         if kind == 'api_error':
             self.history.normalize(is_error_recovery=True)
             self.on_system_msg("⚠️ [RECOVERY] API error occurred. Role sequence restored. Handing control to user.")
+            return
+        if kind == 'duplicate_loop':
+            self.history.normalize(is_error_recovery=True)
+            self.on_system_msg(
+                "⚠️ [LOOP DETECTED] Model keeps repeating itself after multiple attempts. "
+                "Handing control to user."
+            )
             return
         if kind == 'broken_giveup':
             self.history.normalize(is_error_recovery=True)
@@ -762,7 +836,7 @@ class LLMAgent(
                 return ""
 
             if api_error_occurred or not message_obj:
-                self._recover('api_error')
+                self._recover('api_error' if api_error_occurred else 'duplicate_loop')
                 return ""
 
             try:
