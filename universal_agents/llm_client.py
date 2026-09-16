@@ -4,7 +4,7 @@ from typing import Optional, Callable
 from types import SimpleNamespace
 from openai import OpenAI
 from universal_agents.config import Config, CHARS_PER_TOKEN
-from universal_agents.generation import GenerationParams
+from universal_agents.generation import GenerationParams, apply_stop_markers
 from universal_agents.tool_parsing import normalize_args, build_tool_calls
 from universal_agents.tools.builtin import make_plan as _make_plan_tool
 from universal_agents.exceptions import GenerationInterrupted
@@ -236,8 +236,10 @@ class StreamSession:
             params=params,
             reasoning_effort=reasoning_effort,
         )
+        self.stopped_at_marker = False
 
-    def consume(self, stop_check=None, stop_on_chunk=None, on_stream_start=None):
+    def consume(self, stop_check=None, stop_on_chunk=None, on_stream_start=None,
+                stop_markers: tuple = ()):
         """Блокирующе потребляет стрим.
 
         stop_check — пользовательская остановка (watchdog закрывает соединение, ловит
@@ -248,9 +250,16 @@ class StreamSession:
         on_stream_start — вызывается ДО первого чанка (единый порядок; старый
         StreamingMixin запускал UI-отрисовку позже, но это безопасная унификация).
 
+        stop_markers — стоп-маркеры структурированного вывода. После каждого чанка
+        проверяется накопленный контент: если какой-то маркер появился, контент
+        обрезается до этого вхождения включительно (см. apply_stop_markers), стрим
+        закрывается и self.stopped_at_marker становится True. «Хвост» после маркера
+        (лишний анализ модели) отбрасывается; следующая фаза генерации запускается
+        вызывающим через новый prefill.
+
         Возвращает (error, stopped):
         - error непуст → сбой соединения или создания (stop_on_chunk не достигнут).
-        - stopped=True → прерывание по stop_check или stop_on_chunk (error пуст).
+        - stopped=True → прерывание по stop_check, stop_on_chunk или stop_markers (error пуст).
 
         Колбэки жизненного цикла после потребления (on_stream_end, on_reasoning_end) —
         контракт вызывающего (единый для обоих потребителей).
@@ -288,15 +297,33 @@ class StreamSession:
             if isinstance(first, dict) and "error" in first:
                 return f"stream creation failed: {first['error']}", False
             self.acc.process(first)
-            for chunk in self._raw:
-                self.acc.process(chunk)
-                if stop_check and stop_check():
+            # Проверка стоп-маркера сразу после первого чанка: если маркер уже появился
+            # (единственный чанк), обрезаем и выходим — иначе check только в цикле ниже.
+            if stop_markers:
+                content, marker_hit = apply_stop_markers(self.acc.content, stop_markers)
+                if marker_hit:
+                    self.acc.content = content
                     LLMClient.close_stream(self._raw)
+                    self.stopped_at_marker = True
                     stopped = True
-                    break
-                if stop_on_chunk and stop_on_chunk():
-                    stopped = True
-                    break
+            if not stopped:
+                for chunk in self._raw:
+                    self.acc.process(chunk)
+                    if stop_check and stop_check():
+                        LLMClient.close_stream(self._raw)
+                        stopped = True
+                        break
+                    if stop_on_chunk and stop_on_chunk():
+                        stopped = True
+                        break
+                    if stop_markers:
+                        content, marker_hit = apply_stop_markers(self.acc.content, stop_markers)
+                        if marker_hit:
+                            self.acc.content = content
+                            LLMClient.close_stream(self._raw)
+                            self.stopped_at_marker = True
+                            stopped = True
+                            break
         except Exception as e:
             if isinstance(e, GenerationInterrupted):
                 raise
@@ -346,6 +373,7 @@ class LLMClient:
         callbacks: Optional[dict] = None,
         stop_check: Optional[Callable[[], bool]] = None,
         reasoning_effort: str = "none",
+        stop_markers: tuple = (),
     ):
         """Единая точка обращения к LLM. При заданных стриминговых колбэках и STREAM_ENABLED идёт через стриминг; иначе — обычный chat.completions вызов."""
         temp, timeout, top_p, frequency_penalty, presence_penalty, max_tokens = LLMClient._resolve_params(
@@ -372,6 +400,7 @@ class LLMClient:
             error, stopped = session.consume(
                 stop_check=stop_check,
                 on_stream_start=cb.get("on_stream_start"),
+                stop_markers=stop_markers,
             )
             end_cb = cb.get("on_stream_end")
             reasoning_end_cb = cb.get("on_reasoning_end")
@@ -400,6 +429,12 @@ class LLMClient:
                 frequency_penalty, presence_penalty, max_tokens,
                 reasoning_effort=reasoning_effort,
             )
+
+        if stop_markers and result and result[0] is not None and getattr(result[0], "content", None):
+            # Пост-фактум обрезка по маркеру для не-стримингового пути: чанков нет,
+            # поэтому останавливать нечего — просто отбрасываем «хвост» после маркера.
+            content, _ = apply_stop_markers(result[0].content, stop_markers)
+            result[0].content = content
 
         LLMClient._debug_log(messages_to_send, result)
         return result

@@ -37,8 +37,9 @@ class StreamingMixin:
         watch_continue_temp: float = None,
         stop_check: Callable[[], bool] = None,
         reasoning_effort: str = "none",
+        stop_markers: tuple = (),
     ) -> tuple:
-        """Вызов LLM со streaming (возвращает (message_obj, error, usage)). Если задан watch_prefix, при расхождении с прежним ответом генерация на горячей температуре прерывается и достраивается спокойной температурой (watch_continue_temp) — буст не успевает вызвать галлюцинации. stop_check — вызывается после каждого чанка; True прерывает стрим."""
+        """Вызов LLM со streaming (возвращает (message_obj, error, usage, stopped_at_marker)). Если задан watch_prefix, при расхождении с прежним ответом генерация на горячей температуре прерывается и достраивается спокойной температурой (watch_continue_temp) — буст не успевает вызвать галлюцинации. stop_check — вызывается после каждого чанка; True прерывает стрим. stop_markers — стоп-маркеры структурированного вывода: при появлении маркера в контенте стрим обрезается и останавливается, stopped_at_marker=True."""
         try:
             session = StreamSession(
                 messages,
@@ -57,18 +58,19 @@ class StreamingMixin:
                     if watch_prefix else None
                 ),
                 on_stream_start=self.on_stream_start,
+                stop_markers=stop_markers,
             )
         except Exception as e:
             if isinstance(e, GenerationInterrupted):
                 raise
             if stop_check and stop_check():
                 raise GenerationInterrupted()
-            return None, str(e), None
+            return None, str(e), None, False
 
         if error:
             if stop_check and stop_check():
                 raise GenerationInterrupted()
-            return None, error, None
+            return None, error, None, False
 
         if self.on_stream_end:
             self.on_stream_end()
@@ -88,7 +90,7 @@ class StreamingMixin:
             prefill=prefill,
             streamed=True,
         )
-        return message_obj, None, session.acc.usage
+        return message_obj, None, session.acc.usage, session.stopped_at_marker
 
     def _continue_stream_after_divergence(
         self,
@@ -128,7 +130,7 @@ class StreamingMixin:
                 prefill=prefill,
                 streamed=True,
             )
-            return msg_obj, None, acc.usage
+            return msg_obj, None, acc.usage, False
 
         followup_reasoning = getattr(followup, 'reasoning_content', None) or ""
         message_obj = self._assemble_assistant_message(
@@ -138,4 +140,4 @@ class StreamingMixin:
             prefill=prefill,
             streamed=True,
         )
-        return message_obj, None, fusage or acc.usage
+        return message_obj, None, fusage or acc.usage, False

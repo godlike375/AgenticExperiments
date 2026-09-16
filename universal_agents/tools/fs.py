@@ -397,7 +397,8 @@ def _summarize_file(content: str, agent) -> str:
             "(an example for reference only: '<content_structure_lines>\na-b\nx-y\nm-n\n</content_structure_lines>)'. "
             "Follow the order of items in the file.\n"
         )
-        prefill = "<content_structure_lines>\n"
+        schema = "<content_structure_lines/>"
+        prefill_suffix = "\n"
     else:
         # Старый fallback-режим: модель пишет таблицу целиком (тег <content_structure>).
         task = (
@@ -407,7 +408,8 @@ def _summarize_file(content: str, agent) -> str:
             "their precise line ranges (an example for reference only: `<content_structure>Lx-y example1()\nLa-b class Example2\n...`."
             "Exclude any commentaries in content structure!"
         )
-        prefill = "<content_structure>\nL"
+        schema = "<content_structure/>"
+        prefill_suffix = "\nL"
 
     file = '```\n' + numbered_text + '\n```\n\n'
     task = file + task
@@ -415,13 +417,17 @@ def _summarize_file(content: str, agent) -> str:
         task += "\n\n(File is truncated due to remaining memory)"
 
     from universal_agents.context_builder import prepare_messages_for_api
+    from universal_agents.controllers import XMLStructureController
+    from universal_agents.generation import StructuredOutputConfig
     history_msgs = prepare_messages_for_api(agent, normalize=False)
     msgs = list(history_msgs) + [{"role": "user", "content": task}]
+    controller = XMLStructureController.from_schema_text(schema, prefill_suffix=prefill_suffix)
     msg_obj, err, usage = agent.service_llm_call(
         msgs,
         temp=Config.TEMP,
         timeout=Config.TIMEOUT,
-        prefill=prefill,
+        prefill=controller.initial_prefill(),
+        structured_output=StructuredOutputConfig.from_controller(controller, max_phases=1),
     )
     if err or not msg_obj or not msg_obj.content:
         if err:
@@ -431,11 +437,6 @@ def _summarize_file(content: str, agent) -> str:
         # его не заметит (вложенный [[SYSTEM]] Error не детектится).
         return None
     result = msg_obj.content.strip()
-    # Снимаем возможную служебную обёртку субагента, если модель её добавила.
-    if result.startswith("<sub_agent>"):
-        result = result[len("<sub_agent>"):]
-    if result.endswith("</sub_agent>"):
-        result = result[: -len("</sub_agent>")]
     result = result.strip()
     if not result:
         return None
@@ -637,10 +638,10 @@ def read(agent: 'AgentContext', path: str = '.', start_line: int = None, end_lin
             lines = raw.splitlines()
             total = len(lines)
             disk_hash = _content_hash(raw)
-            header = f"{ENVIRONMENT_PREFIX} File: {path}\nModified: {mtime}\n"
+            header = f"{ENVIRONMENT_PREFIX} File: {path}\nModified: {mtime} {ENVIRONMENT_PREFIX_END}\n"
             if len(raw) <= _SUMMARY_THRESHOLD:
                 numbered = [f"{i+1} {line}" for i, line in enumerate(lines)]
-                content = header + "Content:\n---\n" + ("\n".join(numbered) if numbered else "") + f"\n{ENVIRONMENT_PREFIX_END}"
+                content = header + "Content:\n---\n" + ("\n".join(numbered) if numbered else "") + f"\n"
                 return _finish_read(agent, path, raw, content, disk_hash)
             # БОЛЬШОЙ файл: ровно один раз отдаём скелет (или первый батч, если скелет выключен);
             # повторные целиком-файловые чтения без изменений запрещены.
@@ -677,8 +678,7 @@ def read(agent: 'AgentContext', path: str = '.', start_line: int = None, end_lin
                 )
                 content = (
                     header + f"Total lines: {total}\n"
-                    f"{structure_block}"
-                    f"\n{ENVIRONMENT_PREFIX_END}"
+                    f"{structure_block}\n"
                 )
             agent.file_states.record(path, disk_hash, _content_hash(content))
             agent._read_registrations.append(path)

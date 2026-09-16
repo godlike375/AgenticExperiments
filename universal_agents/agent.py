@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import os
+import re
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace as dc_replace
 from datetime import datetime
+from types import SimpleNamespace
 from typing import Iterable, Union, Callable, Optional
 
 from universal_agents.constants import ENVIRONMENT_PREFIX, ENVIRONMENT_PREFIX_END, INTERRUPT_HEADER
@@ -11,7 +13,8 @@ from universal_agents.config import Config
 from universal_agents.models import UserMessage, AssistantMessage, ToolResult
 from universal_agents.llm_client import LLMClient, TokenUsageTracker, LoopDetector, jaccard_similarity, text_hash
 from universal_agents.history import ChatHistory
-from universal_agents.generation import GenerationParams
+from universal_agents.generation import GenerationParams, StructuredOutputConfig, apply_stop_markers
+from universal_agents.controllers import PhaseController, ControllerVerdict
 from universal_agents.tool_manager import ToolManager
 from universal_agents.sub_agent import SubAgent
 from universal_agents.context_builder import prepare_messages_for_api, get_effective_prefill
@@ -41,6 +44,16 @@ _REPEAT_ANSWER_NAG = (
     f"{ENVIRONMENT_PREFIX_END}"
 )
 
+# Шаблон системной шапки, которую prepare_messages_for_api приклеивает к user-контенту.
+_SYSTEM_HEADER_RE = re.compile(r"^\{<SYSTEM>:.*?\}\n\n", re.DOTALL)
+
+
+def _strip_system_header(content: Optional[str]) -> Optional[str]:
+    """Срезает системную шапку (<SYSTEM>: {...}) с начала user-контента (API-представление)."""
+    if content is None:
+        return None
+    return _SYSTEM_HEADER_RE.sub("", content, count=1)
+
 
 @dataclass
 class TurnState:
@@ -56,6 +69,8 @@ class TurnState:
     broken_regen_left: int = field(default_factory=lambda: Config.BROKEN_CALL_REGEN_RETRIES)
     broken_fix_left: int = field(default_factory=lambda: Config.BROKEN_CALL_FIX_RETRIES)
     no_comment_retries_left: int = field(default_factory=lambda: Config.NO_COMMENT_RETRIES)
+    structured_output: Optional[StructuredOutputConfig] = None
+    structured_output_phase: int = 0
 
     def has_prefill(self) -> bool:
         """Есть ли prefill для следующего шага (после [NO COMMENT] или из старта хода)."""
@@ -229,11 +244,18 @@ class LLMAgent(
         self.pending_interrupt: Optional[str] = None
         # True, пока поток генерации исполняет инструменты (нужно UI для выбора поведения).
         self._in_tool_execution = False
+        # True во время служебного хода (_run_service_turn): блокирует per-message
+        # суммаризацию (сообщения служебного хода откатываются), авто-сейв и компакцию.
+        self._in_service_turn = False
 
     @property
     def _per_msg_enabled(self) -> bool:
-        """Гейт per-message суммаризации: выключена глобально (Config.PER_MSG_SUMMARIES_ENABLED) или локально (disable_per_msg_summarization)."""
-        return Config.PER_MSG_SUMMARIES_ENABLED and not self._disable_per_msg_summarization
+        """Гейт per-message суммаризации: выключена глобально (Config.PER_MSG_SUMMARIES_ENABLED), локально (disable_per_msg_summarization) или во время служебного хода (_in_service_turn) — его сообщения откатываются из истории, саммари на них были бы хламом."""
+        return (
+            Config.PER_MSG_SUMMARIES_ENABLED
+            and not self._disable_per_msg_summarization
+            and not self._in_service_turn
+        )
 
     @property
     def _reasoning_effort(self) -> str:
@@ -456,8 +478,9 @@ class LLMAgent(
         watch_continue_temp: Optional[float] = None,
         stop_check: Callable[[], bool] = None,
         reasoning_effort: str = "none",
+        stop_markers: tuple = (),
     ) -> tuple:
-        """Единая точка транспорта LLM (§2): выбирает стриминг или обычный вызов; возвращает (message_obj, error, usage)."""
+        """Единая точка транспорта LLM (§2): выбирает стриминг или обычный вызов; возвращает (message_obj, error, usage, stopped_at_marker). stop_markers — стоп-маркеры структурированного вывода, останавливают генерацию при появлении в контенте."""
         tools = self.tools if self.tools else None
         if self.streaming_enabled and self.on_stream_chunk:
             return self._call_with_streaming(
@@ -469,15 +492,27 @@ class LLMAgent(
                 watch_continue_temp=watch_continue_temp,
                 stop_check=stop_check,
                 reasoning_effort=reasoning_effort,
+                stop_markers=stop_markers,
             )
-        return LLMClient.call(
+        message_obj, err, usage = LLMClient.call(
             messages,
             tools=tools,
             prefill=prefill,
             params=params,
             stop_check=stop_check,
             reasoning_effort=reasoning_effort,
+            stop_markers=stop_markers,
         )
+        # Обрезка и определение флага: LLMClient.call уже обрезал при реальном вызове,
+        # но при мокировании (тесты) вызов проходит мимо. Повторная обрезка безопасна —
+        # если маркер уже удалён, apply_stop_markers вернёт (контент, False).
+        stopped_at_marker = False
+        if stop_markers and message_obj is not None and getattr(message_obj, "content", None):
+            content, marker_hit = apply_stop_markers(message_obj.content, stop_markers)
+            if marker_hit:
+                message_obj.content = content
+                stopped_at_marker = True
+        return message_obj, err, usage, stopped_at_marker
 
     def service_llm_call(
         self,
@@ -487,25 +522,142 @@ class LLMAgent(
         tools=True,
         prefill: Optional[str] = None,
         params: GenerationParams = None,
+        structured_output: Optional[StructuredOutputConfig] = None,
     ) -> tuple:
-        """Служебный вызов LLM (саммаризация, компактизация, consistency). При заданных on_service_stream_* колбэках стримится в отдельный канал со своей меткой. tools=True — текущий набор инструментов агента. stop_check всегда передаётся (это стоп-событие пользователя), чтобы служебный стрим можно было прервать через watchdog — иначе компакция «глуха» к остановке."""
-        callbacks = None
-        if self.streaming_enabled and self.on_service_stream_chunk:
-            callbacks = {
-                "on_stream_start": self.on_service_stream_start,
-                "on_stream_chunk": self.on_service_stream_chunk,
-                "on_stream_end": self.on_service_stream_end,
-            }
-        return LLMClient.call(
-            msgs,
+        """Служебный вызов LLM (саммаризация, компактизация, consistency) = ОДИН ход через
+        общий движок (_run_service_turn): промпт кладётся в историю как UserMessage, генерируется
+        одно ассистентское сообщение, инструменты не исполняются, авто-сейв/компакция/авто-
+        суммаризация отключены. После завершения промпт (и ответ) либо остаются в истории
+        (Config.SERVICE_TURN_KEEP_IN_HISTORY / параметр keep_in_history), либо откатываются.
+
+        Вызывающие передают msgs = история + [промпт]; сам промпт извлекается из последнего
+        user-сообщения. Если последний user-контент в истории уже равен промпту (consistency:
+        промпт = текущее сообщение пользователя), он не добавляется повторно. stop_check
+        всегда берётся агента (_stop_check), чтобы служебный стрим прерывался через watchdog.
+        Возвращает (msg_obj, err, usage); usage=None — токены уже учтены движком хода."""
+        prompt = None
+        for m in reversed(msgs):
+            if isinstance(m, dict) and m.get("role") == "user":
+                prompt = m.get("content")
+                break
+        last_user = self.history.get_last_user_message()
+        # prepare_messages_for_api приклеивает шапку <SYSTEM> к последнему user-контенту;
+        # сравниваем с историей, срезав шапку (иначе consistency-драфты дублировали бы промпт).
+        prompt_clean = _strip_system_header(prompt) if prompt else None
+        if prompt_clean is not None and last_user is not None and (last_user.content or "") == prompt_clean:
+            append_prompt = False  # промпт уже последнее сообщение в истории (consistency-драфт)
+        else:
+            append_prompt = True
+        result = self._run_service_turn(
+            prompt or "",
+            append_prompt=append_prompt,
             temp=temp,
             timeout=timeout,
-            tools=(self.tools if tools else tools),
             prefill=prefill,
             params=params,
-            callbacks=callbacks,
-            stop_check=self._stop_check,
+            structured_output=structured_output,
         )
+        if result:
+            return SimpleNamespace(content=result, tool_calls=[], reasoning_content=""), None, None
+        return None, "Empty response", None
+
+    def _run_service_turn(
+        self,
+        prompt: str,
+        *,
+        append_prompt: bool = True,
+        keep_in_history: Optional[bool] = None,
+        max_iter: Optional[int] = None,
+        temp: Optional[float] = None,
+        timeout: Optional[int] = None,
+        prefill: Optional[str] = None,
+        params: GenerationParams = None,
+        structured_output: Optional[StructuredOutputConfig] = None,
+    ) -> str:
+        """Служебный генеративный ход: один проход _run_turn_loop в режиме service_mode.
+
+        Поведение §5: инструменты не исполняются (есть текст — остаётся текст, текста нет —
+        перегенерация), авто-сейв/компакция/авто-суммаризация выключены (флаг _in_service_turn
+        и service_mode). Промпт добавляется в историю как UserMessage (KV-cache-безопасно:
+        обычные и служебные ходы делят один префикс) и после завершения, если не
+        keep_in_history, откатывается вместе с ответом. Пер-msg суммаризация во время хода
+        заблокирована (_in_service_turn) — откатываемые сообщения не должны копить саммари.
+        Возвращает итоговый текст; ""/None — ход не дал контента."""
+        keep = Config.SERVICE_TURN_KEEP_IN_HISTORY if keep_in_history is None else keep_in_history
+        max_iter = max_iter if max_iter is not None else Config.SERVICE_TURN_MAX_ITER
+        start_len = len(self.history.get_all())
+        # Снапшот кэш-заголовка «последнего» user-сообщения ДО хода: откат через
+        # history.remove_at сбросил бы его (_resync_last_user_header), а на деле
+        # «последность» не менялась — история вернулась к байт-идентичному состоянию,
+        # и KV-префикс обязан остаться стабильным (§1.2).
+        prev_last_user = self.history.get_last_user_message()
+        prev_last_user_header = prev_last_user._cached_header if prev_last_user is not None else None
+        # Отдельный служебный стрим-канал: сервисный контент не должен течь в основной поток.
+        stream_swap = None
+        if self.streaming_enabled and self.on_service_stream_chunk:
+            stream_swap = (self.on_stream_start, self.on_stream_chunk, self.on_stream_end)
+            self.on_stream_start = self.on_service_stream_start or (lambda: None)
+            self.on_stream_chunk = self.on_service_stream_chunk
+            self.on_stream_end = self.on_service_stream_end or (lambda: None)
+
+        prev_suppressed = self._auto_summarize_suppressed
+        self._auto_summarize_suppressed = True
+        self._in_service_turn = True
+        # Служебный ход применяет свои temp/timeout/params поверх текущих _gen_params.
+        prev_params = self._gen_params
+        if params is not None or temp is not None or timeout is not None:
+            p = params or GenerationParams()
+            self._gen_params = dc_replace(
+                self._gen_params,
+                temp=temp if temp is not None else (p.temp if p.temp is not None else self._gen_params.temp),
+                timeout=timeout if timeout is not None else (p.timeout if p.timeout is not None else self._gen_params.timeout),
+            )
+        try:
+            if append_prompt:
+                self._append_service_prompt(prompt)
+            result = self._run_turn_loop(
+                max_iter,
+                prefill=prefill,
+                structured_output=structured_output,
+                service_mode=True,
+            ) or ""
+        finally:
+            # Откат даже при исключении: служебные сообщения не должны оставаться
+            # в истории (разве что keep). Восстановление флагов/стрим-канала — тоже.
+            if not keep:
+                end = len(self.history.get_all())
+                if end > start_len:
+                    self.history.remove_at(range(start_len, end))
+                    self.history.normalize()
+                    self._on_history_changed()
+                # Вернуть сохранённую шапку прежнего «последнего» user-сообщения:
+                # remove_at сбросил её как «сменившегося последнего», но реально
+                # последность не менялась — без восстановления следующий
+                # prepare_messages_for_api пересоберёт шапку с новым токен-бюджетом
+                # и сломает байт-идентичный KV-префикс ([PREFIX-HASH]).
+                if (
+                    prev_last_user is not None
+                    and prev_last_user_header is not None
+                    and self.history.get_last_user_message() is prev_last_user
+                ):
+                    prev_last_user._cached_header = prev_last_user_header
+            self._gen_params = prev_params
+            self._auto_summarize_suppressed = prev_suppressed
+            self._in_service_turn = False
+            if stream_swap is not None:
+                self.on_stream_start, self.on_stream_chunk, self.on_stream_end = stream_swap
+        return result
+
+    def _append_service_prompt(self, prompt: str) -> None:
+        """Добавляет промпт служебного хода как UserMessage (с заглушкой ассистента, если
+        последний user), не трогая висящие tool_calls текущего хода — сервисный вызов может
+        происходить в середине выполнения инструмента основного хода, и чистка pending-вызовов
+        здесь сломала бы его."""
+        last = self.history.get_last_message()
+        if isinstance(last, UserMessage):
+            self.history.add(AssistantMessage(content=""))
+        self.history.add(UserMessage(content=prompt))
+        self.clear_stop()
 
     # --------------------------------------------------------
     # Главный цикл
@@ -592,8 +744,9 @@ class LLMAgent(
         is_duplicate_fn: Callable = None,
         boost: bool = True,
         reasoning_effort: str = None,
+        stop_markers: tuple = (),
     ) -> tuple:
-        """До max_generation_attempts попыток генерации (§1), отбрасывая дубликаты и бустя температуру; логика повторов собрана здесь. is_duplicate_fn по умолчанию — self._detect_duplicate; boost=False оставляет детект без буста. Возвращает (message_obj, api_error_occurred)."""
+        """До max_generation_attempts попыток генерации (§1), отбрасывая дубликаты и бустя температуру; логика повторов собрана здесь. is_duplicate_fn по умолчанию — self._detect_duplicate; boost=False оставляет детект без буста. Возвращает (message_obj, api_error_occurred, stopped_at_marker)."""
         if is_duplicate_fn is None:
             is_duplicate_fn = self._detect_duplicate
         max_generation_attempts = (
@@ -606,6 +759,7 @@ class LLMAgent(
         dup_watch_target: Optional[str] = None
         dup_count = 0
         api_error_occurred = False
+        stopped_at_marker = False
         effective_reasoning_effort = reasoning_effort if reasoning_effort is not None else self._reasoning_effort
 
         for attempt in range(max_generation_attempts):
@@ -620,7 +774,7 @@ class LLMAgent(
                 last_msg["content"] = (last_msg.get("content") or "") + last_retry_warning
 
             # Транспорт выбирается внутри _call_llm (стриминг или обычный вызов)
-            message_obj, err, usage = self._call_llm(
+            message_obj, err, usage, stopped_at_marker = self._call_llm(
                 active_messages,
                 prefill=step_prefill,
                 params=attempt_params,
@@ -628,6 +782,7 @@ class LLMAgent(
                 watch_continue_temp=Config.DUPLICATE_CONTINUATION_TEMP if dup_watch_target is not None else None,
                 stop_check=self._stop_check,
                 reasoning_effort=effective_reasoning_effort,
+                stop_markers=stop_markers,
             )
             dup_watch_target = None
 
@@ -683,7 +838,7 @@ class LLMAgent(
                 "[PROACTIVE LOOP DETECTOR] Max re-generation attempts reached. Handing control to user."
             )
 
-        return message_obj, api_error_occurred
+        return message_obj, api_error_occurred, stopped_at_marker
 
     def _recover(self, kind: str, retries_left: int = 0, erased_count: int = 0) -> None:
         """Единая точка восстановления после сбоя (§1): для 'broken_call'/'tool_error' активирует буст температуры. kind: 'broken_call'/'broken_fix'/'tool_error'/'api_error'/'giveup'/'error_limit' — см. код."""
@@ -733,7 +888,8 @@ class LLMAgent(
                 f"(retries left: {retries_left})."
             )
 
-    def chat(self, message: str, max_iter: int = None, prefill: str = None):
+    def chat(self, message: str, max_iter: int = None, prefill: str = None,
+             structured_output: Optional[StructuredOutputConfig] = None):
         max_iter = max_iter if max_iter is not None else Config.MAX_ITER
         if self.self_consistency_mode:
             return self._chat_self_consistent(message, prefill)
@@ -741,7 +897,7 @@ class LLMAgent(
         # компакция снова разрешена один раз), прерванная продолжаться не должна.
         self._auto_summarize_suppressed = False
         self._prepare_turn(message)
-        return self._run_turn_loop(max_iter, prefill)
+        return self._run_turn_loop(max_iter, prefill, structured_output=structured_output)
 
     def inject_user_interrupt(self, user_text: str, max_iter: int = None) -> str:
         """Прерывание генерации с новой информацией (сценарии А/Б/В).
@@ -773,12 +929,13 @@ class LLMAgent(
         self.clear_stop()
         return True
 
-    def _prepare_turn(self, message: str) -> None:
+    def _prepare_turn(self, message: str, autosave: bool = True) -> None:
         """Добавляет user-сообщение в историю и готовит позицию контекста перед генерацией.
 
         Сообщение вставляется сразу после прерванного фрагмента. При необходимости
         добавляется пустая заглушка ассистента (или убираются висящие tool_calls), чтобы
-        не сломать последовательность ролей в API-запросе."""
+        не сломать последовательность ролей в API-запросе. Параметр autosave — False
+        для служебного хода, чтобы не писать промпт на диск до завершения."""
         user_msg = UserMessage(content=message)
         last = self.history.get_last_message()
         if isinstance(last, AssistantMessage) and last.has_tool_calls():
@@ -789,11 +946,19 @@ class LLMAgent(
         self.history.add(user_msg)
         if self._per_msg_enabled:
             self._maybe_summarize_user_message(user_msg)
-        self._autosave()
+        if autosave:
+            self._autosave()
         self.clear_stop()
 
-    def _run_turn_loop(self, max_iter: int, prefill: str = None) -> str:
+    def _run_turn_loop(self, max_iter: int, prefill: str = None,
+                       structured_output: Optional[StructuredOutputConfig] = None,
+                       service_mode: bool = False) -> str:
         current_prefill = get_effective_prefill(prefill)
+        # В контроллерном режиме стартовый prefill диктует контроллер (первый тег схемы).
+        if structured_output is not None and structured_output.controller is not None:
+            controller_prefill = structured_output.controller.initial_prefill()
+            if controller_prefill is not None:
+                current_prefill = controller_prefill
         # Разовый thinking-тоггл (_thinking_once) фиксируется ОДИН раз за ход: и API
         # (call_with_retries), и обработчик ответа (_process_llm_response) должны видеть
         # одинаковый reasoning_effort. Раньше геттер _reasoning_effort сбрасывал
@@ -802,48 +967,88 @@ class LLMAgent(
         turn_reasoning = self._reasoning_effort
         self._thinking_once = False
         # Состояние хода: prefill для следующего шага ('Assistant:' после [NO COMMENT]
-        # или стартовый current_prefill) + счётчики ретраев/ошибок.
-        state = TurnState(prefill=current_prefill)
+        # или стартовый current_prefill) + счётчики ретраев/ошибок + структурированный
+        # вывод (стоп-маркеры и цепочка фаз).
+        state = TurnState(prefill=current_prefill, structured_output=structured_output)
 
         for _ in range(max_iter):
             # Пользователь ввёл новый текст, пока выполнялся инструмент (сценарий В):
             # завершаем ход на чистой границе истории, чтобы вставка сообщения и новая
             # генерация произошли сразу после результата инструмента.
             if self.pending_interrupt is not None:
-                self._autosave()
+                if not service_mode:
+                    self._autosave()
                 return ""
 
             if self.stop_event.is_set():
                 self.on_system_msg("⏹ Generation stopped by user — control returned to you.")
                 self.clear_stop()
-                self._autosave()
+                if not service_mode:
+                    self._autosave()
                 return ""
             step_prefill = state.step_prefill()
+            # Стоп-маркеры для текущей фазы: явные из конфига, либо авто-деривация из
+            # opening-тега текущего prefill (для цепочки фаз маркеры обновляются сами).
+            effective_markers = (
+                structured_output.effective_markers(step_prefill)
+                if structured_output else ()
+            )
             all_messages = prepare_messages_for_api(
                 self, debug_hash_check=Config.DEBUG_PREFIX_HASH_CHECK
             )
 
             try:
-                message_obj, api_error_occurred = self.call_with_retries(
+                message_obj, api_error_occurred, stopped_at_marker = self.call_with_retries(
                     all_messages,
                     step_prefill=step_prefill,
                     reasoning_effort=turn_reasoning,
+                    stop_markers=effective_markers,
                 )
             except GenerationInterrupted:
                 self.on_system_msg("⏹ Generation stopped by user — control returned to you.")
                 self.clear_stop()
-                self._autosave()
+                if not service_mode:
+                    self._autosave()
                 return ""
 
             if api_error_occurred or not message_obj:
                 self._recover('api_error' if api_error_occurred else 'duplicate_loop')
                 return ""
 
+            # ── Активный контроллер: анализируем контент фазы ДО _process_llm_response ──
+            # Ошибочный (не вовремя закрытый) тег стирается из контента, чтобы не попасть
+            # в историю как часть валидного ответа. Продолжение решается по вердикту ниже.
+            controller_verdict = None
+            if (structured_output is not None
+                    and structured_output.controller is not None
+                    and message_obj is not None):
+                controller_verdict = structured_output.controller.advance(message_obj.content or "")
+                if controller_verdict.corrected_content != (message_obj.content or ""):
+                    message_obj.content = controller_verdict.corrected_content
+
+            if (controller_verdict is not None
+                    and not controller_verdict.complete
+                    and not controller_verdict.corrected_content
+                    and controller_verdict.next_prefill is not None):
+                # Модель написала только неверный/не вовремя тег — всё стёрто до нуля.
+                # В историю добавить нечего; _process_llm_response на пустом контенте ушёл
+                # бы в tool-error путь. Просто повторяем ход с правильным prefill.
+                if state.structured_output_phase + 1 >= structured_output.max_phases:
+                    return structured_output.controller.document()
+                state.set_prefill(controller_verdict.next_prefill)
+                state.structured_output_phase += 1
+                continue
+
             try:
                 result_text, tool_error_occurred, broken_call, rerun_prefill = self._process_llm_response(
                     message_obj,
                     no_comment_retry_left=state.no_comment_retries_left,
                     reasoning_effort=turn_reasoning,
+                    skip_broken_detection=bool(
+                        structured_output is not None
+                        and (stopped_at_marker or structured_output.controller is not None)
+                    ),
+                    allow_tools=not service_mode,
                 )
             except GenerationInterrupted:
                 # Пользователь прервал выполнение инструмента: убираем висящий вызов
@@ -852,7 +1057,8 @@ class LLMAgent(
                 self.history.normalize()
                 self._on_history_changed()
                 self.on_system_msg("⏹ Generation stopped by user.")
-                self._autosave()
+                if not service_mode:
+                    self._autosave()
                 raise
 
             if rerun_prefill:
@@ -866,6 +1072,7 @@ class LLMAgent(
                 continue
 
             if (self._pending_operation is not None
+                    and not service_mode
                     and not message_obj.tool_calls
                     and not tool_error_occurred):
                 # Модель ответила текстом, не вызвав 'answer_to_system' — ход неудачный.
@@ -904,9 +1111,13 @@ class LLMAgent(
                 self._recover('tool_error', retries_left=state.tool_error_retries_left, erased_count=erased)
                 continue
 
-            self._compact_completed_tasks()
-            if (not getattr(self, '_auto_summarize_suppressed', False)
-                    and self._get_context_usage_percent() >= self._current_summary_threshold()):
+            if not service_mode:
+                self._compact_completed_tasks()
+            if (
+                not service_mode
+                and not getattr(self, '_auto_summarize_suppressed', False)
+                and self._get_context_usage_percent() >= self._current_summary_threshold()
+            ):
                 if getattr(self, '_is_subagent', False):
                     # Суб-агент: авто-суммаризация бессмысленна (история — клон родителя,
                     # сжатие ломает извлечение ответа и тратит лишние вызовы LLM). При
@@ -923,13 +1134,58 @@ class LLMAgent(
                 self._recover('error_limit', retries_left=MAX_CONSECUTIVE_ERRORS)
                 return ""
 
-            self._autosave()
+            if not service_mode:
+                self._autosave()
 
             if self.stop_event.is_set():
                 self.on_system_msg("⏹ Generation stopped by user — control returned to you.")
                 self.clear_stop()
-                self._autosave()
+                if not service_mode:
+                    self._autosave()
                 return result_text
+
+            if (
+                structured_output is not None
+                and structured_output.controller is not None
+                and controller_verdict is not None
+            ):
+                # ── Контроллерный режим: решение по вердикту обработки фазы ──
+                if controller_verdict.complete:
+                    # Корень закрыт корректно: возвращаем собранный документ.
+                    return structured_output.controller.document()
+                if controller_verdict.next_prefill is not None:
+                    # Модель ошиблась в теге: контент исправлен (стёрт), продолжаем с
+                    # подсказкой ожидаемого токена через prefill. Счётчик фаз страхует
+                    # от бесконечного ремонта: после max_phases возвращаем, что собрали.
+                    if state.structured_output_phase + 1 >= structured_output.max_phases:
+                        return structured_output.controller.document()
+                    state.set_prefill(controller_verdict.next_prefill)
+                    state.structured_output_phase += 1
+                    continue
+                if stopped_at_marker and not message_obj.tool_calls and not tool_error_occurred:
+                    # Метка сработала (модель закрыла валидный тег), но дерево не завершено:
+                    # следующая фаза продолжается сама, без предзаполнения.
+                    state.structured_output_phase += 1
+                    continue
+                # Маркер не сработал, дерево не завершено — генерируем следующий шаг.
+                if not message_obj.tool_calls and not tool_error_occurred:
+                    return structured_output.controller.document()
+
+            if (
+                structured_output is not None
+                and stopped_at_marker
+                and not message_obj.tool_calls
+                and not tool_error_occurred
+                and state.structured_output_phase < len(structured_output.next_prefills)
+                and state.structured_output_phase + 1 < structured_output.max_phases
+            ):
+                # Структурированный вывод: маркер сработал — фаза закрыта. Запускаем
+                # следующую фазу с новым prefill (модель заполняет следующую структуру).
+                # Мелкие фазы уже добавлены в историю через _append_assistant, каждая в
+                # своём сообщении — KV-cache стабилен.
+                state.set_prefill(structured_output.next_prefills[state.structured_output_phase])
+                state.structured_output_phase += 1
+                continue
 
             if not message_obj.tool_calls and not tool_error_occurred:
                 return result_text

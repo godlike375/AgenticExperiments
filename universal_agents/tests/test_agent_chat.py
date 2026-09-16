@@ -5,6 +5,7 @@ from unittest import mock
 from types import SimpleNamespace
 
 from universal_agents.agent import LLMAgent
+from universal_agents.llm_client import LLMClient
 from universal_agents.agent_mixins.response_mixin import _NO_COMMENT_PREFILL
 from universal_agents.models import AssistantMessage, ToolCall, ToolResult, UserMessage
 from universal_agents.tool import tool
@@ -516,11 +517,15 @@ class TestAgentChat(unittest.TestCase):
         self.assertFalse(agent._auto_summarize_suppressed)
 
     def test_service_llm_call_passes_stop_check(self):
+        # Служебный вызов = один ход через общий движок; stop_check доходит до
+        # LLMClient.call как _stop_check агента (прерывание компакции через watchdog).
         agent = LLMAgent(system_prompt="sys")
-        with mock.patch("universal_agents.agent.LLMClient.call") as mocked:
-            agent.service_llm_call([{"role": "user", "content": "hi"}])
+        with mock.patch("universal_agents.agent.LLMClient.call",
+                        return_value=(AssistantMessage(content="ok"), None, None)) as mocked:
+            msg_obj, err, usage = agent.service_llm_call([{"role": "user", "content": "hi"}])
         _, kwargs = mocked.call_args
         self.assertIs(kwargs["stop_check"], agent._stop_check)
+        self.assertEqual(msg_obj.content, "ok")
 
 
 if __name__ == "__main__":

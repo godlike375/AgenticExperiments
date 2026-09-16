@@ -61,7 +61,7 @@ class TestStreamInterrupt(unittest.TestCase):
 
         with mock.patch("universal_agents.agent.LLMClient.stream", side_effect=stream), \
              mock.patch("universal_agents.llm_client.LLMClient.close_stream"):
-            msg, err, usage = agent._call_with_streaming([], stop_check=stop_check)
+            msg, err, usage, _stopped = agent._call_with_streaming([], stop_check=stop_check)
 
         self.assertIsNone(err)
         self.assertEqual(msg.content, "hello world")
@@ -119,7 +119,7 @@ class TestStreamDivergence(unittest.TestCase):
         with mock.patch("universal_agents.agent.LLMClient.stream", side_effect=stream) as s_stream, \
              mock.patch("universal_agents.agent.LLMClient.call") as s_call:
             s_call.return_value = (followup, None, None)
-            msg, err, usage = agent._call_with_streaming(
+            msg, err, usage, _stopped = agent._call_with_streaming(
                 [], watch_prefix="previous answer text",
                 watch_continue_temp=0.1,
             )
@@ -142,7 +142,7 @@ class TestStreamDivergence(unittest.TestCase):
 
         with mock.patch("universal_agents.agent.LLMClient.stream", side_effect=stream), \
              mock.patch("universal_agents.agent.LLMClient.call") as called:
-            msg, err, usage = agent._call_with_streaming(
+            msg, err, usage, _stopped = agent._call_with_streaming(
                 [], watch_prefix="The expected answer", watch_continue_temp=0.1,
             )
 

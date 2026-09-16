@@ -82,13 +82,18 @@ class ResponseMixin:
             self._emit_token_info()
 
     def _process_llm_response(self, message_obj, no_comment_retry_left: int = 1,
-                              reasoning_effort: Optional[str] = None) -> tuple[str, bool, bool, Optional[str]]:
+                              reasoning_effort: Optional[str] = None,
+                              skip_broken_detection: bool = False,
+                              allow_tools: bool = True) -> tuple[str, bool, bool, Optional[str]]:
         """Обрабатывает сырой ответ LLM. Возвращает (text, tool_error, broken_call, rerun_prefill);
         rerun_prefill непуст, когда следующий ход надо перегенерировать с указанным prefill (_NO_COMMENT_PREFILL).
         no_comment_retry_left — сколько раз ещё можно перегенерировать голый вызов инструмента
         без пояснения; агенту достаётся из TurnState (Config.NO_COMMENT_RETRIES).
         reasoning_effort — ожидаемое значение хода из API (отличает «модель уже прокомментировала
-        ход в reasoning_content»); по умолчанию берётся текущее состояние агента."""
+        ход в reasoning_content»); по умолчанию берётся текущее состояние агента.
+        skip_broken_detection — пропустить детекцию сломанного вызова (True для фаз
+        структурированного вывода: закрытый маркером XML не должен выглядеть сломанным
+        вызовом даже при содержании имён инструментов внутри)."""
         if reasoning_effort is None:
             reasoning_effort = self._reasoning_effort
         if not message_obj:
@@ -104,6 +109,36 @@ class ResponseMixin:
         if substantive.startswith(_NO_COMMENT_PREFILL):
             substantive = substantive[len(_NO_COMMENT_PREFILL):].strip()
         assistant_msg = self._build_assistant_msg(message_obj, clean_content)
+
+        # ── Служебный режим: инструменты не исполняются ──
+        if not allow_tools and assistant_msg.has_tool_calls():
+            tool_names = [tc.name for tc in assistant_msg.tool_calls]
+            if substantive:
+                # Есть текст и tool_calls: инструменты отбрасываем, оставляем только текст.
+                assistant_msg.tool_calls = []
+                if message_obj.tool_calls:
+                    message_obj.tool_calls = []
+                self.on_system_msg(
+                    f"[SERVICE TURN] Tool call(s) {tool_names} discarded "
+                    f"(tools not allowed); keeping text only."
+                )
+            else:
+                # Нет текста — только tool_calls: перегенерируем (NO COMMENT / ошибка).
+                assistant_msg.tool_calls = []
+                if message_obj.tool_calls:
+                    message_obj.tool_calls = []
+                if no_comment_retry_left > 0 and reasoning_effort == "none":
+                    self.on_system_msg(
+                        f"[SERVICE TURN] Bare tool call {tool_names} without text discarded; "
+                        f"rerunning with '{_NO_COMMENT_PREFILL}' prefill "
+                        f"({no_comment_retry_left} retr{'y' if no_comment_retry_left == 1 else 'ies'} left)."
+                    )
+                    return clean_content, False, False, _NO_COMMENT_PREFILL
+                self.on_system_msg(
+                    f"[SERVICE TURN] Bare tool call {tool_names} without text after retries exhausted; "
+                    f"requesting regeneration."
+                )
+                return clean_content, True, False, None
 
         if assistant_msg.has_tool_calls():
             valid_tc = None
@@ -158,7 +193,7 @@ class ResponseMixin:
         self._append_assistant(assistant_msg)
 
         if not assistant_msg.has_tool_calls():
-            if detect_broken_call(clean_content, self._known_tool_names()):
+            if not skip_broken_detection and detect_broken_call(clean_content, self._known_tool_names()):
                 self.on_system_msg("[BROKEN CALL] Response looks like an unparsed tool call (prose or XML).")
                 return clean_content, False, True, None
             return clean_content, False, False, None
