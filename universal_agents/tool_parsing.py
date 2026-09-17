@@ -36,27 +36,47 @@ def is_error_content(content: str) -> bool:
 _STRONG_TAGS = ("tool_call", "tool", "function", "call")
 
 
+# Имя XML-тега (упрощённо, ASCII):
+#   NameStartChar: [a-zA-Z_:]
+#   NameChar:      [a-zA-Z0-9_:.\-]
+_XML_NAME = r'[a-zA-Z_:][a-zA-Z0-9_:.\-]*'
+
+# Валидный открывающий тег: <name, после которого идёт
+# пробел / '/' / '>' или конец строки (тег мог быть обрезан).
+_OPEN_TAG_RE = re.compile(rf'<\s*{_XML_NAME}(?=[\s/>]|$)')
+
+
+def _has_tag(content: str, tag: str | None = None) -> bool:
+    """True, если в content есть валидный открывающий XML-тег.
+    Если tag задан — ищем именно этот тег (полное совпадение имени)."""
+    if tag is None:
+        return _OPEN_TAG_RE.search(content) is not None
+    return re.search(
+        rf'<\s*{re.escape(tag)}(?=[\s/>]|$)', content
+    ) is not None
+
+
 def detect_broken_call(content: str, tool_names: set[str]) -> bool:
-    """True, если ответ похож на нераспарсенный вызов инструмента. Базовый гейт — наличие XML-тега; далее: известные теги (<tool_call>/<tool>/<function>/<call>) либо тег + вызов известного инструмента (напр. read({...})). Без тега не детектится (нет ложных срабатываний)."""
+    """True, если ответ похож на нераспарсенный вызов инструмента.
+    Базовый гейт — наличие валидного XML-тега; далее: известные теги
+    (<tool_call>/<tool>/<function>/<call>) либо тег + вызов известного
+    инструмента (напр. read({...})). Без тега не детектится."""
     if not content or not content.strip():
         return False
 
-    # Базовый гейт: хотя бы один открывающийся xml-тег
-    if not re.search(r'<\s*[a-zA-Z_][\w-]*', content):
+    # Базовый гейт: хотя бы один корректный открывающий тег.
+    if not _has_tag(content):
         return False
 
-    # 1) известные имена тегов (полное совпадение имени тега, без продолжения словом)
-    has_strong_tag = any(
-        re.search(rf'<{re.escape(t)}(?!\w)', content) for t in _STRONG_TAGS
-    )
-    if has_strong_tag:
+    # 1) известные имена тегов (полное совпадение имени)
+    if any(_has_tag(content, t) for t in _STRONG_TAGS):
         return True
 
-    # 2) тег уже есть (базовый гейт пройден) + признак вызова известного инструмента
-    has_tool_call_sign = any(
-        re.search(rf'\b{re.escape(name)}\s*[\({{]', content) for name in tool_names
+    # 2) тег уже есть (гейт пройден) + признак вызова известного инструмента
+    return any(
+        re.search(rf'\b{re.escape(name)}\s*[\({{]', content)
+        for name in tool_names
     )
-    return bool(has_tool_call_sign)
 
 
 def build_tool_calls(tool_calls_data: dict) -> list:
