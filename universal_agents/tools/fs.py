@@ -83,8 +83,9 @@ class FS:
 def cwd(path: str = None):
     if path:
         try:
+            path = os.path.abspath(path)
             os.chdir(path)
-            return ok(f" Has set cwd to {path}")
+            return ok(f"Has set cwd to {path}")
         except Exception as e:
             raise RuntimeError(f"Error changing cwd: {e}")  # Было return, стало raise
     return os.getcwd()

@@ -9,9 +9,11 @@
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 from universal_agents.agent import LLMAgent
+from universal_agents.config import Config
 from universal_agents.models import AssistantMessage, ToolCall, ToolResult, UserMessage
 from universal_agents.llm_client import text_hash
 from universal_agents.tool import tool
@@ -182,14 +184,14 @@ class TestDuplicateEscalation(unittest.TestCase):
         with mock.patch("universal_agents.agent.LLMClient.call", side_effect=fake_call):
             agent.chat("q2")
 
-        # первые два запроса — без NAG, с порога — NAG в контексте (в последнем сообщении)
+        # до порога дублей подряд — без NAG, с порога — NAG в контексте (в последнем сообщении)
         def _has_nag(msgs):
             return _NAG_TEXT in msgs[-1][1]
 
-        self.assertFalse(_has_nag(captured[0]))
-        self.assertFalse(_has_nag(captured[1]))
-        self.assertTrue(_has_nag(captured[2]))
-        self.assertTrue(_has_nag(captured[3]))
+        for i in range(Config.DUPLICATE_NAG_THRESHOLD - 1):
+            self.assertFalse(_has_nag(captured[i]))
+        for i in range(Config.DUPLICATE_NAG_THRESHOLD, len(captured)):
+            self.assertTrue(_has_nag(captured[i]))
 
     def test_max_retries_hands_control_to_user(self):
         """Дубль, не вылеченный за все попытки, НЕ пропускается: ход отдаётся пользователю."""
@@ -213,6 +215,38 @@ class TestDuplicateEscalation(unittest.TestCase):
             if isinstance(m, AssistantMessage) and m.content == "same"
         )
         self.assertEqual(count, 1)
+
+    def test_duplicate_retry_keeps_prefix_byte_identical(self):
+        """Регрессия поломки KV-кэша: перегенерация после DUPLICATE ANSWER DETECTED
+        должна уходить с байт-идентичным префиксом (модель не перечитывает контекст
+        с нуля). Раньше watch-достройка прерывала стрим на расхождении и достраивала
+        ответ по partial — сервер кэшировал дубль как «префикс» и сломал переиспользование."""
+        agent = LLMAgent(
+            system_prompt="sys",
+            max_generation_attempts=3,
+            autosave_enabled=False,
+            streaming_enabled=True,
+            on_stream_chunk=lambda _: None,
+        )
+        agent.history.add(UserMessage("q"))
+        agent.history.add(AssistantMessage(content="same answer text"))
+
+        streamed: list[str] = []
+
+        def fake_stream(messages, **kwargs):
+            # каждое повторение ответа стримится целиком — никакого прерывания по расхождению
+            content = "same answer text" if len(streamed) == 0 else "a different answer"
+            streamed.append(content)
+            for piece in [content[:10], content[10:20], content[20:]]:
+                if piece:
+                    delta = SimpleNamespace(content=piece, tool_calls=None, reasoning_content=None)
+                    yield SimpleNamespace(choices=[SimpleNamespace(delta=delta)])
+
+        with mock.patch("universal_agents.agent.LLMClient.stream", side_effect=fake_stream):
+            result = agent.chat("q2")
+        self.assertEqual(result, "a different answer")
+        # стрим открывался на каждую попытку (дубль + свежий ответ), дубль отброшен без достройки
+        self.assertEqual(streamed, ["same answer text", "a different answer"])
 
 
 @tool(description="double a value")

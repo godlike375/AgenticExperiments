@@ -19,7 +19,7 @@ class Config:
     ERROR_RECOVERY_TEMP: float = 1.2
     MAX_LOOP_RETRIES: int = 3  # попыток перегенерации при повторяющемся вызове/ответе
     # Порог Jaccard-схожести по множеству слов для признания текстового ответа повтором.
-    DUPLICATE_SIMILARITY_THRESHOLD: float = 0.7
+    DUPLICATE_SIMILARITY_THRESHOLD: float = 0.85
     # Детекция повторов текста/reasoning-блока по ВСЕЙ истории (не только у предыдущего
     # ответа): точное совпадение хэша содержимого AssistantMessage с любым более ранним
     # сообщением (хоть 100 итераций назад) — зацикливание. Минимальная длина текста
@@ -95,12 +95,12 @@ class Config:
 
     # Периферийное зрение read: шаг между строками растёт в ^PERIPHERAL_GAP_GROWTH
     # на каждом кольце от фокуса (меньше → плотнее).
-    PERIPHERAL_GAP_GROWTH: float = 1.6
+    PERIPHERAL_GAP_GROWTH: float = 1.8
     # Периферийные строки обрезаются до N символов (фокус — без лимита). 0 = не резать.
-    PERIPHERAL_MAX_LINE_CHARS: int = 50
+    PERIPHERAL_MAX_LINE_CHARS: int = 45
     # Периферия в каждую сторону ≤ PERIPHERAL_SIDE_FACTOR × размер фокуса строк.
     # 0 = без ограничения (до краёв файла).
-    PERIPHERAL_SIDE_FACTOR: float = 1.25
+    PERIPHERAL_SIDE_FACTOR: float = 1.33
     # Вокруг каждой выбранной периферийной строки захватывается ещё ±N соседних
     # строк как локальный контекст (0 = выключено).
     PERIPHERAL_LINE_CONTEXT: int = 1

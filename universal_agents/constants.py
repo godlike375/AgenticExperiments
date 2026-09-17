@@ -12,7 +12,7 @@ def err(msg: str) -> str:
 
 def ok(msg: str) -> str:
     """Единый формат системного сообщения инструмента. ``msg`` — текст сразу после префикса для побайтово точной замены."""
-    return f"{ENVIRONMENT_PREFIX}{msg}{ENVIRONMENT_PREFIX_END}"
+    return f"{ENVIRONMENT_PREFIX} {msg} {ENVIRONMENT_PREFIX_END}"
 
 # Маркер авто-саммари заменён на метаданные UserMessage.is_summary (текстовых маркеров в контенте больше нет).
 

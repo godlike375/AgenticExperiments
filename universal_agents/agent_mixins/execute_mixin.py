@@ -102,7 +102,7 @@ class ExecuteMixin:
                     )
                     if order_err:
                         self.on_system_msg(f"[TASK ORDER] Rejected out-of-order have_done call: {order_err}")
-                        results.append(ToolResult.error(tc.id, name, f"{ENVIRONMENT_PREFIX} {order_err}{ENVIRONMENT_PREFIX_END}"))
+                        results.append(ToolResult.error(tc.id, name, f"{ENVIRONMENT_PREFIX} {order_err} {ENVIRONMENT_PREFIX_END}"))
                         continue
 
                 if tool_info.get('requires_confirmation', False) or tool_info.get('path_safety', False):
@@ -179,7 +179,7 @@ class ExecuteMixin:
                             content = (
                                 content[:Config.MAX_READ_CHARS_PER_CALL]
                                 + f"\n{ENVIRONMENT_PREFIX} Output truncated to {Config.MAX_READ_CHARS_PER_CALL} "
-                                f"chars per tool call — narrow your request/parameters.{ENVIRONMENT_PREFIX_END}"
+                                f"chars per tool call — narrow your request/parameters. {ENVIRONMENT_PREFIX_END}"
                             )
                         tr = ToolResult.success(tc.id, name, content)
                         self._tool_usage[name] = self._tool_usage.get(name, 0) + 1
