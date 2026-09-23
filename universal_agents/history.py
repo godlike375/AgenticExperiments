@@ -282,6 +282,7 @@ class ChatHistory:
                     d["content"],
                     is_summary=d.get("_is_summary", False),
                 )
+                um._is_guard_nag = d.get("_is_guard_nag", False)
                 um._cached_header = data_list[i].get("_header")
                 self._messages.append(um)
             elif role == "assistant":

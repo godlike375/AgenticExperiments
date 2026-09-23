@@ -60,6 +60,10 @@ if __name__ == "__main__":
     }
     print(f"Loaded startup tools: {sorted(startup_tools.keys())}")
     print("Use load_tool to load additional tools dynamically.")
+    ConsoleUI.system_msg(
+        "💡 To stop generation, type 'q' and press Enter. "
+        "Type any other text and press Enter to interrupt and inject it as a new message."
+    )
 
     project_root = find_project_root() or '(not found - no .git upwards)'
     root_line = f"Current project root: {project_root}, working dir: {os.getcwd()}"

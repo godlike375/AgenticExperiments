@@ -8,7 +8,7 @@ from unittest import mock
 from universal_agents.agent import LLMAgent
 from universal_agents.agent_mixins.response_mixin import _NO_COMMENT_PREFILL
 from universal_agents.config import Config
-from universal_agents.models import AssistantMessage, ToolCall
+from universal_agents.models import AssistantMessage, ToolCall, ToolResult, UserMessage
 from universal_agents.tools.fs import line_range_edit
 from universal_agents.tools.builtin import answer_to_system
 
@@ -16,6 +16,14 @@ from tests.conftest import make_agent as make_test_agent
 
 answer_tool_name = answer_to_system.__name__
 line_range_edit_tool_name = line_range_edit.__name__
+
+
+def nag_contents(msgs) -> list:
+    """Контент нагов guard'а (UserMessage «You can't continue...») в истории.
+    Превью edit-инструмента содержит «You can't continue with common prose», но это
+    ToolResult, а не наг — поэтому смотрим только на UserMessage."""
+    return [m.content for m in msgs
+            if isinstance(m, UserMessage) and "You can't continue" in (m.content or "")]
 
 
 class TestAnswerRequiredGuard(unittest.TestCase):
@@ -53,12 +61,21 @@ class TestAnswerRequiredGuard(unittest.TestCase):
             content="Подтверждаю.",
             tool_calls=[ToolCall(id="c2", name=answer_tool_name, arguments='{"text": "yes"}')],
         )
-
         final_reply = AssistantMessage(content="Операция завершена.")
-        with mock.patch(
-            "universal_agents.agent.LLMClient.call",
-            side_effect=[(edit_call, None, None), (text_turn, None, None), (answer_call, None, None), (final_reply, None, None)],
-        ):
+
+        seen = []
+        responses = [
+            (edit_call, None, None),
+            (text_turn, None, None),
+            (answer_call, None, None),
+            (final_reply, None, None),
+        ]
+
+        def fake_call(messages, prefill=None, **kwargs):
+            seen.append([m.get("content", "") for m in messages if m.get("role") == "user"])
+            return responses.pop(0)
+
+        with mock.patch("universal_agents.agent.LLMClient.call", side_effect=fake_call):
             agent = self.make_agent()
             result = agent.chat("Отредактируй hello.txt: замени hello на world", max_iter=10)
 
@@ -68,11 +85,13 @@ class TestAnswerRequiredGuard(unittest.TestCase):
         with open(path, encoding="utf-8") as f:
             self.assertEqual(f.read(), "world")
 
-        # В истории есть user-сообщение-ошибка «call answer» и системный алерт.
-        msgs = agent.history.get_all()
-        texts = [getattr(m, "content", "") or "" for m in msgs]
-        self.assertTrue(any("answer" in t and "You can't continue" in t for t in texts),
+        # Наг guard'а МОДЕЛЬ видела (между срабатыванием и успехом), но после успеха
+        # он вычищен — в контексте остаётся только правильный путь подтверждения (§1.11).
+        self.assertTrue(any("You can't continue" in t for content in seen for t in content),
                         "Модель должна была получить сообщение-ошибку о вызове answer")
+        msgs = agent.history.get_all()
+        self.assertEqual(nag_contents(msgs), [],
+                         "После успешного answer_to_system наг должен быть вычищен из истории")
 
     def test_text_answer_without_answer_tool_then_text_again_no_message(self):
         """Если модель упорно не вызывает answer, цикл продолжается (не обрывается),
@@ -97,11 +116,20 @@ class TestAnswerRequiredGuard(unittest.TestCase):
             tool_calls=[ToolCall(id="c2", name=answer_tool_name, arguments='{"text": "no"}')],
         )
         final_reply = AssistantMessage(content="Готово.")
+        seen = []
+        responses = [
+            (edit_call, None, None),
+            (text1, None, None),
+            (text2, None, None),
+            (answer_no, None, None),
+            (final_reply, None, None),
+        ]
 
-        with mock.patch(
-            "universal_agents.agent.LLMClient.call",
-            side_effect=[(edit_call, None, None), (text1, None, None), (text2, None, None), (answer_no, None, None), (final_reply, None, None)],
-        ):
+        def fake_call(messages, prefill=None, **kwargs):
+            seen.append([m.get("content", "") for m in messages if m.get("role") == "user"])
+            return responses.pop(0)
+
+        with mock.patch("universal_agents.agent.LLMClient.call", side_effect=fake_call):
             agent = self.make_agent()
             result = agent.chat("Измени файл", max_iter=10)
 
@@ -110,11 +138,11 @@ class TestAnswerRequiredGuard(unittest.TestCase):
         with open(path, encoding="utf-8") as f:
             self.assertEqual(f.read(), "a\n")
         self.assertIsNone(agent._pending_operation)
-        # Модель получала наг «call answer» минимум один раз.
+        # Модель получала наг «call answer» минимум один раз...
+        self.assertTrue(any("You can't continue" in t for content in seen for t in content))
+        # ...но после успешного подтверждения (даже 'no') наг вычищен из истории (§1.11).
         msgs = agent.history.get_all()
-        texts = [getattr(m, "content", "") or "" for m in msgs]
-        self.assertGreaterEqual(
-            sum(1 for t in texts if "You can't continue" in t and "answer" in t), 1)
+        self.assertEqual(nag_contents(msgs), [])
 
     def test_bare_answer_is_regenerated_until_model_adds_comment(self):
         """Модель ОБЯЗАНА написать текст перед вызовом answer (ответ системе —
@@ -191,6 +219,7 @@ class TestAnswerRequiredGuard(unittest.TestCase):
         final_reply = AssistantMessage(content="Готово.")
 
         seen = []
+        seen_content = []
         responses = [
             (edit_call, None, None),
             (bare_edit, None, None),
@@ -201,6 +230,7 @@ class TestAnswerRequiredGuard(unittest.TestCase):
 
         def fake_call(messages, prefill=None, **kwargs):
             seen.append(prefill)
+            seen_content.append([m.get("content", "") for m in messages if m.get("role") == "user"])
             return responses.pop(0)
 
         with mock.patch("universal_agents.agent.LLMClient.call", side_effect=fake_call):
@@ -214,10 +244,11 @@ class TestAnswerRequiredGuard(unittest.TestCase):
         self.assertIsNone(agent._pending_operation)
         # Prefill 'Assistant:' дошёл до следующего вызова LLM — guard его не съел.
         self.assertIn(_NO_COMMENT_PREFILL, seen)
-        # Guard всё равно сработал после перегенерации (модель так и не ответила).
+        # Guard всё равно сработал после перегенерации (модель так и не ответила)
+        # и был вычищен после успешного подтверждения (§1.11).
+        self.assertTrue(any("You can't continue" in t for content in seen_content for t in content))
         msgs = agent.history.get_all()
-        texts = [getattr(m, "content", "") or "" for m in msgs]
-        self.assertTrue(any("You can't continue" in t and "answer" in t for t in texts))
+        self.assertEqual(nag_contents(msgs), [])
 
     def test_prefill_marker_alone_is_not_an_explanation(self):
         """Впрыснутый 'Assistant:' сам по себе не считается пояснением: если модель
@@ -374,6 +405,177 @@ class TestAnswerRequiredGuard(unittest.TestCase):
         answers = [m for m in msgs if m.to_api_dict()["role"] == "tool" and m.name == answer_tool_name]
         self.assertEqual(len(answers), 1)
         self.assertFalse(any("requires a pending" in m.content for m in answers))
+
+    def test_answer_guard_gives_up_after_max_retries(self):
+        """Guard без лимита зацикливал ход вечно (текст → наг → текст → ... до max_iter).
+        Теперь после ANSWER_GUARD_MAX_RETRIES срабатываний ход сдаётся пользователю:
+        result == '', лишних вызовов LLM нет (ровно edit + MAX_RETRIES+1 текстов)."""
+        path = os.path.join(self._tmp, "g.txt")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("a\n")
+
+        edit_call = AssistantMessage(
+            content="Отредактирую.",
+            tool_calls=[ToolCall(id="c1", name=line_range_edit_tool_name, arguments=json.dumps({
+                "path": path, "new_text": "b\n", "start_line": 1, "end_line": 1}))],
+        )
+        n_text = Config.ANSWER_GUARD_MAX_RETRIES + 1  # 6 текстов: 1-й..5-й перегенерируются, 6-й → сдача
+
+        def fresh_text(i):
+            return (AssistantMessage(content=f"Отвечу текстом, попытка {i}, без вызова инструмента."), None, None)
+
+        responses = [(edit_call, None, None)] + [fresh_text(i) for i in range(1, n_text + 1)]
+        calls = []
+
+        def fake_call(messages, prefill=None, **kwargs):
+            calls.append(messages)
+            return responses.pop(0)
+
+        with mock.patch("universal_agents.agent.LLMClient.call", side_effect=fake_call):
+            agent = self.make_agent()
+            result = agent.chat("Измени файл", max_iter=50)
+
+        # Guard сдал ход пользователю ровно после MAX_RETRIES+1 текстового ответа.
+        self.assertEqual(result, "")
+        self.assertEqual(len(calls), 1 + n_text)
+        # Операция так и не подтверждена — pending висит, решать будет пользователь.
+        self.assertIsNotNone(agent._pending_operation)
+        # В истории ровно ОДИН наг (переиспользуется, не копится между срабатываниями).
+        msgs = agent.history.get_all()
+        nags = [m for m in msgs if isinstance(m, UserMessage) and "You can't continue" in (m.content or "")]
+        self.assertEqual(len(nags), 1)
+
+    def test_wrong_attempt_scrubbed_after_success(self):
+        """Неверная попытка (чужой инструмент при висящем pending) и наг вычищаются после
+        успешного answer_to_system: в истории остаётся только правильный путь подтверждения
+        (превью edit → answer → результат), а не чередование ошибок (§1.11)."""
+        path = os.path.join(self._tmp, "w.txt")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("a\n")
+
+        edit_call = AssistantMessage(
+            content="Отредактирую.",
+            tool_calls=[ToolCall(id="c1", name=line_range_edit_tool_name, arguments=json.dumps({
+                "path": path, "new_text": "b\n", "start_line": 1, "end_line": 1}))],
+        )
+        # Модель застряла: вместо answer вызывает чужой инструмент (read).
+        wrong_call = AssistantMessage(
+            content="Проверю файл перед подтверждением.",
+            tool_calls=[ToolCall(id="c2", name="read", arguments=json.dumps({"path": path}))],
+        )
+        answer_call = AssistantMessage(
+            content="Подтверждаю.",
+            tool_calls=[ToolCall(id="c3", name=answer_tool_name, arguments='{"text": "yes"}')],
+        )
+        final_reply = AssistantMessage(content="Готово.")
+
+        with mock.patch(
+            "universal_agents.agent.LLMClient.call",
+            side_effect=[(edit_call, None, None), (wrong_call, None, None), (answer_call, None, None), (final_reply, None, None)],
+        ):
+            agent = self.make_agent()
+            result = agent.chat("Измени файл", max_iter=10)
+
+        self.assertIn("Готово", result)
+        self.assertIsNone(agent._pending_operation)
+        # Правильный путь подтверждения остался: превью edit ("ATTENTION") и answer.
+        msgs = agent.history.get_all()
+        contents = [getattr(m, "content", "") or "" for m in msgs]
+        self.assertTrue(any("ATTENTION" in c for c in contents), "Превью-превью правки должно остаться")
+        self.assertTrue(any("Подтверждаю" in c for c in contents))
+        # Мусор вычищен: чужих вызовов read (assistant + результат) и нагов нет.
+        wrong_assistant = [m for m in msgs
+                           if isinstance(m, AssistantMessage) and any(tc.name == "read" for tc in m.tool_calls)]
+        wrong_results = [m for m in msgs if isinstance(m, ToolResult) and m.name in ("read",)]
+        self.assertEqual(wrong_assistant, [], "Вызов чужого инструмента при pending должен быть вычищен")
+        self.assertEqual(wrong_results, [], "Результат чужого инструмента при pending должен быть вычищен")
+        self.assertEqual(nag_contents(msgs), [])
+
+    def test_guard_nag_is_byte_stable_between_llm_calls(self):
+        """Повторные срабатывания guard'а переиспользуют ОДИН объект нага: user-часть
+        префикса байт-идентична между вызовами LLM (header-кэш не сбрасывается, ложных
+        [PREFIX-HASH] нет). Прежний _drop_guard_nags плодил новый UserMessage со свежим
+        timestamp — содержимое user-сообщений между вызовами расходилось."""
+        path = os.path.join(self._tmp, "s.txt")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("a\n")
+
+        edit_call = AssistantMessage(
+            content="Отредактирую.",
+            tool_calls=[ToolCall(id="c1", name=line_range_edit_tool_name, arguments=json.dumps({
+                "path": path, "new_text": "b\n", "start_line": 1, "end_line": 1}))],
+        )
+        text1 = AssistantMessage(content="Не вызываю инструмент.")
+        text2 = AssistantMessage(content="Всё ещё не вызываю.")
+        answer_call = AssistantMessage(
+            content="Подтверждаю.",
+            tool_calls=[ToolCall(id="c3", name=answer_tool_name, arguments='{"text": "yes"}')],
+        )
+        final_reply = AssistantMessage(content="Готово.")
+
+        user_contents = []
+        responses = [
+            (edit_call, None, None),
+            (text1, None, None),
+            (text2, None, None),
+            (answer_call, None, None),
+            (final_reply, None, None),
+        ]
+
+        def fake_call(messages, prefill=None, **kwargs):
+            user_contents.append([m.get("content", "") for m in messages if m.get("role") == "user"])
+            return responses.pop(0)
+
+        with mock.patch("universal_agents.agent.LLMClient.call", side_effect=fake_call):
+            agent = self.make_agent()
+            result = agent.chat("Измени файл", max_iter=10)
+
+        self.assertIn("Готово", result)
+        # Вызовы: 1=edit, 2=text1, 3=text2, 4=answer, 5=final. Наг добавлен после вызова 2
+        # (guard №1), переиспользован перед вызовом 4 (guard №2) — user-префикс обязан
+        # быть байт-идентичным между вызовами 3 и 4.
+        self.assertEqual(len(user_contents), 5)
+        self.assertGreaterEqual(len(user_contents[2]), 1)
+        self.assertEqual(user_contents[2], user_contents[3],
+                         "User-часть префикса должна быть байт-стабильной между срабатываниями guard'а")
+        # И сам наг в префиксе ровно один (не накапливается).
+        for content in user_contents:
+            nags = [t for t in content if "You can't continue" in t]
+            self.assertLessEqual(len(nags), 1, "Наг не должен накапливаться")
+
+    def test_guard_nag_flag_roundtrip_through_save_load(self):
+        """Флаг _is_guard_nag не уходит в API, но переживает save/load — скраб находит
+        наг и после перезагрузки (объекты пересозданы, identity-проверка бы не сработала)."""
+        from universal_agents.history import ChatHistory
+
+        hist = ChatHistory("sys")
+        hist.add(UserMessage("q"))
+        nag = UserMessage("You can't continue — use answer tool")
+        nag._is_guard_nag = True
+        hist.add(nag)
+
+        self.assertNotIn("_is_guard_nag", nag.to_api_dict())
+        self.assertTrue(nag.to_persist_dict()["_is_guard_nag"])
+
+        payload = {
+            "messages": [m.to_persist_dict() for m in hist.get_all()],
+            "loaded_tools": [], "file_states": {}, "per_msg_summaries": [], "next_seq": 4, "extras": {},
+        }
+        hist2 = ChatHistory("sys")
+        hist2.load_from_payload(payload)
+        self.assertTrue(
+            any(isinstance(m, UserMessage) and m._is_guard_nag for m in hist2.get_all()),
+            "Флаг нага должен пережить /load",
+        )
+
+        agent = self.make_agent()
+        agent.history.load_from_payload(payload)
+        removed = agent._scrub_confirmation_trail()
+        self.assertGreater(removed, 0)
+        self.assertFalse(
+            any(isinstance(m, UserMessage) and m._is_guard_nag for m in agent.history.get_all()),
+            "После успешного answer скраб удаляет загруженный наг",
+        )
 
 if __name__ == "__main__":
     unittest.main()

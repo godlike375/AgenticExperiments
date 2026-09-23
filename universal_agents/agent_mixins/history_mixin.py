@@ -68,21 +68,28 @@ class HistoryMixin:
             self._on_history_changed()
         return len(removed)
 
-    def _drop_guard_nags(self) -> int:
-        """Удаляет замыкающие UserMessage-наги guard'а answer-required («You can't continue...
-        ...answer»), чтобы после каждого срабатывания guard'а в истории оставался только
-        свежий наг, а не их накопление. Возвращает число удалённых."""
-        removed = 0
-        msgs = self.history.get_all()
-        while msgs and isinstance(msgs[-1], UserMessage):
-            content = getattr(msgs[-1], "content", "") or ""
-            if "You can't continue" not in content or "answer" not in content.lower():
-                break
-            self.history.remove_at({len(msgs) - 1})
-            self.history.normalize()
-            removed += 1
-            msgs = self.history.get_all()
-        return removed
+    def _mark_confirmation_junk(self, obj) -> None:
+        """Помечает сообщение «мусором» подтверждения: неверные попытки до успешного
+        answer_to_system, вычищаются скрабом (§1.11). id→obj вместо WeakSet: Message
+        неhashable, а сильная ссылка не даёт переиспользовать id — identity не сработает ложно."""
+        self._confirmation_junk[id(obj)] = obj
+
+    def _scrub_confirmation_trail(self) -> int:
+        """После успешного answer_to_system убирает наги guard'а и помеченный мусор —
+        в контексте остаётся только правильный путь подтверждения. Возвращает число удалённых."""
+        removed: set[int] = set()
+        for i, m in enumerate(self.history.get_all()):
+            if id(m) in self._confirmation_junk and self._confirmation_junk[id(m)] is m:
+                removed.add(i)
+            elif isinstance(m, UserMessage) and m._is_guard_nag:
+                removed.add(i)
+        self._confirmation_junk.clear()
+        if not removed:
+            return 0
+        self.history.remove_at(removed)
+        self.history.normalize()
+        self._on_history_changed()
+        return len(removed)
 
     def _get_last_answer_text(self) -> Optional[str]:
         """Текст последнего текстового ответа ассистента из истории."""

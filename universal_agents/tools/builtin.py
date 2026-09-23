@@ -203,11 +203,10 @@ def make_plan(agent: AgentContext, plan: list) -> str:
 
 
 @tool(
-    description="Answers pending system questions to the assistant. "
-                "If a tool showed a preview and is awaiting a decision/confirmation, call "
-                "this tool with your reply text.",
+    description="Answers pending SYSTEM requests. Don't call it to reply to user! "
+                "Call it only if a previous tool showed an execution preview and is awaiting a decision/confirmation.",
     short_description="answer to system",
-    text=("str", "Your reply to the pending question from the system"),
+    text=("str", "Your reply to the system"),
 )
 def answer_to_system(agent: AgentContext, text: str) -> str:
     op = agent.pop_pending_operation()

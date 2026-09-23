@@ -75,6 +75,8 @@ class TurnState:
     broken_regen_left: int = field(default_factory=lambda: Config.BROKEN_CALL_REGEN_RETRIES)
     broken_fix_left: int = field(default_factory=lambda: Config.BROKEN_CALL_FIX_RETRIES)
     no_comment_retries_left: int = field(default_factory=lambda: Config.NO_COMMENT_RETRIES)
+    # Осталось срабатываний guard'а pending-операции за ход; после исчерпания — сдача хода.
+    guard_retries_left: int = field(default_factory=lambda: Config.ANSWER_GUARD_MAX_RETRIES)
     structured_output: Optional[StructuredOutputConfig] = None
     structured_output_phase: int = 0
 
@@ -131,6 +133,13 @@ class TurnState:
     def reset_error_counts(self) -> None:
         """Сброс счётчиков после сжатия истории: отсчёт зацикливания заново."""
         self.error_counts.clear()
+
+    def can_retry_answer_guard(self) -> bool:
+        """Остались ли попытки guard'а «ответь через answer_to_system»; декрементирует счётчик."""
+        if self.guard_retries_left > 0:
+            self.guard_retries_left -= 1
+            return True
+        return False
 
     @property
     def max_errors_reached(self) -> bool:
@@ -239,6 +248,10 @@ class LLMAgent(
         self.task_plan: list[str] = []
         self.task_plan_map: dict = {}
         self._pending_operation: Optional[dict] = None
+        # Переиспользуемый наг guard'а (один объект на цикл — байт-стабильный KV-префикс).
+        self._guard_nag_message: Optional[UserMessage] = None
+        # Мусор подтверждения до успешного answer_to_system (id→obj, identity-проверка).
+        self._confirmation_junk: dict[int, object] = {}
 
         # Авто-сохранение (защита от сбоев): один файл на диалог с меткой времени
         # запуска/сброса; перезаписывается при каждом снимке. Ротация оставляет
@@ -367,6 +380,26 @@ class LLMAgent(
         self._pending_operation = None
         return op
 
+    def _ensure_guard_nag(self) -> None:
+        """Гарантирует наличие нага guard'а в истории. Один объект на цикл (байт-стабильный
+        KV-префикс, прав. §1.11): при повторных срабатываниях не удаляется и не пересоздаётся."""
+        nag = self._guard_nag_message
+        if nag is not None and any(m is nag for m in self.history.get_all()):
+            return  # уже в истории — не трогаем (иначе remove_at сменит «последность»)
+        if nag is None:
+            nag = UserMessage(
+                f"{ENVIRONMENT_PREFIX} You can't continue unless you answer to the system question using '{answer_to_system.__name__}' tool. "
+                "Call it ritgh now!"
+                f"{ENVIRONMENT_PREFIX_END}"
+            )
+            nag._is_guard_nag = True
+            self._guard_nag_message = nag
+        else:
+            # Переиспользование после вычистки: заголовок устарел — пересобираем заново.
+            nag.reset_header_cache()
+        self.history.add(nag)
+        self.on_render(self.history.get_all()[-1])
+
     # --------------------------------------------------------
     # Авто-сохранение (защита от сбоев)
     # --------------------------------------------------------
@@ -450,6 +483,8 @@ class LLMAgent(
         )
         self._compacted_task_ids = set()
         self._pending_operation = None
+        self._guard_nag_message = None
+        self._confirmation_junk.clear()
         self.reset_autosave_path()
         self._on_history_changed()
 
@@ -881,6 +916,15 @@ class LLMAgent(
                 f"⚠️ [LIMIT REACHED] {retries_left} consecutive tool errors. Handing control to user."
             )
             return
+        if kind == 'answer_guard':
+            # Текстовые ответы вместо вызова answer_to_system — лимит guard'а исчерпан, сдача хода.
+            self.history.normalize(is_error_recovery=True)
+            self.on_system_msg(
+                f"⚠️ [CONFIRMATION LOOP] Model kept replying in text instead of calling "
+                f"{answer_to_system.__name__} ({Config.ANSWER_GUARD_MAX_RETRIES} guard retries exhausted). "
+                "Handing control to user."
+            )
+            return
 
         if kind == 'broken_call':
             self._temp_override = Config.ERROR_RECOVERY_TEMP
@@ -1078,10 +1122,11 @@ class LLMAgent(
             if rerun_prefill:
                 # [NO COMMENT]: модель вызвала инструмент без текста. Перегенерируем
                 # следующий ход с prefill, не добавляя пустой ответ в историю (лимит —
-                # NO_COMMENT_RETRIES, задаётся в TurnState). Этот блок стоит ДО guard'а
-                # pending-операции: иначе guard своим continue съел бы prefill и цикл шёл
-                # бы впустую (без prefill). Когда попытки исчерпаны, _process_llm_response
-                # возвращает None и вызов исполняется как есть.
+                # NO_COMMENT_RETRIES, задаётся в TurnState). Блок стоит ДО guard'а: иначе
+                # guard съел бы prefill. Когда попытки исчерпаны — вызов исполняется как есть.
+                # Декремент безопасен: rerun_prefill приходит только из NO COMMENT-веток
+                # (структурированный вывод выставляет prefill своей веткой выше).
+                state.no_comment_retries_left -= 1
                 state.set_prefill(rerun_prefill)
                 continue
 
@@ -1089,18 +1134,14 @@ class LLMAgent(
                     and not service_mode
                     and not message_obj.tool_calls
                     and not tool_error_occurred):
-                # Модель ответила текстом, не вызвав 'answer_to_system' — ход неудачный.
-                # Стираем неудачный ответ и все предыдущие наги (как при зацикливании),
-                # чтобы мусор не копился в контексте, и перегенерируем с повышенной
-                # температурой.
+                # Текст вместо вызова answer_to_system — стираем; наг НЕ удаляется и НЕ пересоздаётся
+                # (тот же объект — байт-стабильный KV-префикс). Лимит срабатываний →
+                # сдача хода пользователю (защита от бесконечного цикла).
                 self._erase_last_assistant()
-                self._drop_guard_nags()
-                self.history.add(UserMessage(
-                    f"{ENVIRONMENT_PREFIX} You can't continue unless you answer to the system question using '{answer_to_system.__name__}' tool. "
-                    "Call it ritgh now!"
-                    f"{ENVIRONMENT_PREFIX_END}"
-                ))
-                self.on_render(self.history.get_all()[-1])
+                if not state.can_retry_answer_guard():
+                    self._recover('answer_guard')
+                    return ""
+                self._ensure_guard_nag()
                 self._temp_override = Config.ERROR_RECOVERY_TEMP
                 self._on_history_changed()
                 continue

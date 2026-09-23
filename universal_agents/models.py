@@ -38,6 +38,9 @@ class UserMessage(Message):
     content: str
     is_summary: bool = False
     _cached_header: Optional[str] = field(default=None, init=False, repr=False)
+    # Метка нага guard'а answer_to_system: в API не уходит, переживает save/load (scrub
+    # находит наг по флагу — текст дублируется превью edit'а, матчинг дал бы ложь).
+    _is_guard_nag: bool = field(default=False, init=False, repr=False)
 
     def reset_header_cache(self) -> None:
         """Сбрасывает кэш заголовка user-сообщения: следующий prepare_messages_for_api
@@ -51,6 +54,7 @@ class UserMessage(Message):
     def to_persist_dict(self) -> dict[str, Any]:
         d = self.to_api_dict()
         d["_is_summary"] = self.is_summary
+        d["_is_guard_nag"] = self._is_guard_nag
         d["_ts"] = self.timestamp.isoformat()
         d["_header"] = self._cached_header
         return d

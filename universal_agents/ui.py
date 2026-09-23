@@ -523,10 +523,6 @@ class CLI:
         + Enter во время работы LLM останавливает текущую генерацию, вставляет
         сообщение пользователя с системной шапкой в историю и сразу запускает новую
         генерацию (сценарии А/Б/В)."""
-        ConsoleUI.system_msg(
-            "💡 To stop generation, type 'q' and press Enter. "
-            "Type any other text and press Enter to interrupt and inject it as a new message."
-        )
         self._monitor_active = True
         try:
             interrupt_next = False

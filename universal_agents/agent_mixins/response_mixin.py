@@ -7,10 +7,11 @@ from typing import Optional
 from universal_agents.llm_client import apply_prefill
 from universal_agents.models import AssistantMessage, ToolCall, ToolResult
 from universal_agents.tool_parsing import tc_name, tc_args, detect_broken_call, args_are_valid
+from universal_agents.tools.builtin import answer_to_system
 
 # Prefill для перегенерации голого вызова инструмента без пояснения.
 # 'Assistant:' — стартовая приставка, после которой модель должна написать текст.
-_NO_COMMENT_PREFILL = 'Assistant: "'
+_NO_COMMENT_PREFILL = 'LLM Assistant: "'
 
 
 class ResponseMixin:
@@ -190,7 +191,13 @@ class ResponseMixin:
             self.on_system_msg("[EMPTY RESPONSE] Model returned no content. Discarding and retrying...")
             return clean_content, True, False, None
 
+        # Snapshot pending ДО _execute_tools: edit-инструмент сам ставит pending из dry_run,
+        # и его превью-результат не должен считаться мусором подтверждения (§1.11).
+        pending_before = self._pending_operation is not None
         self._append_assistant(assistant_msg)
+        if pending_before and answer_to_system.__name__ not in [tc.name for tc in assistant_msg.tool_calls]:
+            # Текст вместо вызова или чужой инструмент при висящем pending — мусор.
+            self._mark_confirmation_junk(assistant_msg)
 
         if not assistant_msg.has_tool_calls():
             if not skip_broken_detection and detect_broken_call(clean_content, self._known_tool_names()):
@@ -199,7 +206,24 @@ class ResponseMixin:
             return clean_content, False, False, None
 
         tool_results = self._execute_tools(assistant_msg.tool_calls)
+        name_by_id = {tc.id: tc.name for tc in assistant_msg.tool_calls}
+        for tr in tool_results:
+            tname = name_by_id.get(tr.tool_call_id, "")
+            if tname == answer_to_system.__name__:
+                if pending_before and tr.is_error and not tr.is_user_denied:
+                    # Упавшая пара answer (вызов + результат) внутри активного подтверждения.
+                    self._mark_confirmation_junk(assistant_msg)
+                    self._mark_confirmation_junk(tr)
+            elif pending_before:
+                # Чужой инструмент при висящем pending — мусор.
+                self._mark_confirmation_junk(tr)
         self._append_tool_results(tool_results)
+        if any(
+            tr.name == answer_to_system.__name__ and not tr.is_error and not tr.is_user_denied
+            for tr in tool_results
+        ):
+            # Подтверждение принято — вычищаем наг и неверные попытки (§1.11).
+            self._scrub_confirmation_trail()
 
         # removed = self.history.remove_failed_call_chains()
         # if removed:
