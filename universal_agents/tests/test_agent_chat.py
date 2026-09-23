@@ -4,7 +4,7 @@ import unittest
 from unittest import mock
 from types import SimpleNamespace
 
-from universal_agents.agent import LLMAgent
+from universal_agents.agent import LLMAgent, MAX_CONSECUTIVE_ERRORS
 from universal_agents.llm_client import LLMClient
 from universal_agents.agent_mixins.response_mixin import _NO_COMMENT_PREFILL
 from universal_agents.models import AssistantMessage, ToolCall, ToolResult, UserMessage
@@ -296,6 +296,8 @@ class TestAgentChat(unittest.TestCase):
                 external_plugins={"fail_me": fail_me},
                 max_generation_attempts=1,
             )
+            # голый вызов исполняется сразу, иначе NO COMMENT съедает одну итерацию
+            agent._thinking_enabled = True
             err_call = AssistantMessage(
                 content="",
                 tool_calls=[ToolCall(id="t1", name="fail_me", arguments='{"value": 1}')],
@@ -304,7 +306,7 @@ class TestAgentChat(unittest.TestCase):
                 "universal_agents.agent.LLMClient.call",
                 return_value=(err_call, None, None),
             ):
-                result = agent.chat("loop", max_iter=10)
+                result = agent.chat("loop", max_iter=MAX_CONSECUTIVE_ERRORS + 1)
             self.assertEqual(result, "")
         finally:
             Config.ERROR_RECOVERY_RETRIES = old_retries

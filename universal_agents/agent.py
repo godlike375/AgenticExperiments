@@ -33,8 +33,12 @@ from universal_agents.agent_mixins import (
 )
 from universal_agents.exceptions import GenerationInterrupted
 
-# Предел последовательных ошибок инструментов за один chat() до сдачи (§1)
-MAX_CONSECUTIVE_ERRORS = 5
+# Лимит повторов ошибок за один chat() до сдачи (§1.10): счёт по-сигнатурный —
+# любая сигнатура (инструмент + аргументы + текст ошибки), набравшая лимит, прерывает ход.
+MAX_CONSECUTIVE_ERRORS = 10
+
+# Стабильная категория ошибок без инструмента (пустой ответ и т.п.).
+_NO_TOOL_ERROR_SIGNATURE = "<no_tool_call>"
 
 # Наг за повторённый ответ: вшивается в конец последнего сообщения при детекции повтора
 # ответа или reasoning-блока (тот же механизм устранения повтора из §1).
@@ -64,7 +68,9 @@ class TurnState:
     """
 
     prefill: Optional[str] = None
-    consecutive_errors: int = 0
+    # Per-signature счётчики ошибок за ход: каждая сигнатура (см. _last_failed_tool_signature)
+    # растит свой счётчик, чередование [A,B,A,B,...] — тоже зацикливание и прерывается.
+    error_counts: dict[str, int] = field(default_factory=dict)
     tool_error_retries_left: int = field(default_factory=lambda: Config.ERROR_RECOVERY_RETRIES)
     broken_regen_left: int = field(default_factory=lambda: Config.BROKEN_CALL_REGEN_RETRIES)
     broken_fix_left: int = field(default_factory=lambda: Config.BROKEN_CALL_FIX_RETRIES)
@@ -109,19 +115,27 @@ class TurnState:
             return True
         return False
 
-    def record_tool_error(self) -> None:
-        """Фиксирует очередную последовательную ошибку инструмента."""
-        self.consecutive_errors += 1
+    def record_tool_error(self, signature: Optional[str] = None) -> None:
+        """Фиксирует очередную ошибку инструмента: по-сигнатурный счёт — каждая сигнатура
+        (инструмент + аргументы + текст ошибки) растит свой счётчик, чередование
+        [A,B,A,B,...] тоже даёт лимит; другой сбой между повторами не сбрасывает.
+        None (пустой ответ) — отдельная стабильная категория."""
+        sig = signature if signature is not None else _NO_TOOL_ERROR_SIGNATURE
+        self.error_counts[sig] = self.error_counts.get(sig, 0) + 1
 
     def record_tool_success(self) -> None:
-        """Сбрасывает счётчик последовательных ошибок и возвращает ретраи."""
-        self.consecutive_errors = 0
+        """Сброс счётчиков: успешный инструмент = модель продвинулась. Возвращает ретраи."""
+        self.error_counts.clear()
         self.tool_error_retries_left = Config.ERROR_RECOVERY_RETRIES
+
+    def reset_error_counts(self) -> None:
+        """Сброс счётчиков после сжатия истории: отсчёт зацикливания заново."""
+        self.error_counts.clear()
 
     @property
     def max_errors_reached(self) -> bool:
-        """Достигнут ли лимит последовательных ошибок за один ход."""
-        return self.consecutive_errors >= MAX_CONSECUTIVE_ERRORS
+        """Любая сигнатура набрала MAX_CONSECUTIVE_ERRORS за ход."""
+        return any(count >= MAX_CONSECUTIVE_ERRORS for count in self.error_counts.values())
 
 
 class LLMAgent(
@@ -1111,8 +1125,10 @@ class LLMAgent(
                 self._recover('tool_error', retries_left=state.tool_error_retries_left, erased_count=erased)
                 continue
 
+            compacted = False
             if not service_mode:
-                self._compact_completed_tasks()
+                # Сжатие истории убирает старые ошибки из контекста — счётчики заново.
+                compacted = self._compact_completed_tasks() > 0
             if (
                 not service_mode
                 and not getattr(self, '_auto_summarize_suppressed', False)
@@ -1123,10 +1139,14 @@ class LLMAgent(
                     # сжатие ломает извлечение ответа и тратит лишние вызовы LLM). При
                     # превышении порога просто завершаемся, возвращая последнее сообщение.
                     return result_text
-                self._auto_summarize_dialogue()
+                if self._auto_summarize_dialogue():
+                    compacted = True
+
+            if compacted:
+                state.reset_error_counts()
 
             if tool_error_occurred:
-                state.record_tool_error()
+                state.record_tool_error(self._last_failed_tool_signature())
             else:
                 state.record_tool_success()
 

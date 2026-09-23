@@ -32,9 +32,9 @@ class MemoryMixin:
         total = self.token_tracker.get_total_context_tokens()
         return (total / self.token_tracker.max_context_tokens) * 100
 
-    def _compact_completed_tasks(self) -> None:
-        """Структурная компактизация: сжимает завершённые подзадачи (через have_done); нет завершённых — ничего не делает. Применяется перед суммаризацией по порогу токенов."""
-        compact_completed_tasks(self)
+    def _compact_completed_tasks(self) -> int:
+        """Структурная компактизация: сжимает завершённые подзадачи (через have_done); нет завершённых — ничего не делает. Применяется перед суммаризацией по порогу токенов. Возвращает число сжатых групп."""
+        return compact_completed_tasks(self)
 
     # ------------------------------------------------------------------
     # Порог срабатывания

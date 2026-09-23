@@ -10,7 +10,7 @@ from universal_agents.tool_parsing import tc_name, tc_args, detect_broken_call, 
 
 # Prefill для перегенерации голого вызова инструмента без пояснения.
 # 'Assistant:' — стартовая приставка, после которой модель должна написать текст.
-_NO_COMMENT_PREFILL = 'LLM:\n"'
+_NO_COMMENT_PREFILL = 'Assistant: "'
 
 
 class ResponseMixin:
@@ -201,14 +201,14 @@ class ResponseMixin:
         tool_results = self._execute_tools(assistant_msg.tool_calls)
         self._append_tool_results(tool_results)
 
-        removed = self.history.remove_failed_call_chains()
-        if removed:
-            self.on_system_msg(
-                f"[CLEANUP] Removed {removed} messages "
-                f"({removed // 2} failed calls)"
-            )
-            self.history.normalize()
-            self._on_history_changed()
+        # removed = self.history.remove_failed_call_chains()
+        # if removed:
+        #     self.on_system_msg(
+        #         f"[CLEANUP] Removed {removed} messages "
+        #         f"({removed // 2} failed calls)"
+        #     )
+        #     self.history.normalize()
+        #     self._on_history_changed()
 
         tool_error_occurred = any(tr.is_error and not tr.is_user_denied for tr in tool_results)
         return clean_content, tool_error_occurred, False, None
