@@ -206,15 +206,18 @@ class TestSecondCompaction(unittest.TestCase):
         self.assertTrue(any("Compression call failed" in n for n in notes))
 
 
-class TestUnsafeBoundary(unittest.TestCase):
-    def test_no_compaction_on_assistant_tail(self):
+class TestBoundary(unittest.TestCase):
+    def test_compaction_allowed_on_completed_text_tail(self):
+        # Завершённый текстовый ответ ассистента — безопасная граница: сжатие
+        # разрешено, а сам финальный ответ сохраняется в хвосте (preserve_last).
         agent = FakeAgent()
         _seed_dialog(agent)
         agent.history.add(AssistantMessage(content="text answer only"))
         before = len(agent.history)
         with mock.patch("universal_agents.llm_client.LLMClient.call", side_effect=_compression_router()):
             agent._auto_summarize_dialogue()
-        self.assertEqual(len(agent.history), before)
+        self.assertNotEqual(len(agent.history), before)
+        self.assertEqual(agent.history.get_all()[-1].content, "text answer only")
 
 
 class TestPersistenceRoundTrip(unittest.TestCase):

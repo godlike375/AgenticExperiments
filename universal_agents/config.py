@@ -33,6 +33,7 @@ class Config:
     BROKEN_CALL_REGEN_RETRIES: int = 2  # попыток перегенерации при обнаружении сломанного вызова
     BROKEN_CALL_FIX_RETRIES: int = 2    # попыток «починить» вызов через промпт после неудачной регенерации
     NO_COMMENT_RETRIES: int = 2         # попыток перегенерации с prefill при вызове инструмента без пояснения; после исчерпания вызов исполняется как есть
+    ANSWER_GUARD_MAX_RETRIES: int = 5   # срабатываний guard'а «ответь через answer_to_system»; после — сдача хода пользователю
     DUPLICATE_CONTINUATION_TEMP: float = round(BOOST_TEMP / 4, 2)  # спокойная достройка после расхождения
     SUMMARY_DUPLICATE_TEMP: float = round(BOOST_TEMP / 2, 2)  # буст при тождественном повторе саммари (мягче полного BOOST_TEMP)
 

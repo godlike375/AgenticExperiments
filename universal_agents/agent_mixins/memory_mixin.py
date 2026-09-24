@@ -51,6 +51,7 @@ class MemoryMixin:
     def _auto_summarize_dialogue(self, force: bool = False) -> bool:
         """Компакция: сегмент уходит в архив, вместо него — session summary (UserMessage после system prompt).
 
-        force=True — принудительная компакция (команда /compact_history): сжимает даже на ассистентской
-        границе и сообщает о причинах пропуска. Возвращает True, если история реально сжата."""
+        force=True — принудительная компакция (команда /compact_history): сжимает на любой границе.
+        Без force сжимает на безопасных границах: ToolResult, UserMessage или завершённый
+        текстовый ответ ассистента. Возвращает True, если история реально сжата."""
         return SummaryService.compact_segment(self, force=force)

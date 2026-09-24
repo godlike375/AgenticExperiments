@@ -522,7 +522,8 @@ class SummaryService:
         """Компакция: сегмент уходит в архив, вместо него — session summary (UserMessage после system prompt).
         Первая компакция пишет заметки с нуля, повторные правят по SEARCH/REPLACE; при неудаче история не трогается.
 
-        force=True — принудительная компакция (команда /compact_history): сжимает даже на ассистентской границе.
+        force=True — принудительная компакция (команда /compact_history): сжимает на любой границе,
+        включая нетипичные хвосты (например, висящий незавершённый tool_call).
         Возвращает True, если история реально сжата."""
         preserve_last = Config.AUTO_SUMMARY_PRESERVE_LAST
 
@@ -534,8 +535,14 @@ class SummaryService:
         # --- Точка срабатывания: только на «безопасных» границах (force — сжимаем в любом месте) ---
         popped_calls = agent.history.pop_pending_tool_calls()
 
+        # Безопасные границы: ToolResult, UserMessage и завершённый текстовый ответ ассистента
+        # (после pop_pending_tool_calls его хвост гарантированно без tool_calls; последнее
+        # сообщение всё равно сохраняется через preserve_last).
         last = agent.history.get_last_message()
-        if not (isinstance(last, ToolResult) or isinstance(last, UserMessage)):
+        safe_tail = isinstance(last, ToolResult) or isinstance(last, UserMessage)
+        if isinstance(last, AssistantMessage) and not last.has_tool_calls():
+            safe_tail = True
+        if not safe_tail:
             if not force:
                 return False
             agent.on_system_msg(
