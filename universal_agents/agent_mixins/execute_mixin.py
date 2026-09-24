@@ -137,6 +137,14 @@ class ExecuteMixin:
                         results.append(ToolResult.error(tc.id, name, str(e)))
                         continue
 
+                    # Строковый результат dry_run (ошибка/'Nothing changed') — обычный ответ, не поломка.
+                    if isinstance(result, str):
+                        if is_error_content(result):
+                            results.append(ToolResult(tc.id, name, result, is_error=True))
+                        else:
+                            results.append(ToolResult.success(tc.id, name, result))
+                        continue
+
                     # Инструмент обязан вернуть (preview, resolve, ask) из dry_run:
                     # ask — строка с инструкцией зарезолвить операцию через 'answer',
                     # которую инструмент составляет сам. Без ask инструмент сломан.

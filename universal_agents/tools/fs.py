@@ -117,6 +117,8 @@ def _apply_edit_result(
     context_after: str = "",
     dry_run: str = "",
     nothing: str = "",
+    replaced: Optional[int] = None,
+    added: Optional[int] = None,
 ) -> tuple | str:
     """Финализация правки (общая для редакторов файлов): если dry_run — возвращает
     (preview, resolve, ask) для подтверждения моделью через 'answer_to_system'; иначе пишет файл
@@ -125,12 +127,11 @@ def _apply_edit_result(
         return f"Nothing changed: {nothing}"
 
     if dry_run:
-        # Дифф изолируем на заменяемый диапазон: контекст (±1) берём только из
-        # стабильного head/tail, чтобы изменение не «протекало» на соседние строки.
+        # Дифф файла до/после (не диапазона против нового текста).
         preview = _make_diff_preview(
-            "\n".join(replaced_lines), new_clean, path,
-            replaced=len(replaced_lines),
-            added=len(new_clean.splitlines()),
+            content, new_content, path,
+            replaced=len(replaced_lines) if replaced is None else replaced,
+            added=len(new_clean.splitlines()) if added is None else added,
             context_before=context_before,
             context_after=context_after,
         )
@@ -286,12 +287,14 @@ def match_replace_edit(path: str, old: str, new_text: str, mode: str = "one", dr
             nothing="pattern equal to replacement",
         )
 
-    # mode='all': заменяем каждое вхождение; превью — дифф всего файла (видны все хунки).
+    # mode='all': дифф файла до/после; заголовок — объём вхождений, а не размер файла.
     new_content = content.replace(old_text, new_text)
     return _apply_edit_result(
         path, content, new_content, new_text.rstrip('\n'), content.splitlines(),
         label=f"{occurrences} occurrences",
         report_start=1,
+        replaced=occurrences * len(old_text.splitlines()),
+        added=occurrences * len(new_clean.splitlines()),
         report_text=f"Replaced {occurrences} occurrence(s) of {old_text[:30]!r} in {Path(path).name}",
         dry_run=dry_run,
         nothing="pattern equal to replacement",

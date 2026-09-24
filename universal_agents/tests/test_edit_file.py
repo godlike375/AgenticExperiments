@@ -166,6 +166,34 @@ class TestMatchReplaceEdit(unittest.TestCase):
         resolve(None, "yes")
         self.assertEqual(open(f, encoding="utf-8").read(), "y\nkeep\ny\n")
 
+    def test_all_mode_preview_isolates_changed_lines(self):
+        """Превью mode='all' не должно выглядеть как удаление всего файла."""
+        lines = ["line %d" % i for i in range(1, 30)]
+        lines[9] = "// old comment"
+        f = self._path("iso.py", "\n".join(lines) + "\n")
+        preview, resolve, _ask = match_replace_edit(f, "// old comment", "// new comment", mode="all", dry_run="true")
+        self.assertIn("-1+1", preview)
+        self.assertIn("-// old comment", preview)
+        self.assertIn("+// new comment", preview)
+        self.assertNotIn("-line 1", preview)
+        self.assertNotIn("-line 29", preview)
+        resolve(None, "yes")
+        content = open(f, encoding="utf-8").read()
+        self.assertIn("// new comment", content)
+        self.assertIn("line 1", content)
+        self.assertIn("line 29", content)
+
+    def test_all_mode_multiple_occurrences_scope_header(self):
+        """Заголовок mode='all' — объём вхождений; нетронутые строки не удаляются в превью."""
+        f = self._path("iso2.py", "x\nkeep_a\nx\nmiddle\nx\nkeep_b\n")
+        preview, _resolve, _ask = match_replace_edit(f, "x", "y", mode="all", dry_run="true")
+        self.assertIn("-3+3", preview)
+        self.assertNotIn("-keep_a", preview)
+        self.assertNotIn("-middle", preview)
+        self.assertNotIn("-keep_b", preview)
+        self.assertEqual(preview.count("-x"), 3)
+        self.assertEqual(preview.count("+y"), 3)
+
     def test_no_match_error(self):
         f = self._path("nomatch.py", "abc\n")
         out = match_replace_edit(f, "zzz", "yyy", dry_run="true")
