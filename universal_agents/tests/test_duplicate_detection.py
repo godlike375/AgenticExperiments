@@ -15,7 +15,7 @@ from unittest import mock
 from universal_agents.agent import LLMAgent
 from universal_agents.config import Config
 from universal_agents.models import AssistantMessage, ToolCall, ToolResult, UserMessage
-from universal_agents.llm_client import text_hash
+from universal_agents.llm_client import jaccard_similarity, text_hash
 from universal_agents.tool import tool
 
 
@@ -25,6 +25,35 @@ class TestTextHash(unittest.TestCase):
 
     def test_different_texts_different_hashes(self):
         self.assertNotEqual(text_hash("abc"), text_hash("def"))
+
+
+class TestBigramJaccard(unittest.TestCase):
+    """Биграммный Jaccard: учитывает порядок слов, в отличие от мешка слов."""
+
+    def test_identical_texts(self):
+        self.assertEqual(jaccard_similarity("read the file", "read the file"), 1.0)
+
+    def test_completely_different(self):
+        self.assertEqual(jaccard_similarity("alpha beta gamma", "delta epsilon zeta"), 0.0)
+
+    def test_word_order_matters(self):
+        """Перестановка слов даёт низкую схожесть — ключевое отличие от мешка слов."""
+        sim = jaccard_similarity("read A then edit B", "edit B then read A")
+        self.assertLess(sim, 0.5)
+        self.assertLess(sim, Config.DUPLICATE_SIMILARITY_THRESHOLD)
+
+    def test_partial_overlap(self):
+        sim = jaccard_similarity("I will read the file", "I will read the file now")
+        self.assertGreater(sim, 0.6)
+        self.assertLess(sim, 1.0)
+
+    def test_empty_inputs(self):
+        self.assertEqual(jaccard_similarity("", ""), 1.0)
+        self.assertEqual(jaccard_similarity("hello", ""), 0.0)
+
+    def test_single_word(self):
+        self.assertEqual(jaccard_similarity("hello", "hello"), 1.0)
+        self.assertEqual(jaccard_similarity("hello", "world"), 0.0)
 
 
 class TestPriorTextHashes(unittest.TestCase):
@@ -120,13 +149,14 @@ class TestDuplicateTextAcrossHistory(unittest.TestCase):
         agent.history.add(UserMessage("first"))
         agent.history.add(AssistantMessage(content='LLM:\n"Read the file."'))
         agent.history.add(UserMessage("second"))
-        fresh = AssistantMessage(content='LLM:\n"Read the file now."')
+        fresh = AssistantMessage(content='LLM:\n"Search for the config."')
         with mock.patch(
             "universal_agents.agent.LLMClient.call",
             return_value=(fresh, None, None),
         ):
             result = agent.chat("third")
-        self.assertEqual(result, 'LLM:\n"Read the file now."')
+        self.assertEqual(result, 'LLM:\n"Search for the config."')
+
 
 
 _NAG_TEXT = "previous answer was the same to the latest one"

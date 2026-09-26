@@ -11,14 +11,20 @@ from universal_agents.exceptions import GenerationInterrupted
 
 
 def jaccard_similarity(a: str, b: str) -> float:
-    """Доля пересечения множеств слов (Jaccard) двух текстов: 1.0 при равенстве, 0.0 без общих слов."""
-    set_a = set(a.split())
-    set_b = set(b.split())
-    if not set_a and not set_b:
+    """Биграммный Jaccard: схожесть множеств пар соседних слов двух текстов.
+    1.0 при идентичных текстах, 0.0 при полностью разных. Учитывает порядок
+    слов (в отличие от мешка слов): перестановка даёт низкую схожесть."""
+    words_a = a.split()
+    words_b = b.split()
+    if not words_a and not words_b:
         return 1.0
-    if not set_a or not set_b:
+    if not words_a or not words_b:
         return 0.0
-    return len(set_a & set_b) / len(set_a | set_b)
+    if len(words_a) < 2 or len(words_b) < 2:
+        return 1.0 if words_a == words_b else 0.0
+    bigrams_a = set(zip(words_a, words_a[1:]))
+    bigrams_b = set(zip(words_b, words_b[1:]))
+    return len(bigrams_a & bigrams_b) / len(bigrams_a | bigrams_b)
 
 
 def text_hash(text: str) -> str:
