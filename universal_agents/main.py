@@ -27,10 +27,10 @@ LOADABLE_TOOLS = [
     press_key.__name__,
 ]
 
+
 PRELOADED_TOOLS = (load_tool.__name__, read.__name__, line_range_edit.__name__,
                    match_replace_edit.__name__, cwd.__name__, search.__name__,
-                   run_powershell.__name__, respond_to_system.__name__, type_text_on_keyboard.__name__)
-
+                   run_powershell.__name__, respond_to_system.__name__)
 
 def build_allowed_tools(loadable: Iterable[str], preloaded: Iterable[str]) -> list[str]:
     return list(dict.fromkeys(list(loadable) + list(preloaded)))
