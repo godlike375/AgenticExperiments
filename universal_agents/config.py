@@ -40,10 +40,10 @@ class Config:
 
     # Параметры генерации
     MAX_CONTEXT_TOKENS: int = 66000
-    TEMP: float = 0.1
-    TOP_P: float = 0.92
-    FREQUENCY_PENALTY: float = 0.03
-    PRESENCE_PENALTY: float = 0.03
+    TEMP: float = 0.4
+    TOP_P: float = 0.925
+    FREQUENCY_PENALTY: float = 0.02
+    PRESENCE_PENALTY: float = 0.02
     # min_p (минимальная вероятность токена относительно топ-1): None — не отправлять
     # вообще (сервер решит сам). Поддерживается llama.cpp и LM Studio.
     MIN_P: Optional[float] = 0.07
@@ -84,11 +84,11 @@ class Config:
     # настройку. Если задана хотя бы одна — секция и ответ генерируются ДВУМЯ
     # вызовами (стоп-маркер </short_think> заканчивает первый); иначе — одним,
     # как раньше. Пустой ответ без tool call по-прежнему чинится NO COMMENT.
-    SIMULATED_REASONING_TEMP: Optional[float] = 0.6
-    SIMULATED_REASONING_TOP_P: Optional[float] = 0.918
-    SIMULATED_REASONING_MIN_P: Optional[float] = 0.042
-    SIMULATED_REASONING_FREQUENCY_PENALTY: Optional[float] = 0.6
-    SIMULATED_REASONING_PRESENCE_PENALTY: Optional[float] = 0.2
+    SIMULATED_REASONING_TEMP: Optional[float] = 0.55
+    SIMULATED_REASONING_TOP_P: Optional[float] = 0.92
+    SIMULATED_REASONING_MIN_P: Optional[float] = 0.03
+    SIMULATED_REASONING_FREQUENCY_PENALTY: Optional[float] = 0.65
+    SIMULATED_REASONING_PRESENCE_PENALTY: Optional[float] = 0.15
 
     # Отладка KV-кэша: хэшировать каждое сообщение префикса и сравнивать с
     # предыдущей итерацией подготовки.
