@@ -15,7 +15,7 @@ from universal_agents.tools.builtin import respond_to_system
 
 # Prefill для перегенерации голого вызова инструмента без пояснения.
 # 'Assistant:' — стартовая приставка, после которой модель должна написать текст.
-_NO_COMMENT_PREFILL = 'Assistant: "'
+_NO_COMMENT_PREFILL = 'LLM Agent: "'
 
 
 def sim_schema_text() -> str:

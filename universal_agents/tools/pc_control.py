@@ -412,7 +412,7 @@ def scroll(amount: int, x: int = None, y: int = None) -> str:
     text=("str", "Текст для ввода"),
     press_enter=("bool", "optional: нажать Enter после ввода текста"),
 )
-def type_text(text: str, press_enter: bool = False) -> str:
+def type_text_on_keyboard(text: str, press_enter: bool = False) -> str:
     if not text:
         return err(": пустой текст")
     pyperclip.copy(text)

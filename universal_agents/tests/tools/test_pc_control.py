@@ -1,4 +1,4 @@
-"""Тесты PC-инструментов (tools/pc_control.py): координаты, схемы, allow-list.
+ef """Тесты PC-инструментов (tools/pc_control.py): координаты, схемы, allow-list.
 
 GUI замокан (ImageGrab / pyautogui / pyperclip) — тесты не трогают реальный экран.
 """
@@ -242,7 +242,7 @@ class TestKeyboardTools(unittest.TestCase):
         with patch.object(pc_control.pyperclip, "copy") as copy, \
                 patch.object(pc_control, "_send_key_event", side_effect=fake), \
                 patch.object(pc_control.time, "sleep"):
-            res = pc_control.type_text("Привет мир", press_enter=True)
+            res = pc_control.type_text_on_keyboard("Привет мир", press_enter=True)
         copy.assert_called_once_with("Привет мир")
         self.assertEqual(
             calls,
@@ -255,20 +255,20 @@ class TestKeyboardTools(unittest.TestCase):
 
     def test_type_text_empty_is_error(self):
         with patch.object(pc_control.pyperclip, "copy") as copy:
-            res = pc_control.type_text("")
+            res = pc_control.type_text_on_keyboard("")
         copy.assert_not_called()
         self.assertTrue(res.startswith(f"{ENVIRONMENT_PREFIX} Error"))
 
     def test_type_text_does_not_touch_focus(self):
         """type_text не управляет фокусом: только буфер + Ctrl+V в активное окно."""
-        src = inspect.getsource(pc_control.type_text)
+        src = inspect.getsource(pc_control.type_text_on_keyboard)
         for forbidden in ("SetForegroundWindow", "activate", "SwitchToThisWindow",
                           "AttachThreadInput", "pygetwindow"):
             self.assertNotIn(forbidden, src)
 
     def test_keyboard_never_uses_pyautogui(self):
         """pyautogui на не-US раскладке шлёт мусорные VK — ввод только через SendInput."""
-        for fn in (pc_control.type_text, pc_control.press_key):
+        for fn in (pc_control.type_text_on_keyboard, pc_control.press_key):
             self.assertNotIn("pyautogui", inspect.getsource(fn))
 
     def test_send_key_event_retries_then_reports_failure(self):
@@ -332,7 +332,7 @@ class TestSchemas(unittest.TestCase):
             self.assertTrue(params["properties"][opt]["description"].lower().startswith("optional"), opt)
 
     def test_type_text_required_and_optional_params(self):
-        params = pc_control.type_text._tool_schema["function"]["parameters"]
+        params = pc_control.type_text_on_keyboard._tool_schema["function"]["parameters"]
         self.assertEqual(params["required"], ["text"])
         self.assertEqual(set(params["properties"]), {"text", "press_enter"})
         self.assertTrue(params["properties"]["press_enter"]["description"].lower().startswith("optional"))
