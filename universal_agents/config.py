@@ -34,19 +34,19 @@ class Config:
     BROKEN_CALL_REGEN_RETRIES: int = 2  # попыток перегенерации при обнаружении сломанного вызова
     BROKEN_CALL_FIX_RETRIES: int = 2    # попыток «починить» вызов через промпт после неудачной регенерации
     NO_COMMENT_RETRIES: int = 2         # попыток перегенерации с prefill при вызове инструмента без пояснения; после исчерпания вызов исполняется как есть
-    ANSWER_GUARD_MAX_RETRIES: int = 5   # срабатываний guard'а «ответь через answer_to_system»; после — сдача хода пользователю
+    ANSWER_GUARD_MAX_RETRIES: int = 5   # срабатываний guard'а «ответь через respond_to_system»; после — сдача хода пользователю
     DUPLICATE_CONTINUATION_TEMP: float = round(BOOST_TEMP / 4, 2)  # спокойная достройка после расхождения
     SUMMARY_DUPLICATE_TEMP: float = round(BOOST_TEMP / 2, 2)  # буст при тождественном повторе саммари (мягче полного BOOST_TEMP)
 
     # Параметры генерации
     MAX_CONTEXT_TOKENS: int = 66000
-    TEMP: float = 0.15
-    TOP_P: float = 0.93
-    FREQUENCY_PENALTY: float = 0.0
-    PRESENCE_PENALTY: float = 0.0
+    TEMP: float = 0.1
+    TOP_P: float = 0.92
+    FREQUENCY_PENALTY: float = 0.03
+    PRESENCE_PENALTY: float = 0.03
     # min_p (минимальная вероятность токена относительно топ-1): None — не отправлять
     # вообще (сервер решит сам). Поддерживается llama.cpp и LM Studio.
-    MIN_P: Optional[float] = 0.055
+    MIN_P: Optional[float] = 0.07
     MAX_OUTPUT_TOKENS: int = min(32000, int(MAX_CONTEXT_TOKENS / 1.5))
     TIMEOUT: int = 1800
     MAX_ITER: int = 250
@@ -74,7 +74,7 @@ class Config:
     SIMULATED_REASONING_ENABLED: bool = True
     # Тегированные секции ответа по порядку: ответ начинается с первой, а после её
     # закрытия идёт свободный текст. Меняешь здесь — меняется формат.
-    SIMULATED_REASONING_TAGS: tuple[str, ...] = ("least_think",)
+    SIMULATED_REASONING_TAGS: tuple[str, ...] = ("least_thinking",)
     # Продолжений пустого ответа на одну генерацию (одна генерация = между вызовами
     # инструментов): после </short_think> подставляется _NO_COMMENT_PREFILL.
     # По исчерпании ответ принимается как есть (громкий system msg), чтобы цикл не зациклился.
@@ -84,9 +84,9 @@ class Config:
     # настройку. Если задана хотя бы одна — секция и ответ генерируются ДВУМЯ
     # вызовами (стоп-маркер </short_think> заканчивает первый); иначе — одним,
     # как раньше. Пустой ответ без tool call по-прежнему чинится NO COMMENT.
-    SIMULATED_REASONING_TEMP: Optional[float] = 0.58
-    SIMULATED_REASONING_TOP_P: Optional[float] = 0.92
-    SIMULATED_REASONING_MIN_P: Optional[float] = 0.04
+    SIMULATED_REASONING_TEMP: Optional[float] = 0.6
+    SIMULATED_REASONING_TOP_P: Optional[float] = 0.918
+    SIMULATED_REASONING_MIN_P: Optional[float] = 0.042
     SIMULATED_REASONING_FREQUENCY_PENALTY: Optional[float] = 0.6
     SIMULATED_REASONING_PRESENCE_PENALTY: Optional[float] = 0.2
 

@@ -9,7 +9,7 @@ from universal_agents.ui import ConsoleUI, CLI
 from universal_agents.constants import ENVIRONMENT_PREFIX, ENVIRONMENT_PREFIX_END
 from universal_agents.project_root import find_project_root, set_project_root
 from universal_agents.config import Config
-from universal_agents.tools.builtin import answer_to_system, load_tool
+from universal_agents.tools.builtin import answer_system, load_tool
 from universal_agents.tools.fs import cwd, line_range_edit, match_replace_edit, read, search
 from universal_agents.tools.host_shell import run_bash_host, run_powershell
 from universal_agents.tools.pc_control import (
@@ -29,7 +29,7 @@ LOADABLE_TOOLS = [
 
 PRELOADED_TOOLS = (load_tool.__name__, read.__name__, line_range_edit.__name__,
                    match_replace_edit.__name__, cwd.__name__, search.__name__,
-                   run_powershell.__name__, answer_to_system.__name__, type_text.__name__)
+                   run_powershell.__name__, answer_system.__name__, type_text.__name__)
 
 
 def build_allowed_tools(loadable: Iterable[str], preloaded: Iterable[str]) -> list[str]:
@@ -100,7 +100,7 @@ if __name__ == "__main__":
         "* Do NOT repeat identical tool calls with same args. You can call only 1 tool at 1 turn/message. "
         "You must wait for tool results before making next calls.\n"
         "You must say aloud what you're doing while calling a tool. Every tool call must be described verbally!\n"
-        "Говори только по-русски.\n"
+        f"Говори только по-русски. Когда хочешь что-то сказать пользователю - пиши простым текстом, не через `{answer_system.__name__}`.\n"
         f"{ENVIRONMENT_PREFIX_END}"
     )
 

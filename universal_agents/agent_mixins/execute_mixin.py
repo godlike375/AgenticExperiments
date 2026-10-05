@@ -122,7 +122,7 @@ class ExecuteMixin:
                             results.append(ToolResult.user_denied(tc.id, name))
                             continue
 
-                # Многофазное взаимодействие: dry_run → превью → answer_to_system() → реальное выполнение.
+                # Многофазное взаимодействие: dry_run → превью → respond_to_system() → реальное выполнение.
                 if tool_info.get('requires_model_confirmation', False):
                     handler = tool_info['handler']
                     dry_run_args = {**args_dict, "dry_run": "true"}

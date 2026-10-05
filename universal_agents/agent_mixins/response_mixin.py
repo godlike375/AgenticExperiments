@@ -11,11 +11,11 @@ from universal_agents.generation import GenerationParams
 from universal_agents.llm_client import apply_prefill
 from universal_agents.models import AssistantMessage, ToolCall, ToolResult
 from universal_agents.tool_parsing import tc_name, tc_args, detect_broken_call, args_are_valid
-from universal_agents.tools.builtin import answer_to_system
+from universal_agents.tools.builtin import answer_system
 
 # Prefill для перегенерации голого вызова инструмента без пояснения.
 # 'Assistant:' — стартовая приставка, после которой модель должна написать текст.
-_NO_COMMENT_PREFILL = 'LLM Assistant: "'
+_NO_COMMENT_PREFILL = 'Assistant: "'
 
 
 def sim_schema_text() -> str:
@@ -420,7 +420,7 @@ class ResponseMixin:
                     f"({no_comment_retry_left} retr{'y' if no_comment_retry_left == 1 else 'ies'} left)."
                 )
                 return clean_content, False, False, _NO_COMMENT_PREFILL
-            # Ретраи исчерпаны (это касается и answer_to_system без pending-задачи):
+            # Ретраи исчерпаны (это касается и respond_to_system без pending-задачи):
             # принимаем голый вызов как есть — инструмент сам вернёт явную ошибку или
             # выполнится без комментария, и цикл не зациклится.
             self.on_system_msg(
@@ -435,7 +435,7 @@ class ResponseMixin:
         # и его превью-результат не должен считаться мусором подтверждения (§1.11).
         pending_before = self._pending_operation is not None
         self._append_assistant(assistant_msg)
-        if pending_before and answer_to_system.__name__ not in [tc.name for tc in assistant_msg.tool_calls]:
+        if pending_before and answer_system.__name__ not in [tc.name for tc in assistant_msg.tool_calls]:
             # Текст вместо вызова или чужой инструмент при висящем pending — мусор.
             self._mark_confirmation_junk(assistant_msg)
 
@@ -457,7 +457,7 @@ class ResponseMixin:
         name_by_id = {tc.id: tc.name for tc in assistant_msg.tool_calls}
         for tr in tool_results:
             tname = name_by_id.get(tr.tool_call_id, "")
-            if tname == answer_to_system.__name__:
+            if tname == answer_system.__name__:
                 if pending_before and tr.is_error and not tr.is_user_denied:
                     # Упавшая пара answer (вызов + результат) внутри активного подтверждения.
                     self._mark_confirmation_junk(assistant_msg)
@@ -467,7 +467,7 @@ class ResponseMixin:
                 self._mark_confirmation_junk(tr)
         self._append_tool_results(tool_results)
         if any(
-            tr.name == answer_to_system.__name__ and not tr.is_error and not tr.is_user_denied
+                tr.name == answer_system.__name__ and not tr.is_error and not tr.is_user_denied
             for tr in tool_results
         ):
             # Подтверждение принято — вычищаем наг и неверные попытки (§1.11).

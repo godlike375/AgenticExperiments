@@ -59,7 +59,7 @@ class UserMessage(Message):
     # Живут только в памяти и в API; в JSON-файлы попадают лишь при Config.SAVE_IMAGES=True.
     images: list[str] = field(default_factory=list)
     _cached_header: Optional[str] = field(default=None, init=False, repr=False)
-    # Метка нага guard'а answer_to_system: в API не уходит, переживает save/load (scrub
+    # Метка нага guard'а respond_to_system: в API не уходит, переживает save/load (scrub
     # находит наг по флагу — текст дублируется превью edit'а, матчинг дал бы ложь).
     _is_guard_nag: bool = field(default=False, init=False, repr=False)
 

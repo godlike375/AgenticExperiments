@@ -13,7 +13,7 @@ from tests.conftest import double_me
 
 
 class TestAgentTurnLoop(unittest.TestCase):
-    def test_chat_returns_plain_answer_to_system(self):
+    def test_chat_returns_plain_respond_to_system(self):
         agent = LLMAgent(system_prompt="sys")
         fake = AssistantMessage(content="hello back")
         with mock.patch("universal_agents.agent.LLMClient.call", return_value=(fake, None, None)):

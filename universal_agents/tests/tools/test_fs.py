@@ -9,7 +9,7 @@ from unittest import mock
 from universal_agents.config import Config
 from universal_agents.models import AssistantMessage, ToolCall
 from universal_agents.tools import fs as fs_module
-from universal_agents.tools.builtin import answer_to_system
+from universal_agents.tools.builtin import answer_system
 from universal_agents.tools.fs import line_range_edit, match_replace_edit, _make_diff_preview
 from universal_agents.tools.fs import read as _read_tool
 
@@ -340,7 +340,7 @@ class TestReadBatchMode(unittest.TestCase):
 
 
 class _PendingAgent:
-    """Минимальный агент для answer_to_system: отдаёт resolve ожидающей операции."""
+    """Минимальный агент для respond_to_system: отдаёт resolve ожидающей операции."""
     def __init__(self, resolve):
         self._resolve = resolve
     def pop_pending_operation(self):
@@ -368,7 +368,7 @@ class TestEditFileEndToEnd(unittest.TestCase):
         self.assertIn("+import sys", preview)
 
         agent = _PendingAgent(resolve)
-        result = answer_to_system(agent, "yes")
+        result = answer_system(agent, "yes")
         self.assertIn("Replaced L1-4", result)
         self.assertEqual(
             open(f, encoding="utf-8").read().rstrip("\n"),
@@ -382,7 +382,7 @@ class TestEditFileEndToEnd(unittest.TestCase):
         self.assertIn("+X", preview)
 
         agent = _PendingAgent(resolve)
-        result = answer_to_system(agent, "no")
+        result = answer_system(agent, "no")
         self.assertEqual(open(f, encoding="utf-8").read(), "a\nb\nc\n")
 
     def test_full_flow_answer_with_text_comment(self):
@@ -390,7 +390,7 @@ class TestEditFileEndToEnd(unittest.TestCase):
         preview, resolve, _ask = line_range_edit(f, "NEW\n", start_line=2, end_line=2, dry_run="true")
 
         agent = _PendingAgent(resolve)
-        result = answer_to_system(agent, "yes, please proceed")
+        result = answer_system(agent, "yes, please proceed")
         self.assertIn("Replaced L2-2", result)
         self.assertIn("NEW", open(f, encoding="utf-8").read())
 
@@ -400,7 +400,7 @@ class TestEditFileEndToEnd(unittest.TestCase):
         self.assertIn("+hello", preview)
 
         agent = _PendingAgent(resolve)
-        result = answer_to_system(agent, "yes")
+        result = answer_system(agent, "yes")
         self.assertIn("Replaced", result)
         self.assertEqual(open(f, encoding="utf-8").read(), "hello")
 

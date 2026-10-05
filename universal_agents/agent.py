@@ -21,7 +21,7 @@ from universal_agents.context_builder import prepare_messages_for_api, get_effec
 from universal_agents.file_states import FileStateTracker
 from universal_agents.tool_parsing import tc_name, tc_args
 from universal_agents.agent_mixins.response_mixin import SimReasoningGroup
-from universal_agents.tools.builtin import answer_to_system
+from universal_agents.tools.builtin import answer_system
 
 from universal_agents.agent_mixins import (
     ToolsMixin,
@@ -140,7 +140,7 @@ class TurnState:
         self.error_counts.clear()
 
     def can_retry_answer_guard(self) -> bool:
-        """Остались ли попытки guard'а «ответь через answer_to_system»; декрементирует счётчик."""
+        """Остались ли попытки guard'а «ответь через respond_to_system»; декрементирует счётчик."""
         if self.guard_retries_left > 0:
             self.guard_retries_left -= 1
             return True
@@ -257,7 +257,7 @@ class LLMAgent(
         self._pending_operation: Optional[dict] = None
         # Переиспользуемый наг guard'а (один объект на цикл — байт-стабильный KV-префикс).
         self._guard_nag_message: Optional[UserMessage] = None
-        # Мусор подтверждения до успешного answer_to_system (id→obj, identity-проверка).
+        # Мусор подтверждения до успешного respond_to_system (id→obj, identity-проверка).
         self._confirmation_junk: dict[int, object] = {}
 
         # Авто-сохранение (защита от сбоев): один файл на диалог с меткой времени
@@ -395,7 +395,7 @@ class LLMAgent(
             return  # уже в истории — не трогаем (иначе remove_at сменит «последность»)
         if nag is None:
             nag = UserMessage(
-                f"{ENVIRONMENT_PREFIX} {_GUARD_NAG_PREFIX} unless you answer to the system question using '{answer_to_system.__name__}' tool. "
+                f"{ENVIRONMENT_PREFIX} {_GUARD_NAG_PREFIX} unless you answer to the system question using '{answer_system.__name__}' tool. "
                 "Call it ritgh now!"
                 f"{ENVIRONMENT_PREFIX_END}"
             )
@@ -933,11 +933,11 @@ class LLMAgent(
             )
             return
         if kind == 'answer_guard':
-            # Текстовые ответы вместо вызова answer_to_system — лимит guard'а исчерпан, сдача хода.
+            # Текстовые ответы вместо вызова respond_to_system — лимит guard'а исчерпан, сдача хода.
             self.history.normalize(is_error_recovery=True)
             self.on_system_msg(
                 f"⚠️ [CONFIRMATION LOOP] Model kept replying in text instead of calling "
-                f"{answer_to_system.__name__} ({Config.ANSWER_GUARD_MAX_RETRIES} guard retries exhausted). "
+                f"{answer_system.__name__} ({Config.ANSWER_GUARD_MAX_RETRIES} guard retries exhausted). "
                 "Handing control to user."
             )
             return
@@ -1248,7 +1248,7 @@ class LLMAgent(
                     and not service_mode
                     and not message_obj.tool_calls
                     and not tool_error_occurred):
-                # Текст вместо вызова answer_to_system — стираем; наг НЕ удаляется и НЕ пересоздаётся
+                # Текст вместо вызова respond_to_system — стираем; наг НЕ удаляется и НЕ пересоздаётся
                 # (тот же объект — байт-стабильный KV-префикс). Лимит срабатываний →
                 # сдача хода пользователю (защита от бесконечного цикла).
                 self._erase_last_assistant()

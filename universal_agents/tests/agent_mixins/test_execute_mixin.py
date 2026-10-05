@@ -11,13 +11,13 @@ from universal_agents.config import Config
 from universal_agents.models import AssistantMessage, ToolCall, ToolResult, UserMessage
 from universal_agents.tool import tool, ToolOutput
 from universal_agents.tools.fs import line_range_edit
-from universal_agents.tools.builtin import answer_to_system
+from universal_agents.tools.builtin import answer_system
 
 from tests.conftest import make_agent as make_test_agent
 
 B64 = "aGVsbG8taW1hZ2U="
 
-answer_tool_name = answer_to_system.__name__
+answer_tool_name = answer_system.__name__
 line_range_edit_tool_name = line_range_edit.__name__
 
 
@@ -30,7 +30,7 @@ def nag_contents(msgs) -> list:
 
 
 class TestAnswerRequiredGuard(unittest.TestCase):
-    """Если после edit-инструмента модель ответила текстом без вызова 'answer_to_system',
+    """Если после edit-инструмента модель ответила текстом без вызова 'respond_to_system',
     цикл должен вколоть ошибку и продолжить, пока answer не будет вызван."""
 
     def setUp(self):
@@ -40,7 +40,7 @@ class TestAnswerRequiredGuard(unittest.TestCase):
     def make_agent(self):
         agent = make_test_agent(
             system_prompt="You edit files. Always call answer to confirm edits.",
-            external_plugins={line_range_edit_tool_name: line_range_edit, answer_tool_name: answer_to_system},
+            external_plugins={line_range_edit_tool_name: line_range_edit, answer_tool_name: answer_system},
         )
         agent.trust_dir(self._tmp)
         return agent
@@ -94,11 +94,11 @@ class TestAnswerRequiredGuard(unittest.TestCase):
                         "Модель должна была получить сообщение-ошибку о вызове answer")
         msgs = agent.history.get_all()
         self.assertEqual(nag_contents(msgs), [],
-                         "После успешного answer_to_system наг должен быть вычищен из истории")
+                         "После успешного respond_to_system наг должен быть вычищен из истории")
 
     def test_text_answer_without_answer_tool_then_text_again_no_message(self):
         """Если модель упорно не вызывает answer, цикл продолжается (не обрывается),
-        пока она наконец не вызовет answer — здесь answer_to_system('no'), правка отменяется."""
+        пока она наконец не вызовет answer — здесь respond_to_system('no'), правка отменяется."""
         path = os.path.join(self._tmp, "x.txt")
         with open(path, "w", encoding="utf-8") as f:
             f.write("a\n")
@@ -304,11 +304,11 @@ class TestAnswerRequiredGuard(unittest.TestCase):
         self.assertEqual(len(answers), 1)
 
     def test_answer_without_pending_returns_error(self):
-        """answer_to_system() без вопроса от системы — ошибка, а не молчаливое 'Recorded'.
+        """respond_to_system() без вопроса от системы — ошибка, а не молчаливое 'Recorded'.
         Модель должна видеть явный отказ и ответить текстом."""
         agent = LLMAgent(
             system_prompt="You are helpful.",
-            external_plugins={answer_tool_name: answer_to_system},
+            external_plugins={answer_tool_name: answer_system},
             disable_per_msg_summarization=True,
             autosave_enabled=False,
         )
@@ -332,13 +332,13 @@ class TestAnswerRequiredGuard(unittest.TestCase):
         self.assertTrue(all("Recorded" not in c for c in tool_results))
 
     def test_bare_answer_without_pending_does_not_loop(self):
-        """Голый answer_to_system() без pending-операции перегенерируется через
+        """Голый respond_to_system() без pending-операции перегенерируется через
         [NO COMMENT] не больше NO_COMMENT_RETRIES раз, затем принимается как есть:
         инструмент возвращает ошибку, и цикл завершается текстовым ответом — без
         бесконечного зацикливания."""
         agent = LLMAgent(
             system_prompt="You are helpful.",
-            external_plugins={answer_tool_name: answer_to_system},
+            external_plugins={answer_tool_name: answer_system},
             disable_per_msg_summarization=True,
             autosave_enabled=False,
         )
@@ -377,7 +377,7 @@ class TestAnswerRequiredGuard(unittest.TestCase):
         self.assertTrue(any("requires a pending" in m.content for m in answers))
 
     def test_answer_with_pending_still_works(self):
-        """answer_to_system() после вопроса системы (pending) работает как раньше."""
+        """respond_to_system() после вопроса системы (pending) работает как раньше."""
         path = os.path.join(self._tmp, "p.txt")
         with open(path, "w", encoding="utf-8") as f:
             f.write("a\n")
@@ -450,7 +450,7 @@ class TestAnswerRequiredGuard(unittest.TestCase):
 
     def test_wrong_attempt_scrubbed_after_success(self):
         """Неверная попытка (чужой инструмент при висящем pending) и наг вычищаются после
-        успешного answer_to_system: в истории остаётся только правильный путь подтверждения
+        успешного respond_to_system: в истории остаётся только правильный путь подтверждения
         (превью edit → answer → результат), а не чередование ошибок (§1.11)."""
         path = os.path.join(self._tmp, "w.txt")
         with open(path, "w", encoding="utf-8") as f:

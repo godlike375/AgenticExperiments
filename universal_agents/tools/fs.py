@@ -121,7 +121,7 @@ def _apply_edit_result(
     added: Optional[int] = None,
 ) -> tuple | str:
     """Финализация правки (общая для редакторов файлов): если dry_run — возвращает
-    (preview, resolve, ask) для подтверждения моделью через 'answer_to_system'; иначе пишет файл
+    (preview, resolve, ask) для подтверждения моделью через 'respond_to_system'; иначе пишет файл
     и возвращает отчёт '+ L<n>: ...' (или report_text, если задан)."""
     if new_content == content or new_content == content.rstrip('\n'):
         return f"Nothing changed: {nothing}"
@@ -146,9 +146,9 @@ def _apply_edit_result(
             return None
 
         # Инструмент сам говорит модели, как ему ответить. execute_mixin лишь
-        # склеит это с превью. Ответ инструмента всегда должен вызывать 'answer_to_system'.
+        # склеит это с превью. Ответ инструмента всегда должен вызывать 'respond_to_system'.
         ask = (
-            f"{ENVIRONMENT_PREFIX} ATTENTION: this needs assistant's (AI) confirmation. Call '{_builtin.answer_to_system.__name__}' "
+            f"{ENVIRONMENT_PREFIX} ATTENTION: this needs assistant's (AI) confirmation. Call '{_builtin.answer_system.__name__}' "
             f"with text='yes' to apply it or text='no' to cancel. You can't continue with common prose {ENVIRONMENT_PREFIX_END}"
         )
         return preview, resolve, ask

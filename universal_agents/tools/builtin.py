@@ -203,16 +203,15 @@ def make_plan(agent: AgentContext, plan: list) -> str:
 
 
 @tool(
-    description="Answers pending SYSTEM requests. Don't call it to reply to user! "
-                "Call it only if a previous tool showed an execution preview and is awaiting a decision/confirmation.",
-    short_description="answer to system",
-    text=("str", "Your reply to the system"),
+    description="Answers pending SYSTEM requests. Don't call it until system asks to call it directly!",
+    short_description="answers system prompts",
+    text=("str", "Your reply text to the system (not to user)"),
 )
-def answer_to_system(agent: AgentContext, text: str) -> str:
+def answer_system(agent: AgentContext, text: str) -> str:
     op = agent.pop_pending_operation()
     if not op:
         return err(
-            f": {answer_to_system.__name__}() requires a pending question from the system. "
+            f": {answer_system.__name__}() requires a pending question from the system. "
             "There is no pending system question right now — answer in plain text instead. "
         )
     result = op["resolve"](agent, text)

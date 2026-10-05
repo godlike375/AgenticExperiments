@@ -70,12 +70,12 @@ class HistoryMixin:
 
     def _mark_confirmation_junk(self, obj) -> None:
         """Помечает сообщение «мусором» подтверждения: неверные попытки до успешного
-        answer_to_system, вычищаются скрабом (§1.11). id→obj вместо WeakSet: Message
+        respond_to_system, вычищаются скрабом (§1.11). id→obj вместо WeakSet: Message
         неhashable, а сильная ссылка не даёт переиспользовать id — identity не сработает ложно."""
         self._confirmation_junk[id(obj)] = obj
 
     def _scrub_confirmation_trail(self) -> int:
-        """После успешного answer_to_system убирает наги guard'а и помеченный мусор —
+        """После успешного respond_to_system убирает наги guard'а и помеченный мусор —
         в контексте остаётся только правильный путь подтверждения. Возвращает число удалённых."""
         removed: set[int] = set()
         for i, m in enumerate(self.history.get_all()):
