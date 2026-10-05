@@ -207,11 +207,11 @@ def make_plan(agent: AgentContext, plan: list) -> str:
     short_description="answers system prompts",
     text=("str", "Your reply text to the system (not to user)"),
 )
-def answer_system(agent: AgentContext, text: str) -> str:
+def respond_to_system(agent: AgentContext, text: str) -> str:
     op = agent.pop_pending_operation()
     if not op:
         return err(
-            f": {answer_system.__name__}() requires a pending question from the system. "
+            f": {respond_to_system.__name__}() requires a pending question from the system. "
             "There is no pending system question right now — answer in plain text instead. "
         )
     result = op["resolve"](agent, text)

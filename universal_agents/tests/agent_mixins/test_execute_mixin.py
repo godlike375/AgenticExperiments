@@ -11,13 +11,13 @@ from universal_agents.config import Config
 from universal_agents.models import AssistantMessage, ToolCall, ToolResult, UserMessage
 from universal_agents.tool import tool, ToolOutput
 from universal_agents.tools.fs import line_range_edit
-from universal_agents.tools.builtin import answer_system
+from universal_agents.tools.builtin import respond_to_system
 
 from tests.conftest import make_agent as make_test_agent
 
 B64 = "aGVsbG8taW1hZ2U="
 
-answer_tool_name = answer_system.__name__
+answer_tool_name = respond_to_system.__name__
 line_range_edit_tool_name = line_range_edit.__name__
 
 
@@ -40,7 +40,7 @@ class TestAnswerRequiredGuard(unittest.TestCase):
     def make_agent(self):
         agent = make_test_agent(
             system_prompt="You edit files. Always call answer to confirm edits.",
-            external_plugins={line_range_edit_tool_name: line_range_edit, answer_tool_name: answer_system},
+            external_plugins={line_range_edit_tool_name: line_range_edit, answer_tool_name: respond_to_system},
         )
         agent.trust_dir(self._tmp)
         return agent
@@ -308,7 +308,7 @@ class TestAnswerRequiredGuard(unittest.TestCase):
         Модель должна видеть явный отказ и ответить текстом."""
         agent = LLMAgent(
             system_prompt="You are helpful.",
-            external_plugins={answer_tool_name: answer_system},
+            external_plugins={answer_tool_name: respond_to_system},
             disable_per_msg_summarization=True,
             autosave_enabled=False,
         )
@@ -338,7 +338,7 @@ class TestAnswerRequiredGuard(unittest.TestCase):
         бесконечного зацикливания."""
         agent = LLMAgent(
             system_prompt="You are helpful.",
-            external_plugins={answer_tool_name: answer_system},
+            external_plugins={answer_tool_name: respond_to_system},
             disable_per_msg_summarization=True,
             autosave_enabled=False,
         )

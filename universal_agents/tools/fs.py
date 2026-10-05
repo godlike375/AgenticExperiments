@@ -148,7 +148,7 @@ def _apply_edit_result(
         # Инструмент сам говорит модели, как ему ответить. execute_mixin лишь
         # склеит это с превью. Ответ инструмента всегда должен вызывать 'respond_to_system'.
         ask = (
-            f"{ENVIRONMENT_PREFIX} ATTENTION: this needs assistant's (AI) confirmation. Call '{_builtin.answer_system.__name__}' "
+            f"{ENVIRONMENT_PREFIX} ATTENTION: this needs assistant's (AI) confirmation. Call '{_builtin.respond_to_system.__name__}' "
             f"with text='yes' to apply it or text='no' to cancel. You can't continue with common prose {ENVIRONMENT_PREFIX_END}"
         )
         return preview, resolve, ask

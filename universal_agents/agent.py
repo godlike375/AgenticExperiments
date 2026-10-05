@@ -21,7 +21,7 @@ from universal_agents.context_builder import prepare_messages_for_api, get_effec
 from universal_agents.file_states import FileStateTracker
 from universal_agents.tool_parsing import tc_name, tc_args
 from universal_agents.agent_mixins.response_mixin import SimReasoningGroup
-from universal_agents.tools.builtin import answer_system
+from universal_agents.tools.builtin import respond_to_system
 
 from universal_agents.agent_mixins import (
     ToolsMixin,
@@ -395,7 +395,7 @@ class LLMAgent(
             return  # уже в истории — не трогаем (иначе remove_at сменит «последность»)
         if nag is None:
             nag = UserMessage(
-                f"{ENVIRONMENT_PREFIX} {_GUARD_NAG_PREFIX} unless you answer to the system question using '{answer_system.__name__}' tool. "
+                f"{ENVIRONMENT_PREFIX} {_GUARD_NAG_PREFIX} unless you answer to the system question using '{respond_to_system.__name__}' tool. "
                 "Call it ritgh now!"
                 f"{ENVIRONMENT_PREFIX_END}"
             )
@@ -937,7 +937,7 @@ class LLMAgent(
             self.history.normalize(is_error_recovery=True)
             self.on_system_msg(
                 f"⚠️ [CONFIRMATION LOOP] Model kept replying in text instead of calling "
-                f"{answer_system.__name__} ({Config.ANSWER_GUARD_MAX_RETRIES} guard retries exhausted). "
+                f"{respond_to_system.__name__} ({Config.ANSWER_GUARD_MAX_RETRIES} guard retries exhausted). "
                 "Handing control to user."
             )
             return
