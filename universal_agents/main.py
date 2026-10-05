@@ -12,12 +12,24 @@ from universal_agents.config import Config
 from universal_agents.tools.builtin import answer_to_system, load_tool
 from universal_agents.tools.fs import cwd, line_range_edit, match_replace_edit, read, search
 from universal_agents.tools.host_shell import run_bash_host, run_powershell
+from universal_agents.tools.pc_control import (
+    mouse_click, mouse_move, press_key, screenshot, scroll, type_text,
+)
 
-LOADABLE_TOOLS = [run_bash_host.__name__]
+# Инструменты, которые модель подключает сама через load_tool (allow-list: без
+# строки здесь load_tool вернёт «not allowed», и инструмент не покажется в промпте).
+LOADABLE_TOOLS = [
+    run_bash_host.__name__,
+    screenshot.__name__,
+    mouse_move.__name__,
+    mouse_click.__name__,
+    scroll.__name__,
+    press_key.__name__,
+]
 
 PRELOADED_TOOLS = (load_tool.__name__, read.__name__, line_range_edit.__name__,
                    match_replace_edit.__name__, cwd.__name__, search.__name__,
-                   run_powershell.__name__, answer_to_system.__name__)
+                   run_powershell.__name__, answer_to_system.__name__, type_text.__name__)
 
 
 def build_allowed_tools(loadable: Iterable[str], preloaded: Iterable[str]) -> list[str]:

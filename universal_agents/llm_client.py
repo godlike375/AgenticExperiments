@@ -143,16 +143,81 @@ class StreamAccumulator:
     """Собирает из чанков стрима финальный ответ (текст, reasoning, tool calls, usage); единая логика для диалога и служебных вызовов."""
 
     def __init__(self, prefill=None, on_stream_chunk=None,
-                 on_reasoning_start=None, on_reasoning_chunk=None):
+                 on_reasoning_start=None, on_reasoning_chunk=None,
+                 prefill_shown=0):
         self.content = ""
         self.reasoning = ""
         self.tool_calls_data: dict = {}
         self.usage = None
         self.reasoning_started = False
         self._prefill_pending = prefill
+        # Сколько ВЕДУЩИХ символов prefill пользователь уже видел в живом потоке:
+        # показываем только хвост prefill[prefill_shown:]. Для обычного вызова это 0
+        # (показываем prefill целиком). Для продолжения симуляции reasoning — длина
+        # уже показанного накопленного контента: перепечатывать мысли целиком нельзя,
+        # но новую приставку (NO COMMENT) пользователь должен увидеть.
+        self._prefill_shown = max(0, prefill_shown or 0)
+        # Начало ответа, по которому ещё нельзя понять, повторил ли шлюз prefill.
+        # Сырой llama.cpp может вернуть prefill в первых дельтах, а LM Studio — нет.
+        self._unresolved_head = ""
         self.on_stream_chunk = on_stream_chunk
         self.on_reasoning_start = on_reasoning_start
         self.on_reasoning_chunk = on_reasoning_chunk
+
+    def _emit_text(self, text: str) -> None:
+        """Отправляет текст в живой вывод, если есть подписчик и текст непустой."""
+        if text and self.on_stream_chunk:
+            self.on_stream_chunk(text)
+
+    def _prefill_tail(self, pending: str) -> str:
+        """Возвращает ещё не показанную часть prefill."""
+        start = min(max(0, self._prefill_shown), len(pending))
+        return pending[start:]
+
+    def _resolve_prefill_echo(self, text: str) -> str:
+        """Сопоставляет начало ответа с prefill и возвращает текст для накопления.
+
+        Шлюз может либо опустить prefill, либо повторить его в первых дельтах (так
+        делает сырой llama.cpp). Пока входящий текст совпадает с началом prefill,
+        ответ буферизуется: иначе повторённый тег был бы показан дважды, а ручная
+        печать prefill — продублирована. После решения prefill показывается ровно
+        один раз, а повтор возвращается без его копии.
+        """
+        pending = self._prefill_pending or ""
+        if not pending:
+            self._prefill_pending = None
+            self._unresolved_head = ""
+            return text
+        combined = self._unresolved_head + text
+        if combined.startswith(pending):
+            self._prefill_pending = None
+            self._unresolved_head = ""
+            self._emit_text(self._prefill_tail(pending))
+            return combined[len(pending):]
+        if pending.startswith(combined):
+            self._unresolved_head = combined
+            return ""
+        self._prefill_pending = None
+        self._unresolved_head = ""
+        self._emit_text(self._prefill_tail(pending))
+        return combined
+
+    def flush_prefill(self) -> None:
+        """Дописывает в живой вывод ещё не показанную часть prefill.
+
+        Нужно, когда модель ушла в tool call без текстовых чанков: prefill иначе
+        остался бы невидимым, хотя он часть сообщения модели. Если стрим оборвался
+        в середине возможного повтора, незавершённый буфер считается обычным
+        текстом, а не копией prefill.
+        """
+        if self._prefill_pending is None and not self._unresolved_head:
+            return
+        pending = self._prefill_pending or ""
+        head, self._unresolved_head = self._unresolved_head, ""
+        self._prefill_pending = None
+        # Незавершённый буфер уже учтён в self.content: здесь только показываем его.
+        self._emit_text(self._prefill_tail(pending))
+        self._emit_text(head)
 
     def process(self, chunk) -> str:
         """Применяет чанк (usage, reasoning, текст, tool calls); возвращает text-delta."""
@@ -179,14 +244,15 @@ class StreamAccumulator:
 
         added = ""
         if delta.content:
-            if self._prefill_pending:
-                if self.on_stream_chunk:
-                    self.on_stream_chunk(self._prefill_pending)
-                self._prefill_pending = None
+            if self._prefill_pending is not None:
+                visible = self._resolve_prefill_echo(delta.content)
+            else:
+                visible = delta.content
+            # Накопление всегда отражает сырой ответ шлюза: финальный prefill
+            # добавляется/сверяется отдельно и дубля в истории не даёт.
             added = delta.content
             self.content += added
-            if self.on_stream_chunk:
-                self.on_stream_chunk(added)
+            self._emit_text(visible)
 
         if delta.tool_calls:
             for tc in delta.tool_calls:
@@ -226,19 +292,21 @@ class StreamSession:
 
     def __init__(self, messages, temp=None, timeout=None, tools=None, prefill=None,
                  top_p=None, frequency_penalty=None, presence_penalty=None,
-                 max_tokens=None, params=None, reasoning_effort="none",
-                 on_stream_chunk=None, on_reasoning_start=None, on_reasoning_chunk=None):
+                 max_tokens=None, min_p=None, params=None, reasoning_effort="none",
+                 on_stream_chunk=None, on_reasoning_start=None, on_reasoning_chunk=None,
+                 prefill_shown=0):
         self.acc = StreamAccumulator(
             prefill=prefill,
             on_stream_chunk=on_stream_chunk,
             on_reasoning_start=on_reasoning_start,
             on_reasoning_chunk=on_reasoning_chunk,
+            prefill_shown=prefill_shown,
         )
         self._raw = LLMClient.stream(
             messages,
             temp=temp, timeout=timeout, tools=tools, prefill=prefill,
             top_p=top_p, frequency_penalty=frequency_penalty,
-            presence_penalty=presence_penalty, max_tokens=max_tokens,
+            presence_penalty=presence_penalty, max_tokens=max_tokens, min_p=min_p,
             params=params,
             reasoning_effort=reasoning_effort,
         )
@@ -336,6 +404,10 @@ class StreamSession:
             error = str(e)
         finally:
             _watch_done.set()
+        # Модель могла уйти в tool call без текстовых чанков — prefill всё равно
+        # часть сообщения, дописываем его в живой вывод.
+        if not error:
+            self.acc.flush_prefill()
         return error, stopped
 
 
@@ -382,7 +454,7 @@ class LLMClient:
         stop_markers: tuple = (),
     ):
         """Единая точка обращения к LLM. При заданных стриминговых колбэках и STREAM_ENABLED идёт через стриминг; иначе — обычный chat.completions вызов."""
-        temp, timeout, top_p, frequency_penalty, presence_penalty, max_tokens = LLMClient._resolve_params(
+        temp, timeout, top_p, frequency_penalty, presence_penalty, max_tokens, min_p = LLMClient._resolve_params(
             params, temp, timeout, top_p, frequency_penalty, presence_penalty, max_tokens
         )
 
@@ -397,7 +469,7 @@ class LLMClient:
             session = StreamSession(
                 messages_to_send, temp=temp, timeout=timeout, tools=tools,
                 prefill=prefill, top_p=top_p, frequency_penalty=frequency_penalty,
-                presence_penalty=presence_penalty, max_tokens=max_tokens,
+                presence_penalty=presence_penalty, max_tokens=max_tokens, min_p=min_p,
                 reasoning_effort=reasoning_effort,
                 on_stream_chunk=cb.get("on_stream_chunk"),
                 on_reasoning_start=cb.get("on_reasoning_start"),
@@ -433,7 +505,7 @@ class LLMClient:
             result = LLMClient._call_chat_completions(
                 messages_to_send, temp, timeout, tools, prefill, top_p,
                 frequency_penalty, presence_penalty, max_tokens,
-                reasoning_effort=reasoning_effort,
+                reasoning_effort=reasoning_effort, min_p=min_p,
             )
 
         if stop_markers and result and result[0] is not None and getattr(result[0], "content", None):
@@ -481,7 +553,8 @@ class LLMClient:
             pass
 
     @staticmethod
-    def _resolve_params(params, temp, timeout, top_p, frequency_penalty, presence_penalty, max_tokens):
+    def _resolve_params(params, temp, timeout, top_p, frequency_penalty, presence_penalty, max_tokens,
+                        min_p=None):
         if params is not None:
             p = params.resolved()
             temp = p.temp if temp is None else temp
@@ -490,13 +563,14 @@ class LLMClient:
             frequency_penalty = p.frequency_penalty if frequency_penalty is None else frequency_penalty
             presence_penalty = p.presence_penalty if presence_penalty is None else presence_penalty
             max_tokens = p.max_tokens if max_tokens is None else max_tokens
-        return temp, timeout, top_p, frequency_penalty, presence_penalty, max_tokens
+            min_p = p.min_p if min_p is None else min_p
+        return temp, timeout, top_p, frequency_penalty, presence_penalty, max_tokens, min_p
 
     @staticmethod
     def _chat_kwargs(temp, timeout, tools, top_p, frequency_penalty, presence_penalty, max_tokens,
-                     reasoning_effort="none") -> dict:
+                     reasoning_effort="none", min_p=None) -> dict:
         """Общий конструктор параметров chat.completions (для обычного вызова и стрима)."""
-        return {
+        kwargs = {
             "model": Config.MODEL_NAME,
             "temperature": temp if temp is not None else Config.TEMP,
             "max_tokens": max_tokens if max_tokens is not None else Config.MAX_OUTPUT_TOKENS,
@@ -508,17 +582,22 @@ class LLMClient:
             "presence_penalty": presence_penalty if presence_penalty is not None else Config.PRESENCE_PENALTY,
             "top_p": top_p if top_p is not None else Config.TOP_P,
         }
+        # min_p нет в сигнатуре OpenAI-клиента — уходит через extra_body (сырое поле
+        # JSON-тела); понимают llama.cpp и LM Studio. None — не отправлять вообще.
+        if min_p is not None:
+            kwargs["extra_body"] = {"min_p": min_p}
+        return kwargs
 
     @staticmethod
     def _call_chat_completions(messages_to_send, temp, timeout, tools, prefill, top_p,
                                frequency_penalty, presence_penalty, max_tokens,
-                               reasoning_effort="none"):
+                               reasoning_effort="none", min_p=None):
         try:
             response = LLMClient.get_client().chat.completions.create(
                 messages=messages_to_send,
                 **LLMClient._chat_kwargs(temp, timeout, tools, top_p,
                                          frequency_penalty, presence_penalty, max_tokens,
-                                         reasoning_effort=reasoning_effort),
+                                         reasoning_effort=reasoning_effort, min_p=min_p),
             )
             msg = response.choices[0].message
             msg.content = apply_prefill(msg.content, prefill)
@@ -545,13 +624,14 @@ class LLMClient:
         frequency_penalty: float = None,
         presence_penalty: float = None,
         max_tokens: int = None,
+        min_p: float = None,
         params: GenerationParams = None,
         reasoning_effort: str = "none",
     ):
         """Streaming version of call() - returns generator of chunks.
         """
-        temp, timeout, top_p, frequency_penalty, presence_penalty, max_tokens = LLMClient._resolve_params(
-            params, temp, timeout, top_p, frequency_penalty, presence_penalty, max_tokens
+        temp, timeout, top_p, frequency_penalty, presence_penalty, max_tokens, min_p = LLMClient._resolve_params(
+            params, temp, timeout, top_p, frequency_penalty, presence_penalty, max_tokens, min_p
         )
 
         messages_to_send = LLMClient._prepare_messages(messages, prefill)
@@ -561,7 +641,7 @@ class LLMClient:
                 messages=messages_to_send,
                 **LLMClient._chat_kwargs(temp, timeout, tools, top_p,
                                          frequency_penalty, presence_penalty, max_tokens,
-                                         reasoning_effort=reasoning_effort),
+                                         reasoning_effort=reasoning_effort, min_p=min_p),
                 stream=True,
                 stream_options={"include_usage": True},
             )

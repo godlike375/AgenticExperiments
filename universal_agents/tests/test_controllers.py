@@ -246,6 +246,30 @@ class TestAdvance(unittest.TestCase):
         self.assertFalse(v.complete)
         self.assertEqual(v.next_prefill, "<a>")
 
+    def test_expect_tokens_consumes_known_tokens_without_autoclose(self):
+        """expect_tokens: закрытие, вписанное за модель, двигает курсор — но не автозакрывает секцию.
+
+        Сценарий фазы симуляции reasoning: модель написала мусор вместо </a>, контроллер
+        стёр его и вернул </a> как next_prefill; мы дописываем тег сами и продолжаем."""
+        ctrl = XMLStructureController.from_sibling_schema("<a/><b/>")
+        v = ctrl.advance("<a>мысли</wrong>")
+        self.assertFalse(v.complete)
+        self.assertEqual(v.corrected_content, "<a>мысли")
+        self.assertEqual(v.next_prefill, "</a>")
+        ctrl.expect_tokens(v.next_prefill)
+        v2 = ctrl.advance("<b>ответ</b>")
+        self.assertTrue(v2.complete)
+        self.assertEqual(v2.corrected_content, "<b>ответ</b>")
+
+    def test_expect_tokens_ignores_mismatch(self):
+        """expect_tokens не чинит рассинхрон: неожиданный токен игнорируется без побочных эффектов."""
+        ctrl = XMLStructureController.from_sibling_schema("<a/><b/>")
+        # Курсор ждёт <a> — переданный </a> не сдвигает его, документ разбирает advance().
+        ctrl.expect_tokens("</a>")
+        v = ctrl.advance("<a>текст</a><b>ответ</b>")
+        self.assertTrue(v.complete)
+        self.assertEqual(v.corrected_content, "<a>текст</a><b>ответ</b>")
+
 
 # ── Интеграция с agent.chat() ─────────────────────────────────────
 

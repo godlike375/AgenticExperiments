@@ -8,7 +8,8 @@ def render_message(msg: Message, label: str = "Agent") -> str:
     if isinstance(msg, SystemMessage):
         return ""
     if isinstance(msg, UserMessage):
-        return f"👤 User: {msg.content}"
+        suffix = f" [+{len(msg.images)} image(s)]" if msg.images else ""
+        return f"👤 User: {msg.content}{suffix}"
     if isinstance(msg, AssistantMessage):
         parts = []
         if msg.reasoning_content and not msg.streamed:
@@ -21,5 +22,7 @@ def render_message(msg: Message, label: str = "Agent") -> str:
     if isinstance(msg, ToolResult):
         prefix = "❌" if msg.is_error else "✅"
         display = str(msg.content)
+        if msg.images:
+            display += f" [+{len(msg.images)} image(s)]"
         return f"{prefix} [{label} Result '{msg.name}']: {display}"
     return ""

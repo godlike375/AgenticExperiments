@@ -183,4 +183,4 @@ cython_debug/
 .cursorindexingignore
 
 default_history.json
-*/autosave
+*autosave/

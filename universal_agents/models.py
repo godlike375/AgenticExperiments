@@ -5,6 +5,24 @@ from abc import ABC, abstractmethod
 
 from universal_agents.config import Config
 
+
+def multimodal_content(text: str, images: list[str]) -> str | list[dict]:
+    """Content для API: строка, когда картинок нет; иначе список частей [text, image_url...].
+
+    Картинки — side-field сообщений (images), в content не хранятся: весь код фреймворка
+    работает со строковым content как раньше, а мультимодальность появляется только здесь.
+    Сериализация сообщения с картинками детерминирована и никогда не меняется после
+    создания — стабильный префикс KV-кэша (§1.2). Часть text присутствует всегда
+    (в т.ч. служебная шапка user-сообщения из context_builder)."""
+    if not images:
+        return text
+    parts: list[dict] = [{"type": "text", "text": text or ""}]
+    for b64 in images:
+        url = f"data:image/jpeg;base64,{b64}"
+        parts.append({"type": "image_url", "image_url": {"url": url}})
+    return parts
+
+
 @dataclass
 class Message(ABC):
     timestamp: datetime = field(init=False)
@@ -37,26 +55,32 @@ class SystemMessage(Message):
 class UserMessage(Message):
     content: str
     is_summary: bool = False
+    # Base64 JPEG-картинки, приложенные к сообщению (пусто у обычных сообщений).
+    # Живут только в памяти и в API; в JSON-файлы попадают лишь при Config.SAVE_IMAGES=True.
+    images: list[str] = field(default_factory=list)
     _cached_header: Optional[str] = field(default=None, init=False, repr=False)
     # Метка нага guard'а answer_to_system: в API не уходит, переживает save/load (scrub
     # находит наг по флагу — текст дублируется превью edit'а, матчинг дал бы ложь).
     _is_guard_nag: bool = field(default=False, init=False, repr=False)
 
     def reset_header_cache(self) -> None:
-        """Сбрасывает кэш заголовка user-сообщения: следующий prepare_messages_for_api
-        соберёт header заново (актуальный токен-бюджет и т.п.). Единственная точка
+        """Сбрасывает кэш заголовка user-сообщения: следующая prepare_messages_for_api
+        соберёт header заново (актуальный токен-бюджет и т.п.). Единая точка
         инвалидации кэша."""
         self._cached_header = None
 
     def to_api_dict(self) -> dict[str, Any]:
-        return {"role": "user", "content": self.content}
+        return {"role": "user", "content": multimodal_content(self.content, self.images)}
 
     def to_persist_dict(self) -> dict[str, Any]:
-        d = self.to_api_dict()
+        # content кладём строковым полем (не to_api_dict): файл истории — не запрос к LLM.
+        d: dict[str, Any] = {"role": "user", "content": self.content}
         d["_is_summary"] = self.is_summary
         d["_is_guard_nag"] = self._is_guard_nag
         d["_ts"] = self.timestamp.isoformat()
         d["_header"] = self._cached_header
+        if Config.SAVE_IMAGES and self.images:
+            d["_images"] = list(self.images)
         return d
 
 @dataclass
@@ -105,17 +129,27 @@ class ToolResult(Message):
     skip_summarize: bool = False
     # Подсказка сжатия: воспроизводимый результат (чтение/поиск) сворачивается агрессивнее, чем невосстановимый.
     recoverable_hint: bool = False
+    # Base64 JPEG-картинки результата (скриншот): в API уходят как image_url-части
+    # рядом с текстом (спайк фазы 0: LM Studio принимает image в role=tool).
+    # Поведенчески content остаётся строкой — парсинг ошибок/усечение/саммаризация не меняются.
+    images: list[str] = field(default_factory=list)
 
     def to_api_dict(self) -> dict[str, Any]:
         return {
             "role": "tool",
             "tool_call_id": self.tool_call_id,
             "name": self.name,
-            "content": self.content
+            "content": multimodal_content(self.content, self.images),
         }
 
     def to_persist_dict(self) -> dict[str, Any]:
-        d = self.to_api_dict()
+        # content кладём строковым полем (не to_api_dict): файл истории — не запрос к LLM.
+        d: dict[str, Any] = {
+            "role": "tool",
+            "tool_call_id": self.tool_call_id,
+            "name": self.name,
+            "content": self.content,
+        }
         # Служебные метаданные через underscore-префикс — не конфликтуют с API и не уходят в запрос к модели.
         d["_ts"] = self.timestamp.isoformat()
         d.update({
@@ -126,6 +160,8 @@ class ToolResult(Message):
             "_skip_summarize": self.skip_summarize,
             "_recoverable_hint": self.recoverable_hint,
         })
+        if Config.SAVE_IMAGES and self.images:
+            d["_images"] = list(self.images)
         return d
 
     @classmethod

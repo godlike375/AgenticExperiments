@@ -20,6 +20,7 @@ from universal_agents.sub_agent import SubAgent
 from universal_agents.context_builder import prepare_messages_for_api, get_effective_prefill
 from universal_agents.file_states import FileStateTracker
 from universal_agents.tool_parsing import tc_name, tc_args
+from universal_agents.agent_mixins.response_mixin import SimReasoningGroup
 from universal_agents.tools.builtin import answer_to_system
 
 from universal_agents.agent_mixins import (
@@ -47,6 +48,10 @@ _REPEAT_ANSWER_NAG = (
     f"Please do NOT repeat it again and answer differently."
     f"{ENVIRONMENT_PREFIX_END}"
 )
+
+# Устойчивый префикс нага answer-guard'а: тесты проверяют его присутствие в истории
+# и API-пейлоаде, поэтому он живёт в одном месте. Формулировка не меняется.
+_GUARD_NAG_PREFIX = "You can't continue"
 
 # Шаблон системной шапки, которую prepare_messages_for_api приклеивает к user-контенту.
 _SYSTEM_HEADER_RE = re.compile(r"^\{<SYSTEM>:.*?\}\n\n", re.DOTALL)
@@ -172,6 +177,7 @@ class LLMAgent(
         top_p: float = None,
         frequency_penalty: float = None,
         presence_penalty: float = None,
+        min_p: float = None,
         max_tokens: int = None,
         on_stream_chunk: Callable[[str], None] = None,
         on_stream_start: Callable[[], None] = None,
@@ -202,6 +208,7 @@ class LLMAgent(
             top_p=top_p,
             frequency_penalty=frequency_penalty,
             presence_penalty=presence_penalty,
+            min_p=min_p,
             max_tokens=max_tokens,
         )
         self.temp = self._gen_params.temp
@@ -388,7 +395,7 @@ class LLMAgent(
             return  # уже в истории — не трогаем (иначе remove_at сменит «последность»)
         if nag is None:
             nag = UserMessage(
-                f"{ENVIRONMENT_PREFIX} You can't continue unless you answer to the system question using '{answer_to_system.__name__}' tool. "
+                f"{ENVIRONMENT_PREFIX} {_GUARD_NAG_PREFIX} unless you answer to the system question using '{answer_to_system.__name__}' tool. "
                 "Call it ritgh now!"
                 f"{ENVIRONMENT_PREFIX_END}"
             )
@@ -528,8 +535,10 @@ class LLMAgent(
         stop_check: Callable[[], bool] = None,
         reasoning_effort: str = "none",
         stop_markers: tuple = (),
+        prefill_shown: int = 0,
+        defer_stream_end: bool = False,
     ) -> tuple:
-        """Единая точка транспорта LLM (§2): выбирает стриминг или обычный вызов; возвращает (message_obj, error, usage, stopped_at_marker). stop_markers — стоп-маркеры структурированного вывода, останавливают генерацию при появлении в контенте."""
+        """Единая точка транспорта LLM (§2): выбирает стриминг или обычный вызов; возвращает (message_obj, error, usage, stopped_at_marker). stop_markers — стоп-маркеры структурированного вывода, останавливают генерацию при появлении в контенте. prefill_shown — длина уже показанной части prefill (продолжение симуляции reasoning): печатается только хвост, блок вывода не переоткрывается. defer_stream_end — блок вывода закрывает вызывающий (цепочка фаз)."""
         tools = self.tools if self.tools else None
         if self.streaming_enabled and self.on_stream_chunk:
             return self._call_with_streaming(
@@ -542,6 +551,8 @@ class LLMAgent(
                 stop_check=stop_check,
                 reasoning_effort=reasoning_effort,
                 stop_markers=stop_markers,
+                prefill_shown=prefill_shown,
+                defer_stream_end=defer_stream_end,
             )
         message_obj, err, usage = LLMClient.call(
             messages,
@@ -794,8 +805,11 @@ class LLMAgent(
         boost: bool = True,
         reasoning_effort: str = None,
         stop_markers: tuple = (),
+        prefill_shown: int = 0,
+        defer_stream_end: bool = False,
+        gen_params: GenerationParams = None,
     ) -> tuple:
-        """До max_generation_attempts попыток генерации (§1), отбрасывая дубликаты и бустя температуру; логика повторов собрана здесь. is_duplicate_fn по умолчанию — self._detect_duplicate; boost=False оставляет детект без буста. Возвращает (message_obj, api_error_occurred, stopped_at_marker)."""
+        """До max_generation_attempts попыток генерации (§1), отбрасывая дубликаты и бустя температуру; логика повторов собрана здесь. is_duplicate_fn по умолчанию — self._detect_duplicate; boost=False оставляет детект без буста. gen_params — подмена self._gen_params для этого вызова (фаза размышлений симуляции reasoning). Возвращает (message_obj, api_error_occurred, stopped_at_marker)."""
         if is_duplicate_fn is None:
             is_duplicate_fn = self._detect_duplicate
         max_generation_attempts = (
@@ -812,9 +826,9 @@ class LLMAgent(
         effective_reasoning_effort = reasoning_effort if reasoning_effort is not None else self._reasoning_effort
 
         for attempt in range(max_generation_attempts):
-            attempt_params = self._gen_params
+            attempt_params = gen_params if gen_params is not None else self._gen_params
             if self._temp_override is not None:
-                attempt_params = self._gen_params.with_temp(self._temp_override)
+                attempt_params = attempt_params.with_temp(self._temp_override)
                 self._temp_override = None
 
             active_messages = [dict(msg) for msg in messages_to_send]
@@ -832,6 +846,8 @@ class LLMAgent(
                 stop_check=self._stop_check,
                 reasoning_effort=effective_reasoning_effort,
                 stop_markers=stop_markers,
+                prefill_shown=prefill_shown,
+                defer_stream_end=defer_stream_end,
             )
             dup_watch_target = None
 
@@ -1029,6 +1045,40 @@ class LLMAgent(
         # вывод (стоп-маркеры и цепочка фаз).
         state = TurnState(prefill=current_prefill, structured_output=structured_output)
 
+        # ── Симуляция reasoning (Config.SIMULATED_REASONING_*) ──
+        # При выключенном thinking ответ начинается с секции рассуждения
+        # <short_think>…</short_think>, а всё, что после её закрытия, — свободный
+        # ответ без тегов. Форс ОДНИМ вызовом: prefill открывает секцию, стоп-маркеров
+        # нет (модель закрывает секцию и дописывает ответ сама — резать написанное нечем),
+        # незакрытую секцию закрываем мы. Второй вызов бывает только когда ответ пуст и
+        # вызова инструмента нет: тогда к концу секции подставляется _NO_COMMENT_PREFILL
+        # (SimReasoningGroup, бюджет ограничен). Новая группа — после инструмента/ошибки.
+        # Отключается при включённом thinking (нативный reasoning), в служебных ходах
+        # (свои промпты/контроллеры), при чужом structured_output, пользовательском
+        # prefill и у субагентов (их ответы возвращаются родителю как есть).
+        sim_group = SimReasoningGroup(Config.SIMULATED_REASONING_REPAIRS) if (
+            Config.SIMULATED_REASONING_ENABLED
+            and turn_reasoning == "none"
+            and not service_mode
+            and structured_output is None
+            and not current_prefill
+            and not getattr(self, "_is_subagent", False)
+        ) else None
+        sim_open = False                          # True, пока ответ не собран
+        sim_stream_started = False                # блок вывода уже открыт (prefill показан)
+
+        def _close_sim_stream():
+            """Закрыть блок живого вывода, если его открыла секция рассуждения.
+
+            Блок держится на все вызова одного сообщения (в т.ч. продолжение пустого
+            ответа), поэтому on_stream_end вызывает тот, кто знает, что ответ собран —
+            агент, а не транспорт отдельного вызова.
+            """
+            nonlocal sim_stream_started
+            if sim_stream_started and self.on_stream_end:
+                self.on_stream_end()
+            sim_stream_started = False
+
         for _ in range(max_iter):
             # Пользователь ввёл новый текст, пока выполнялся инструмент (сценарий В):
             # завершаем ход на чистой границе истории, чтобы вставка сообщения и новая
@@ -1045,12 +1095,27 @@ class LLMAgent(
                     self._autosave()
                 return ""
             step_prefill = state.step_prefill()
-            # Стоп-маркеры для текущей фазы: явные из конфига, либо авто-деривация из
-            # opening-тега текущего prefill (для цепочки фаз маркеры обновляются сами).
-            effective_markers = (
-                structured_output.effective_markers(step_prefill)
-                if structured_output else ()
-            )
+            think_params = None
+            if sim_group is not None:
+                if not sim_open:
+                    # Новое assistant-сообщение (после инструмента/ошибки): всё с нуля,
+                    # бюджет продолжений пустого ответа восстановлен.
+                    sim_group.reset(Config.SIMULATED_REASONING_REPAIRS)
+                    sim_open = True
+                    sim_stream_started = False
+                step_prefill = sim_group.prefill()
+                if sim_group.is_think_phase():
+                    # Фаза размышлений: свои параметры сэмплирования, стоп-маркер
+                    # закрывает секцию — дальше фаза ответа с обычными параметрами.
+                    think_params = sim_group.think_params(self._gen_params)
+            # Стоп-маркеры: для активного структурированного вывода — его маркеры;
+            # у однофазной симуляции рассуждения их нет (модель дописывает ответ сама).
+            if structured_output is not None:
+                effective_markers = structured_output.effective_markers(step_prefill)
+            elif sim_group is not None and sim_group.is_think_phase():
+                effective_markers = (f"</{sim_group.tag}>",)
+            else:
+                effective_markers = ()
             all_messages = prepare_messages_for_api(
                 self, debug_hash_check=Config.DEBUG_PREFIX_HASH_CHECK
             )
@@ -1061,8 +1126,17 @@ class LLMAgent(
                     step_prefill=step_prefill,
                     reasoning_effort=turn_reasoning,
                     stop_markers=effective_markers,
+                    # Prefill печатается как часть сообщения модели: у продолжения
+                    # пустого ответа показывается только ещё не выведенный хвост
+                    # (приставка NO COMMENT), накопленные мысли не дублируются.
+                    prefill_shown=sim_group.prefill_shown() if sim_group else 0,
+                    # Блок вывода держится на все вызовы сообщения: закрывает его агент.
+                    defer_stream_end=sim_group is not None,
+                    # Фаза размышлений идёт со своими параметрами сэмплирования.
+                    gen_params=think_params,
                 )
             except GenerationInterrupted:
+                _close_sim_stream()
                 self.on_system_msg("⏹ Generation stopped by user — control returned to you.")
                 self.clear_stop()
                 if not service_mode:
@@ -1070,6 +1144,7 @@ class LLMAgent(
                 return ""
 
             if api_error_occurred or not message_obj:
+                _close_sim_stream()
                 self._recover('api_error' if api_error_occurred else 'duplicate_loop')
                 return ""
 
@@ -1097,6 +1172,44 @@ class LLMAgent(
                 state.structured_output_phase += 1
                 continue
 
+            # ── Симуляция reasoning: вызов проверяется ДО _process_llm_response ──
+            # Текст/tool_calls уходят в группу (накопление + prefill следующего вызова),
+            # она решает: нужен ли ещё вызов (фаза ответа, пустой ответ) или сообщение
+            # готово. Нарушение формата в историю не попадает и инструменты не исполняются.
+            sim_broken_scan = None
+            if sim_group is not None and message_obj is not None:
+                sim_group.absorb(message_obj, step_prefill)
+                sim_stream_started = True
+                if sim_group.is_think_phase():
+                    # Фаза размышлений завершена: закрываем секцию, показываем хвост
+                    # в живой вывод и переходим к фазе ответа с обычными параметрами.
+                    # Если модель уже дописала ответ (или вызвала инструмент) в этом же
+                    # вызове — принимаем как есть, лишний вызов не нужен.
+                    sim_group.close_section()
+                    appended = sim_group.take_appended()
+                    if appended and self.on_stream_chunk:
+                        self.on_stream_chunk(appended)
+                    if sim_group.tool_calls or sim_group.answer_text().strip():
+                        sim_msg = self._sim_message(sim_group)
+                    else:
+                        sim_group.advance_to_answer()
+                        continue
+                else:
+                    sim_msg = self._sim_verify_phase(sim_group)
+                    if sim_msg is None:
+                        continue
+                # Сломанный вызов ищем только по СВОБОДНОМУ ответу (хвосту после
+                # </short_think>), а не по всему контенту: теги секции рассуждения
+                # открывали бы гейт «есть XML-тег» на каждом ответе, а проза вида
+                # «read() выполнен» — ложные срабатывания. Пустой ответ = чисто:
+                # '' вместо None, иначе скан падал бы на весь контент с тегами.
+                sim_broken_scan = sim_group.answer_text()
+                message_obj = sim_msg
+                # Структура собрана: группа фаз закрыта, инструменты можно исполнять,
+                # а следующая генерация (после инструмента) начнёт структуру заново.
+                sim_open = False
+                _close_sim_stream()
+
             try:
                 result_text, tool_error_occurred, broken_call, rerun_prefill = self._process_llm_response(
                     message_obj,
@@ -1107,6 +1220,7 @@ class LLMAgent(
                         and (stopped_at_marker or structured_output.controller is not None)
                     ),
                     allow_tools=not service_mode,
+                    broken_scan_text=sim_broken_scan,
                 )
             except GenerationInterrupted:
                 # Пользователь прервал выполнение инструмента: убираем висящий вызов

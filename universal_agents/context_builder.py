@@ -5,7 +5,7 @@ from typing import Optional, TYPE_CHECKING
 
 from universal_agents.constants import ENVIRONMENT_PREFIX
 from universal_agents.config import Config
-from universal_agents.models import SystemMessage, UserMessage, AssistantMessage, ToolResult
+from universal_agents.models import SystemMessage, UserMessage, AssistantMessage, ToolResult, multimodal_content
 
 if TYPE_CHECKING:
     from universal_agents.context import AgentContext
@@ -41,6 +41,9 @@ def _check_prefix_hashes(agent: "AgentContext", pairs: list) -> None:
         old = prev.get(mid)
         if old is not None and old[2] != h:
             content = (api_dict.get("content") or "")
+            if not isinstance(content, str):
+                # Мультимодальный content (список частей с картинками): не тащим base64 в лог.
+                content = f"<{type(content).__name__}: {len(content)} parts>"
             changed.append((idx, api_dict.get("role"), content))
 
     # Аргументы запроса, влияющие на реальный префикс KV-кэша.
@@ -119,9 +122,11 @@ def prepare_messages_for_api(agent: AgentContext, normalize: bool = True,
                     )
                 header += _format_closing_header()
                 msg._cached_header = header
+            # Шапка (KV-заголовок) идёт внутрь ТЕКСТОВОЙ части; картинки — отдельными
+            # частями после неё. Без картинок content остаётся строкой как раньше.
             api_pairs.append((msg, {
                 "role": "user",
-                "content": msg._cached_header + msg.content,
+                "content": multimodal_content(msg._cached_header + msg.content, msg.images),
             }))
         elif isinstance(msg, AssistantMessage):
             api_pairs.append((msg, msg.to_api_dict()))

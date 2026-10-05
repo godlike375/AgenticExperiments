@@ -4,6 +4,8 @@ from universal_agents.models import UserMessage, AssistantMessage, ToolCall, Too
 from universal_agents.rendering import render_message
 from universal_agents.constants import ENVIRONMENT_PREFIX
 
+B64 = "aGVsbG8taW1hZ2U="
+
 
 class TestRendering(unittest.TestCase):
     def test_user_message(self):
@@ -35,6 +37,16 @@ class TestRendering(unittest.TestCase):
     def test_system_message_empty(self):
         from universal_agents.models import SystemMessage
         self.assertEqual(render_message(SystemMessage("sys")), "")
+
+
+class TestRenderingImages(unittest.TestCase):
+    def test_render_shows_image_marker(self):
+        tr = ToolResult("t1", "screenshot", "ок", images=[B64, B64])
+        self.assertIn("[+2 image(s)]", render_message(tr))
+        um = UserMessage("текст", images=[B64])
+        self.assertIn("[+1 image(s)]", render_message(um))
+        um_plain = UserMessage("текст")
+        self.assertNotIn("image", render_message(um_plain))
 
 
 if __name__ == "__main__":

@@ -92,15 +92,22 @@ class XMLStructureController:
     Текст между тегами (контент элементов) на сравнение не влияет — он принимается
     как есть. При нескольких несоответствиях в одной фазе стирается всё начиная с
     первого ошибочного токена (модель перегенерирует хвост с правильного места).
+
+    Две формы схемы: from_schema_text — один корень с вложенными детьми;
+    from_sibling_schema — сестринские корневые секции подряд, без обёртки (тогда
+    root указывает на первую секцию, а токены строятся по всем siblings).
     """
 
-    # Корень схемы.
-    root: XNode
+    # Корень схемы (None у сестринской схемы — см. siblings).
+    root: Optional[XNode] = None
     # Произвольный текст сразу после открывающего тега корня (вставляется в prefill,
     # чтобы направить модель: например "<content_structure>\nL" — сигнал начать
     # содержимое с номеров строк). Этот текст пишет модель как часть фазы, на
     # сравнение с токенами он не влияет.
     prefill_suffix: str = ""
+    # Схема из нескольких сестринских корневых секций ('<a/><b/>' → <a>…</a> сразу
+    # затем <b>…</b>, без обёртки-корня). Задаётся только через from_sibling_schema.
+    siblings: tuple[XNode, ...] = ()
     # Плоская последовательность ожидаемых токенов в порядке DFS.
     _tokens: tuple[str, ...] = field(default=(), init=False, repr=False)
     # Текущая позиция в последовательности.
@@ -109,9 +116,15 @@ class XMLStructureController:
     _document: str = field(default="", init=False, repr=False)
 
     def __post_init__(self) -> None:
-        self._tokens = self._flatten(self.root)
-        if not self._tokens:
+        nodes = self.siblings if self.siblings else ((self.root,) if self.root is not None else ())
+        tokens: list[str] = []
+        for node in nodes:
+            tokens.extend(XMLStructureController._flatten(node))
+        if not tokens:
             raise ValueError("XML structure must contain at least the root tag")
+        self._tokens = tuple(tokens)
+        if self.root is None:
+            self.root = nodes[0]
 
     @staticmethod
     def _flatten(node: XNode) -> tuple[str, ...]:
@@ -141,6 +154,25 @@ class XMLStructureController:
         """
         root = cls._parse_tree(text)
         return cls(root=root, prefill_suffix=prefill_suffix)
+
+    @classmethod
+    def from_sibling_schema(
+        cls, text: str, prefill_suffix: str = ""
+    ) -> "XMLStructureController":
+        """Собирает контроллер из схемы с СЕСТРИНСКИМИ корневыми секциями (без обёртки).
+
+        Пример:
+            <alpha/><beta/>
+        Означает: сначала заполняется <alpha>…</alpha>, затем <beta>…</beta> — токены идут
+        подряд, response начинается с первого тега. Отличие от from_schema_text (там всё
+        вложено в один корень, и <root> попадает в начало ответа). Симуляция reasoning
+        (§ SIMULATED_REASONING_*) этот API больше не использует: там одна секция и один
+        вызов LLM без стоп-маркеров.
+        """
+        roots = cls._parse_roots(text)
+        if len(roots) == 1:
+            return cls(root=roots[0], prefill_suffix=prefill_suffix)
+        return cls(siblings=tuple(roots), prefill_suffix=prefill_suffix)
 
     @staticmethod
     def _tokenize(text: str) -> list[tuple[str, str]]:
@@ -174,10 +206,11 @@ class XMLStructureController:
         return tokens
 
     @classmethod
-    def _parse_tree(cls, text: str) -> XNode:
+    def _parse_roots(cls, text: str) -> list[XNode]:
+        """Разбирает текстовую схему в список корневых узлов (обычно ровно один)."""
         tokens = cls._tokenize(text)
         stack: list[tuple[str, list[XNode]]] = []
-        root: Optional[XNode] = None
+        roots: list[XNode] = []
         for kind, name in tokens:
             if kind == "open":
                 stack.append((name, []))
@@ -191,19 +224,27 @@ class XMLStructureController:
                 if stack:
                     stack[-1][1].append(node)
                 else:
-                    if root is not None:
-                        raise ValueError("Multiple root tags are not supported")
-                    root = node
+                    roots.append(node)
         if stack:
             raise ValueError(f"Unclosed tag(s): {[t for t, _ in stack]}")
-        if root is None:
+        if not roots:
             raise ValueError("Empty schema")
-        return root
+        return roots
+
+    @classmethod
+    def _parse_tree(cls, text: str) -> XNode:
+        """Разбирает схему с ровно одним корнем (несколько корней — ошибка)."""
+        roots = cls._parse_roots(text)
+        if len(roots) > 1:
+            raise ValueError("Multiple root tags are not supported")
+        return roots[0]
 
     # ── интерфейс PhaseController ─────────────────────────────────────────
 
     def initial_prefill(self) -> Optional[str]:
-        return f"<{self.root.tag}>{self.prefill_suffix}"
+        # Первый opening-токен схемы: у вложенной схемы это <root>, у сестринской —
+        # тег первой секции (обёртки нет, ответ начинается с него).
+        return f"{self._tokens[0]}{self.prefill_suffix}"
 
     def markers(self) -> tuple[str, ...]:
         return tuple(f"</{name}>" for name in self._tag_names())
@@ -314,3 +355,20 @@ class XMLStructureController:
 
     def document(self) -> str:
         return self._document
+
+    def expect_tokens(self, text: str) -> None:
+        """Сдвигает курсор по тегам, которые вписаны за модель (вызывающим).
+
+        Текст не проверяется и не авто-закрывается: его писали мы, а модель его ещё не
+        «произносила», поэтому advance() для него не годится (он трактует отсутствие
+        продолжения как досрочное завершение). Используется фазовой симуляцией
+        reasoning: закрывающий тег секции дописывается, когда модель написала вместо
+        него мусор. При рассинхроне курсор не двигается — разбираться будет advance()."""
+        for kind, name in self._tokenize(text):
+            if self._cursor >= len(self._tokens):
+                break
+            expected_kind, expected_name = XMLStructureController._parse_tok(self._tokens[self._cursor])
+            if kind != expected_kind or name != expected_name:
+                break
+            self._cursor += 1
+        self._document += text

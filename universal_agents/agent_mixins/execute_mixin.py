@@ -12,6 +12,7 @@ from universal_agents.compressors import auto_compress_tool_result
 from universal_agents.models import ToolCall, ToolResult
 from universal_agents.task_tracker import DONE_TOOL, validate_task_mark_call
 from universal_agents.tool_parsing import parse_tool_args, is_error_content
+from universal_agents.tool import ToolOutput
 from universal_agents.subprocess_utils import set_interrupt_event, clear_interrupt_event
 from universal_agents.exceptions import GenerationInterrupted
 from universal_agents.tools.fs import read as _read_tool, search as _search_tool
@@ -170,6 +171,12 @@ class ExecuteMixin:
                         full_result = handler(self, **args_dict)
                     else:
                         full_result = handler(**args_dict)
+                    # Инструмент вернул ToolOutput: текст идёт как обычно (усечение/
+                    # ошибки/саммаризация), картинки — в side-field ToolResult.images.
+                    result_images: list[str] = []
+                    if isinstance(full_result, ToolOutput):
+                        result_images = full_result.images
+                        full_result = full_result.text
                     content = str(full_result) if full_result is not None else "Tool executed successfully"
                     if is_error_content(content):
                         tr = ToolResult(tc.id, name, content, is_error=True)
@@ -197,6 +204,11 @@ class ExecuteMixin:
                         # файл — сырые строки, которые должны остаться в контексте как есть.
                         if name == _read_tool.__name__:
                             tr.skip_summarize = True
+
+                    if result_images:
+                        tr.images = list(result_images)
+                        # Картинки — короткая подпись (скриншот), суммаризация не нужна.
+                        tr.skip_summarize = True
 
                     if not getattr(tr, 'skip_summarize', False):
                         auto_compress_tool_result(self, tr)

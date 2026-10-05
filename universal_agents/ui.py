@@ -9,6 +9,8 @@ from typing import Optional
 from universal_agents.models import Message, SystemMessage, UserMessage, AssistantMessage, ToolResult
 from universal_agents.rendering import render_message
 from universal_agents.agent import LLMAgent
+from universal_agents.agent_mixins.response_mixin import sim_schema_text
+from universal_agents.config import Config
 from universal_agents.exceptions import GenerationInterrupted
 from universal_agents.project_root import set_project_root, get_project_root_override
 
@@ -310,7 +312,11 @@ class CLI:
     def cmd_think_off(self, parts: list[str]):
         self.agent._thinking_enabled = False
         self.agent._thinking_once = False
-        ConsoleUI.system_msg("Thinking mode turned OFF. LLM will use reasoning_effort='none'.")
+        note = ""
+        if Config.SIMULATED_REASONING_ENABLED:
+            note = (f" Every answer starts with a '{sim_schema_text()}' section "
+                    "followed by free text (simulated reasoning).")
+        ConsoleUI.system_msg(f"Thinking mode turned OFF. LLM will use reasoning_effort='none'.{note}")
 
     def cmd_think(self, parts: list[str]):
         self.agent._thinking_once = True

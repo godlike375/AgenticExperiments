@@ -56,27 +56,55 @@ def _has_tag(content: str, tag: str | None = None) -> bool:
     ) is not None
 
 
-def detect_broken_call(content: str, tool_names: set[str]) -> bool:
+def _is_standalone_call(content: str, tool_names) -> bool:
+    """True, если весь ответ — один вызов известного инструмента: 'read({"path": "x"})'.
+
+    Для скана, где гейт «есть XML-тег» снят (тело ответа при симуляции reasoning),
+    упоминание инструмента в прозе — норма, а не сломанный вызов: «read() выполнен:
+    показана структура…», «Вызываю read() для просмотра…». Ловим только заведомо
+    сломанный синтаксис — когда вызов занимает ВЕСЬ ответ."""
+    stripped = content.strip()
+    if not stripped:
+        return False
+    return any(
+        re.fullmatch(rf'[*\-\u2022>#"\'\]<\[\(]*\s*{re.escape(name)}\s*[\(\{{].*[\)\}}]\s*[.!;:]?',
+                     stripped, re.DOTALL)
+        for name in tool_names
+    )
+
+
+def detect_broken_call(content: str, tool_names: set[str], require_tag: bool = True) -> bool:
     """True, если ответ похож на нераспарсенный вызов инструмента.
     Базовый гейт — наличие валидного XML-тега; далее: известные теги
     (<tool_call>/<tool>/<function>/<call>) либо тег + вызов известного
-    инструмента (напр. read({...})). Без тега не детектится."""
+    инструмента (напр. read({...})). Без тега не детектится.
+    require_tag=False снимает базовый гейт (он уже выполнен «извне» — сканируется
+    тело ответа, а не весь документ): остаются только теги ВНУТРИ этого тела и
+    «голый» вызов на весь ответ. Без этого проза вида «read() выполнен» давала бы
+    ложные срабатывания на каждом нормальном ответе."""
     if not content or not content.strip():
         return False
 
     # Базовый гейт: хотя бы один корректный открывающий тег.
-    if not _has_tag(content):
+    if require_tag and not _has_tag(content):
         return False
 
     # 1) известные имена тегов (полное совпадение имени)
     if any(_has_tag(content, t) for t in _STRONG_TAGS):
         return True
 
-    # 2) тег уже есть (гейт пройден) + признак вызова известного инструмента
-    return any(
-        re.search(rf'\b{re.escape(name)}\s*[\({{]', content)
-        for name in tool_names
-    )
+    if require_tag:
+        # 2) тег уже есть (гейт пройден) + признак вызова известного инструмента
+        return any(
+            re.search(rf'\b{re.escape(name)}\s*[\({{]', content)
+            for name in tool_names
+        )
+
+    # 3) гейт снят извне (сканируется свободный ответ при симуляции reasoning):
+    #    теги ВНУТРИ него уже проверены выше, а упоминание инструмента в прозе — норма,
+    #    а не сломанный вызов («read() выполнен», «Вызываю read() для…»). Ловим только
+    #    заведомо сломанный синтаксис — когда вызов занимает ВЕСЬ ответ.
+    return _is_standalone_call(content, tool_names)
 
 
 def build_tool_calls(tool_calls_data: dict) -> list:

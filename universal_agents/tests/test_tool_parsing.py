@@ -55,6 +55,36 @@ class TestDetectBrokenCall(unittest.TestCase):
         self.assertFalse(detect_broken_call("<custom_tag> nothing here </custom_tag>", {"read"}))
 
 
+class TestDetectBrokenCallWithoutGate(unittest.TestCase):
+    """require_tag=False: гейт снят, сканируется свободный ответ (тело симуляции reasoning)."""
+
+    NAMES = {"read", "write", "run_powershell"}
+
+    def test_prose_mention_is_not_broken_call(self):
+        # Регрессия: гейт выполнялся по контенту вместе с тегом секции, и любая проза
+        # про инструмент давала ложный BROKEN CALL.
+        for text in (
+            "read() выполнен: показана структура каталога.",
+            "Вызываю read() для просмотра содержимого текущей директории:",
+            "Сделаю read(), потом напишу итог.",
+            "Инструменты: read(path), write(path).",
+            "The function cwd() returns the dir.",
+        ):
+            with self.subTest(text=text):
+                self.assertFalse(detect_broken_call(text, self.NAMES, require_tag=False))
+
+    def test_standalone_call_is_broken_call(self):
+        # Единственный случай, когда голый вызов ловится без гейта: он занимает ВЕСЬ ответ.
+        self.assertTrue(detect_broken_call('read({"path": "a.txt"})', self.NAMES, require_tag=False))
+        self.assertTrue(detect_broken_call("read({}).", self.NAMES, require_tag=False))
+
+    def test_strong_tag_inside_is_broken_call(self):
+        self.assertTrue(detect_broken_call("<tool>read</tool>", self.NAMES, require_tag=False))
+
+    def test_empty_content_is_clean(self):
+        self.assertFalse(detect_broken_call("", self.NAMES, require_tag=False))
+
+
 class TestParseArgs(unittest.TestCase):
     def test_parse_valid(self):
         self.assertEqual(parse_tool_args('{"a": 1}'), {"a": 1})

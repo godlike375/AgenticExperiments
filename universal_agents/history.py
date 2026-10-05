@@ -184,6 +184,10 @@ class ChatHistory:
                 and isinstance(msg, (UserMessage, AssistantMessage))
             ):
                 last.content = (last.content or "") + "\n\n" + (msg.content or "")
+                # Картинки склеиваемого user-сообщения не должны теряться молча
+                # (content склеивается, images — side-field, их надо переносить руками).
+                if isinstance(msg, UserMessage) and isinstance(last, UserMessage) and msg.images:
+                    last.images = last.images + msg.images
                 if isinstance(last, UserMessage):
                     last.reset_header_cache()
                 if isinstance(msg, AssistantMessage) and msg.has_tool_calls():
@@ -282,6 +286,7 @@ class ChatHistory:
                     d["content"],
                     is_summary=d.get("_is_summary", False),
                 )
+                um.images = list(d.get("_images") or [])
                 um._is_guard_nag = d.get("_is_guard_nag", False)
                 um._cached_header = data_list[i].get("_header")
                 self._messages.append(um)
@@ -309,6 +314,7 @@ class ChatHistory:
                     execution_time_ms=d.get("_execution_time_ms"),
                     skip_summarize=d.get("_skip_summarize", False),
                     recoverable_hint=d.get("_recoverable_hint", False),
+                    images=list(d.get("_images") or []),
                 ))
             else:
                 raise ValueError(f"Unknown role: {role}")

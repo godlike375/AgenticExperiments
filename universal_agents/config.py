@@ -8,11 +8,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Optional
 
 
 @dataclass
 class Config:
-    API_URL: str = "http://192.168.50.196:1234/v1"
+    API_URL: str = "http://localhost:1234/v1"
     MODEL_NAME: str = ""
     AFTER_SYSTEM_PROMPT: int = 1  # Index after which dialog starts (0 = system)
     BOOST_TEMP: float = 1.4
@@ -39,10 +40,13 @@ class Config:
 
     # Параметры генерации
     MAX_CONTEXT_TOKENS: int = 66000
-    TEMP: float = 0.4
-    TOP_P: float = 0.935
-    FREQUENCY_PENALTY: float = 0.02
-    PRESENCE_PENALTY: float = 0.02
+    TEMP: float = 0.15
+    TOP_P: float = 0.93
+    FREQUENCY_PENALTY: float = 0.0
+    PRESENCE_PENALTY: float = 0.0
+    # min_p (минимальная вероятность токена относительно топ-1): None — не отправлять
+    # вообще (сервер решит сам). Поддерживается llama.cpp и LM Studio.
+    MIN_P: Optional[float] = 0.055
     MAX_OUTPUT_TOKENS: int = min(32000, int(MAX_CONTEXT_TOKENS / 1.5))
     TIMEOUT: int = 1800
     MAX_ITER: int = 250
@@ -55,6 +59,36 @@ class Config:
     # сервер вставляет в начало промпта ~40 подпорных токенов, префикс расходится от позиции 0
     # (одноразовый пересчёт при каждом /think-тоггле, это ожидаемо).
     KEEP_REASONING_CONTENT_IN_HISTORY: bool = True
+
+    # ------------------------------------------------------------------
+    # Симуляция reasoning при выключенном thinking (/think_off — режим по умолчанию).
+    # Пока reasoning_effort == 'none', каждый ответ начинается с секции рассуждения
+    #   <short_think>…</short_think>
+    # а всё, что после её закрытия, — свободный ответ БЕЗ тегов. Форс минимален:
+    # prefill открывает секцию; модель сама закрывает секцию и пишет ответ в том же
+    # вызове — резать хвост нечем и незачем (кроме двухфазного режима ниже, где
+    # стоп-маркер </short_think> заканчивает фазу размышлений). Незакрытая секция
+    # дописывается автоматически по завершении генерации. Второй тег не нужен: пустой
+    # ответ не нарушение формата (модель может сразу уйти в инструмент).
+    # ------------------------------------------------------------------
+    SIMULATED_REASONING_ENABLED: bool = True
+    # Тегированные секции ответа по порядку: ответ начинается с первой, а после её
+    # закрытия идёт свободный текст. Меняешь здесь — меняется формат.
+    SIMULATED_REASONING_TAGS: tuple[str, ...] = ("least_think",)
+    # Продолжений пустого ответа на одну генерацию (одна генерация = между вызовами
+    # инструментов): после </short_think> подставляется _NO_COMMENT_PREFILL.
+    # По исчерпании ответ принимается как есть (громкий system msg), чтобы цикл не зациклился.
+    SIMULATED_REASONING_REPAIRS: int = 2
+    # Отдельные настройки сэмплирования для секции размышлений (<short_think>):
+    # модель «думает» с ними, а отвечает — с обычными. None = наследовать обычную
+    # настройку. Если задана хотя бы одна — секция и ответ генерируются ДВУМЯ
+    # вызовами (стоп-маркер </short_think> заканчивает первый); иначе — одним,
+    # как раньше. Пустой ответ без tool call по-прежнему чинится NO COMMENT.
+    SIMULATED_REASONING_TEMP: Optional[float] = 0.58
+    SIMULATED_REASONING_TOP_P: Optional[float] = 0.92
+    SIMULATED_REASONING_MIN_P: Optional[float] = 0.04
+    SIMULATED_REASONING_FREQUENCY_PENALTY: Optional[float] = 0.6
+    SIMULATED_REASONING_PRESENCE_PENALTY: Optional[float] = 0.2
 
     # Отладка KV-кэша: хэшировать каждое сообщение префикса и сравнивать с
     # предыдущей итерацией подготовки.
@@ -130,6 +164,11 @@ class Config:
     AUTOSAVE_DIR: str = "autosave"
     AUTOSAVE_KEEP: int = 25
 
+    # Картинки (base64) в JSON-файлах истории (/save, autosave). В памяти (ChatHistory)
+    # картинки есть всегда; автосейв перезаписывается после каждого инструмента, и без
+    # False файлы раздуваются на сотни МБ. На KV-кэш не влияет: загрузка истории = новая сессия.
+    SAVE_IMAGES: bool = False
+
     # Служебный вызов LLM (service_llm_call) = один ход через общий движок:
     # промпт добавляется в историю как UserMessage, генерируется одно ассистентское
     # сообщение, инструменты не исполняются, авто-сейв/компакция отключены.
@@ -154,6 +193,21 @@ class Config:
     RECALL_READ_MAX_CHARS: int = 4000
     RECALL_ENTRY_MAX_CHARS: int = 1500
     RECALL_MAX_ARG_CHARS: int = 500
+
+    # ------------------------------------------------------------------
+    # PC-control инструменты (tools/pc_control.py): скриншот, мышь, клавиатура
+    # ------------------------------------------------------------------
+    # Макс. ширина скриншота: изображение уменьшается до неё; координаты сетки —
+    # пиксели ИЗОБРАЖЕНИЯ, mouse-инструменты конвертируют image→screen по
+    # screen_state.last_scale (тем же фингулем считает take_screenshot).
+    SCREENSHOT_MAX_WIDTH: int = 960
+    SCREENSHOT_QUALITY: int = 60
+    # Дубль последнего скриншота для отладки (как debug_latest.jpg в screen_agent); "" — не сохранять.
+    SCREENSHOT_DEBUG_PATH: str = ""
+    # Длительность анимации move (сек); 0 — мгновенный перенос.
+    MOUSE_MOVE_DURATION: float = 0.25
+    # Пауза после каждого pyautogui-действия (сек).
+    PYAUTOGUI_PAUSE: float = 0.1
 
 
 # Модульные алиасы часто используемых констант (атрибуты Config как имена модуля)

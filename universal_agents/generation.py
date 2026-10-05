@@ -16,6 +16,7 @@ class GenerationParams:
     temp: Optional[float] = None
     timeout: Optional[int] = None
     top_p: Optional[float] = None
+    min_p: Optional[float] = None
     frequency_penalty: Optional[float] = None
     presence_penalty: Optional[float] = None
     max_tokens: Optional[int] = None
@@ -31,6 +32,7 @@ class GenerationParams:
             temp=Config.TEMP if self.temp is None else self.temp,
             timeout=Config.TIMEOUT if self.timeout is None else self.timeout,
             top_p=Config.TOP_P if self.top_p is None else self.top_p,
+            min_p=Config.MIN_P if self.min_p is None else self.min_p,
             frequency_penalty=Config.FREQUENCY_PENALTY if self.frequency_penalty is None else self.frequency_penalty,
             presence_penalty=Config.PRESENCE_PENALTY if self.presence_penalty is None else self.presence_penalty,
             max_tokens=Config.MAX_OUTPUT_TOKENS if self.max_tokens is None else self.max_tokens,

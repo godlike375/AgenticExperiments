@@ -19,6 +19,42 @@ class StreamingMixin:
         """True, если накопленный текст перестал совпадать с началом прежнего ответа."""
         return bool(watch_prefix) and not watch_prefix.startswith((prefill or "") + full_content)
 
+    @staticmethod
+    def _watch_match_len(watch_prefix: str, prefill: str, full_content: str) -> int:
+        """Длина общего префикса ответа и watch-таргета."""
+        text = (prefill or "") + (full_content or "")
+        target = watch_prefix or ""
+        matched = 0
+        for left, right in zip(text, target):
+            if left != right:
+                break
+            matched += 1
+        return matched
+
+    def _should_continue_after_divergence(
+        self,
+        watch_prefix: str,
+        prefill: str,
+        content: str,
+        stopped: bool,
+        stop_check: Callable[[], bool] = None,
+    ) -> bool:
+        """Нужна ли спокойная достройка после расхождения.
+
+        Достройка осмысленна, только если стрим оборван на расхождении ПОСЛЕ
+        частичного совпадения с таргетом (модель шла по дублю и свернула —
+        спасаем написанное и дописываем хвост спокойно). Если ответ разошёлся
+        с первого символа — это свежий ответ целиком: достройка выродилась бы
+        в холодный рестарт (лишний вызов, сброс KV-кэша, риск дубля X+X).
+        После пользовательской остановки достройки нет никогда.
+        """
+        if not stopped or (stop_check and stop_check()):
+            return False
+        if not self._watch_diverged(watch_prefix, prefill, content):
+            return False
+        matched = self._watch_match_len(watch_prefix, prefill, content)
+        return 0 < matched < len(watch_prefix or "")
+
     def _stream_callbacks(self) -> dict:
         return {
             "on_stream_chunk": self.on_stream_chunk,
@@ -38,8 +74,12 @@ class StreamingMixin:
         stop_check: Callable[[], bool] = None,
         reasoning_effort: str = "none",
         stop_markers: tuple = (),
+        prefill_shown: int = 0,
+        defer_stream_end: bool = False,
     ) -> tuple:
-        """Вызов LLM со streaming (возвращает (message_obj, error, usage, stopped_at_marker)). Если задан watch_prefix, при расхождении с прежним ответом генерация на горячей температуре прерывается и достраивается спокойной температурой (watch_continue_temp) — буст не успевает вызвать галлюцинации. stop_check — вызывается после каждого чанка; True прерывает стрим. stop_markers — стоп-маркеры структурированного вывода: при появлении маркера в контенте стрим обрезается и останавливается, stopped_at_marker=True."""
+        """Вызов LLM со streaming (возвращает (message_obj, error, usage, stopped_at_marker)). Если задан watch_prefix, при расхождении с прежним ответом генерация на горячей температуре прерывается и достраивается спокойной температурой (watch_continue_temp) — буст не успевает вызвать галлюцинации. stop_check — вызывается после каждого чанка; True прерывает стрим. stop_markers — стоп-маркеры структурированного вывода: при появлении маркера в контенте стрим обрезается и останавливается, stopped_at_marker=True.
+        prefill_shown — сколько ведущих символов prefill уже показаны в живом выводе (продолжение симуляции reasoning): показывается только хвост prefill[prefill_shown:], чтобы не печатать накопленные мысли дважды, но новую приставку NO COMMENT пользователь видел. on_stream_start/on_stream_end при prefill_shown не вызываются — блок вывода остаётся открытым между вызовами одного сообщения.
+        defer_stream_end — блок вывода открывает вызывающий (первая фаза цепочки): on_stream_end не вызывается, его вызывает агент, когда цепочка фаз дошла до конца."""
         try:
             session = StreamSession(
                 messages,
@@ -50,6 +90,7 @@ class StreamingMixin:
                 on_stream_chunk=self.on_stream_chunk,
                 on_reasoning_start=self.on_reasoning_start,
                 on_reasoning_chunk=self.on_reasoning_chunk,
+                prefill_shown=prefill_shown,
             )
             error, _stopped = session.consume(
                 stop_check=stop_check,
@@ -57,7 +98,7 @@ class StreamingMixin:
                     (lambda: self._watch_diverged(watch_prefix, prefill, session.acc.content))
                     if watch_prefix else None
                 ),
-                on_stream_start=self.on_stream_start,
+                on_stream_start=None if prefill_shown else self.on_stream_start,
                 stop_markers=stop_markers,
             )
         except Exception as e:
@@ -72,12 +113,14 @@ class StreamingMixin:
                 raise GenerationInterrupted()
             return None, error, None, False
 
-        if self.on_stream_end:
+        if self.on_stream_end and not prefill_shown and not defer_stream_end:
             self.on_stream_end()
         if session.acc.reasoning_started and self.on_reasoning_end:
             self.on_reasoning_end()
 
-        if self._watch_diverged(watch_prefix, prefill, session.acc.content):
+        if self._should_continue_after_divergence(
+            watch_prefix, prefill, session.acc.content, _stopped, stop_check,
+        ):
             return self._continue_stream_after_divergence(
                 messages, tools, prefill, session.acc, watch_continue_temp,
                 reasoning_effort=reasoning_effort, stop_check=stop_check,

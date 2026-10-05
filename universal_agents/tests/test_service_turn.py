@@ -16,6 +16,7 @@ from unittest import mock
 from universal_agents.agent import LLMAgent
 from universal_agents.config import Config
 from universal_agents.context_builder import prepare_messages_for_api
+from universal_agents.generation import StructuredOutputConfig
 from universal_agents.models import AssistantMessage, ToolCall, ToolResult, UserMessage
 
 from tests.conftest import make_agent
@@ -140,6 +141,30 @@ class TestServiceTurn(unittest.TestCase):
         # После отката prepare даёт байт-идентичный префикс: шапка не пересобрана.
         msgs_b = prepare_messages_for_api(agent, debug_hash_check=True)
         self.assertEqual(msgs_b[1]["content"], last_user_a)
+
+    def test_service_llm_call_passes_stop_check(self):
+        # Служебный вызов = один ход через общий движок; stop_check доходит до
+        # LLMClient.call как _stop_check агента (прерывание компакции через watchdog).
+        agent = make_agent(system_prompt="sys")
+        with mock.patch("universal_agents.agent.LLMClient.call",
+                        return_value=(AssistantMessage(content="ok"), None, None)) as mocked:
+            msg_obj, err, usage = agent.service_llm_call([{"role": "user", "content": "hi"}])
+        _, kwargs = mocked.call_args
+        self.assertIs(kwargs["stop_check"], agent._stop_check)
+        self.assertEqual(msg_obj.content, "ok")
+
+    def test_truncates_content_at_marker(self):
+        agent = make_agent()
+        fake = AssistantMessage(content="<tag>\ndata\n</tag>\ntrailing text")
+        with mock.patch("universal_agents.agent.LLMClient.call", return_value=(fake, None, None)) as m:
+            msg_obj, err, usage = agent.service_llm_call(
+                [{"role": "user", "content": "hi"}],
+                structured_output=StructuredOutputConfig.from_prefill("<tag>\n"),
+            )
+        self.assertEqual(msg_obj.content, "<tag>\ndata\n</tag>")
+        # stop_markers should have been passed to LLMClient.call
+        call_kwargs = m.call_args.kwargs
+        self.assertEqual(call_kwargs.get("stop_markers"), ("</tag>",))
 
 
 if __name__ == "__main__":

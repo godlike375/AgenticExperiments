@@ -3,6 +3,8 @@ import tempfile
 import unittest
 from unittest import mock
 
+from universal_agents.agent import LLMAgent
+from universal_agents.models import ToolCall
 from universal_agents.tool import tool
 from universal_agents.tool_manager import ToolManager
 from universal_agents.tools.builtin import unload_tool as real_unload_tool
@@ -21,6 +23,11 @@ def beta(y: str = "b") -> str:
 @tool(description="unload a tool")
 def unload_tool(agent, name: str) -> str:
     return "ok"
+
+
+@tool(description="beta tool", requires_confirmation=True)
+def beta_confirm(y: str = "b") -> str:
+    return y
 
 
 class TestToolManagerFilter(unittest.TestCase):
@@ -180,6 +187,55 @@ class TestRealUnloadTool(unittest.TestCase):
         result = real_unload_tool(agent, "some_tool")
         self.assertEqual(result, "unloaded")
         agent.unload_tool.assert_called_once_with("some_tool")
+
+
+class TestSubAgentToolPermissions(unittest.TestCase):
+    """Denied/safe_only состояние менеджера унаследовано субагентом: схемы остаются
+    в префиксе ради KV-кэша, вызовы запрещённого возвращают ошибку «forbidden»."""
+
+    def _make_parent(self):
+        return LLMAgent(
+            system_prompt="sys",
+            tools_config=["alpha", "beta_confirm"],
+            external_plugins={"alpha": alpha, "beta_confirm": beta_confirm},
+        )
+
+    def test_schemas_identical_and_ordered(self):
+        parent = self._make_parent()
+        sub = parent.make_sub_agent(denied_tools="*", max_iter=1)
+        self.assertEqual(parent.tools, sub._agent.tools)
+
+    def test_denied_star_keeps_schemas_but_blocks_calls(self):
+        parent = self._make_parent()
+        sub = parent.make_sub_agent(denied_tools="*", max_iter=1)
+        for name in ("alpha", "beta_confirm"):
+            self.assertTrue(sub._agent.is_tool_denied(name))
+        results = sub._agent._execute_tools([ToolCall(id="t1", name="alpha", arguments='{"x": 1}')])
+        self.assertTrue(results[0].is_error)
+        self.assertIn("forbidden", results[0].content)
+
+    def test_selective_deny_blocks_only_listed(self):
+        parent = self._make_parent()
+        sub = parent.make_sub_agent(denied_tools={"alpha"}, max_iter=1)
+        self.assertTrue(sub._agent.is_tool_denied("alpha"))
+        self.assertFalse(sub._agent.is_tool_denied("beta_confirm"))
+
+        denied = sub._agent._execute_tools([ToolCall(id="t1", name="alpha", arguments='{"x": 1}')])[0]
+        allowed = sub._agent._execute_tools([ToolCall(id="t2", name="beta_confirm", arguments='{"y": "z"}')])[0]
+        self.assertTrue(denied.is_error)
+        self.assertFalse(allowed.is_error)
+
+    def test_safe_only_denies_confirmation_tools_but_keeps_schemas(self):
+        parent = self._make_parent()
+        sub = parent.make_sub_agent(safe_only=True, max_iter=1)
+        self.assertEqual(parent.tools, sub._agent.tools)
+        self.assertTrue(sub._agent.is_tool_denied("beta_confirm"))
+        self.assertFalse(sub._agent.is_tool_denied("alpha"))
+
+    def test_no_deny_config_allows_everything(self):
+        parent = self._make_parent()
+        sub = parent.make_sub_agent(safe_only=False, max_iter=1)
+        self.assertEqual(sub._agent.tools_manager.denied, set())
 
 
 if __name__ == "__main__":

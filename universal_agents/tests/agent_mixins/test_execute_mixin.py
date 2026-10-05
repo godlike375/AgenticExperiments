@@ -5,14 +5,17 @@ import tempfile
 import unittest
 from unittest import mock
 
-from universal_agents.agent import LLMAgent
+from universal_agents.agent import LLMAgent, _GUARD_NAG_PREFIX
 from universal_agents.agent_mixins.response_mixin import _NO_COMMENT_PREFILL
 from universal_agents.config import Config
 from universal_agents.models import AssistantMessage, ToolCall, ToolResult, UserMessage
+from universal_agents.tool import tool, ToolOutput
 from universal_agents.tools.fs import line_range_edit
 from universal_agents.tools.builtin import answer_to_system
 
 from tests.conftest import make_agent as make_test_agent
+
+B64 = "aGVsbG8taW1hZ2U="
 
 answer_tool_name = answer_to_system.__name__
 line_range_edit_tool_name = line_range_edit.__name__
@@ -23,7 +26,7 @@ def nag_contents(msgs) -> list:
     Превью edit-инструмента содержит «You can't continue with common prose», но это
     ToolResult, а не наг — поэтому смотрим только на UserMessage."""
     return [m.content for m in msgs
-            if isinstance(m, UserMessage) and "You can't continue" in (m.content or "")]
+            if isinstance(m, UserMessage) and _GUARD_NAG_PREFIX in (m.content or "")]
 
 
 class TestAnswerRequiredGuard(unittest.TestCase):
@@ -87,7 +90,7 @@ class TestAnswerRequiredGuard(unittest.TestCase):
 
         # Наг guard'а МОДЕЛЬ видела (между срабатыванием и успехом), но после успеха
         # он вычищен — в контексте остаётся только правильный путь подтверждения (§1.11).
-        self.assertTrue(any("You can't continue" in t for content in seen for t in content),
+        self.assertTrue(any(_GUARD_NAG_PREFIX in t for content in seen for t in content),
                         "Модель должна была получить сообщение-ошибку о вызове answer")
         msgs = agent.history.get_all()
         self.assertEqual(nag_contents(msgs), [],
@@ -139,7 +142,7 @@ class TestAnswerRequiredGuard(unittest.TestCase):
             self.assertEqual(f.read(), "a\n")
         self.assertIsNone(agent._pending_operation)
         # Модель получала наг «call answer» минимум один раз...
-        self.assertTrue(any("You can't continue" in t for content in seen for t in content))
+        self.assertTrue(any(_GUARD_NAG_PREFIX in t for content in seen for t in content))
         # ...но после успешного подтверждения (даже 'no') наг вычищен из истории (§1.11).
         msgs = agent.history.get_all()
         self.assertEqual(nag_contents(msgs), [])
@@ -246,7 +249,7 @@ class TestAnswerRequiredGuard(unittest.TestCase):
         self.assertIn(_NO_COMMENT_PREFILL, seen)
         # Guard всё равно сработал после перегенерации (модель так и не ответила)
         # и был вычищен после успешного подтверждения (§1.11).
-        self.assertTrue(any("You can't continue" in t for content in seen_content for t in content))
+        self.assertTrue(any(_GUARD_NAG_PREFIX in t for content in seen_content for t in content))
         msgs = agent.history.get_all()
         self.assertEqual(nag_contents(msgs), [])
 
@@ -442,7 +445,7 @@ class TestAnswerRequiredGuard(unittest.TestCase):
         self.assertIsNotNone(agent._pending_operation)
         # В истории ровно ОДИН наг (переиспользуется, не копится между срабатываниями).
         msgs = agent.history.get_all()
-        nags = [m for m in msgs if isinstance(m, UserMessage) and "You can't continue" in (m.content or "")]
+        nags = [m for m in msgs if isinstance(m, UserMessage) and _GUARD_NAG_PREFIX in (m.content or "")]
         self.assertEqual(len(nags), 1)
 
     def test_wrong_attempt_scrubbed_after_success(self):
@@ -540,7 +543,7 @@ class TestAnswerRequiredGuard(unittest.TestCase):
                          "User-часть префикса должна быть байт-стабильной между срабатываниями guard'а")
         # И сам наг в префиксе ровно один (не накапливается).
         for content in user_contents:
-            nags = [t for t in content if "You can't continue" in t]
+            nags = [t for t in content if _GUARD_NAG_PREFIX in t]
             self.assertLessEqual(len(nags), 1, "Наг не должен накапливаться")
 
     def test_guard_nag_flag_roundtrip_through_save_load(self):
@@ -576,6 +579,51 @@ class TestAnswerRequiredGuard(unittest.TestCase):
             any(isinstance(m, UserMessage) and m._is_guard_nag for m in agent.history.get_all()),
             "После успешного answer скраб удаляет загруженный наг",
         )
+
+
+@tool(description="fake screenshot tool")
+def fake_screenshot() -> ToolOutput:
+    return ToolOutput(text="Скриншот 640x480", images=[B64])
+
+
+@tool(description="plain text tool")
+def plain_tool() -> str:
+    return "просто текст"
+
+
+class TestToolOutputExecution(unittest.TestCase):
+    """ExecuteMixin: unwrap ToolOutput → текст в content, картинки в side-field."""
+
+    def _agent(self):
+        return make_test_agent(
+            tools_config=["fake_screenshot", "plain_tool"],
+            external_plugins={"fake_screenshot": fake_screenshot, "plain_tool": plain_tool},
+        )
+
+    def test_tool_output_unwrapped_into_tool_result(self):
+        agent = self._agent()
+        results = agent._execute_tools([ToolCall(id="t1", name="fake_screenshot", arguments="{}")])
+        tr = results[0]
+        self.assertFalse(tr.is_error)
+        self.assertEqual(tr.content, "Скриншот 640x480")
+        self.assertEqual(tr.images, [B64])
+        self.assertTrue(tr.skip_summarize)
+
+    def test_plain_str_tool_unchanged(self):
+        agent = self._agent()
+        results = agent._execute_tools([ToolCall(id="t1", name="plain_tool", arguments="{}")])
+        tr = results[0]
+        self.assertEqual(tr.content, "просто текст")
+        self.assertEqual(tr.images, [])
+
+    def test_tool_output_flows_to_api_dict(self):
+        agent = self._agent()
+        results = agent._execute_tools([ToolCall(id="t1", name="fake_screenshot", arguments="{}")])
+        d = results[0].to_api_dict()
+        self.assertIsInstance(d["content"], list)
+        self.assertEqual(d["content"][0]["type"], "text")
+        self.assertEqual(d["content"][1]["type"], "image_url")
+
 
 if __name__ == "__main__":
     unittest.main()

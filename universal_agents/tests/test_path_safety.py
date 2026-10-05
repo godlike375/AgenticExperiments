@@ -1,9 +1,6 @@
 import os
-import sys
 import unittest
 import tempfile
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from universal_agents.project_root import find_project_root, is_within, external_paths
 from universal_agents.command_paths import extract_paths

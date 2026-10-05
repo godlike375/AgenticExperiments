@@ -3,7 +3,9 @@ import threading
 from unittest import mock
 from types import SimpleNamespace
 
+from universal_agents.agent import LLMAgent
 from universal_agents.constants import SUMMARY_MARKER
+from universal_agents.compressors import is_summary_message, _find_existing_summary
 from universal_agents.history import ChatHistory
 from universal_agents.llm_client import TokenUsageTracker
 from universal_agents.agent_mixins.memory_mixin import MemoryMixin
@@ -36,7 +38,7 @@ class FakeAgent(MemoryMixin):
         self._compacted_task_ids = set()
         self.stop_event = threading.Event()
         # Реальный service_llm_call поверх мок-агента: транспорт перехватывается
-        # через mock.patch("...LLMClient.call"), как в test_compressors.py.
+        # через mock.patch("...LLMClient.call").
         from universal_agents.llm_client import LLMClient
 
         def _service(msgs, temp=None, timeout=None, tools=True, prefill=None, params=None):
@@ -263,13 +265,7 @@ class TestPersistenceRoundTrip(unittest.TestCase):
 
 class TestRecallTools(unittest.TestCase):
     def test_recall_tools_end_to_end(self):
-        import importlib.util, os
-        spec = importlib.util.spec_from_file_location(
-            "mem_tools",
-            os.path.join(os.path.dirname(__file__), "..", "tools", "memory.py"),
-        )
-        mem_tools = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mem_tools)
+        from universal_agents.tools import memory as mem_tools
 
         agent = FakeAgent()
         _seed_dialog(agent)
@@ -281,6 +277,125 @@ class TestRecallTools(unittest.TestCase):
         out_read = mem_tools.recall_read(agent, from_seq=2, to_seq=2)
         self.assertIn("#2", out_read)
         self.assertIn("long reasoning", out_read.replace("\n", " "))
+
+
+class TestSummaryHelpers(unittest.TestCase):
+    def test_is_summary_message(self):
+        # Детекция только по метаданным объекта, без текстовых маркеров
+        self.assertFalse(is_summary_message(UserMessage("xyz")))
+        self.assertFalse(is_summary_message(UserMessage("[SUMMARY of messages 1-5]: xyz")))
+        self.assertFalse(is_summary_message(UserMessage("It's an auto-generated text. Your past dialog summary")))
+        self.assertTrue(is_summary_message(UserMessage("flagged", is_summary=True)))
+        self.assertFalse(is_summary_message(UserMessage("normal user message")))
+        self.assertFalse(is_summary_message(UserMessage("")))
+
+    def test_find_existing_summary(self):
+        h = ChatHistory("sys")
+        h.add(UserMessage("task: create readme"))
+        h.add(AssistantMessage(content="a1"))
+        h.add(ToolResult.success("t1", "read", "some file content"))
+        h.add(AssistantMessage(content="a2"))
+        h.add(UserMessage("please summarize"))
+        msgs = h.get_all()
+        self.assertIsNone(_find_existing_summary(msgs, len(msgs) - 1))
+
+        h.replace_range(2, 2, [UserMessage("earlier facts\npath /etc/x", is_summary=True)])
+        msgs = h.get_all()
+        found = _find_existing_summary(msgs, len(msgs) - 1)
+        self.assertIsNotNone(found)
+        self.assertEqual(found["index"], 2)
+        # body — это текст после первой строки-заголовка
+        self.assertIn("path /etc/x", found["body"])
+        self.assertIn("earlier facts", found["full_content"])
+
+
+class TestAgentAutoSummarize(unittest.TestCase):
+    def test_forced_compaction_short_history_returns_false(self):
+        agent = LLMAgent(system_prompt="sys")
+        with mock.patch("universal_agents.compressors.summarize_history_plain") as summ:
+            result = agent._auto_summarize_dialogue(force=True)
+        self.assertFalse(result)
+        summ.assert_not_called()
+
+    def test_forced_compaction_writes_summary(self):
+        agent = LLMAgent(system_prompt="sys")
+        agent.history.add(UserMessage("question one"))
+        agent.history.add(AssistantMessage(content="answer one"))
+        agent.history.add(UserMessage("question two"))
+        agent.history.add(AssistantMessage(content="answer two"))
+        ids = ["1.1", "1.2", "1.3", "1.4", "1.5", "2.1", "2.2", "2.3",
+               "3.1", "4.1", "4.2", "4.3", "5.1", "6.1", "6.2", "7.1", "7.2"]
+        summary_body = "".join(f"{section_id} content. " for section_id in ids) + "Compressed."
+        with mock.patch(
+            "universal_agents.compressors.summarize_history_plain",
+            return_value=summary_body,
+        ):
+            result = agent._auto_summarize_dialogue(force=True)
+        self.assertTrue(result)
+        user_msgs = [m for m in agent.history.get_all() if isinstance(m, UserMessage)]
+        self.assertTrue(any("Compressed" in (m.content or "") for m in user_msgs))
+
+    def test_auto_summarize_bails_on_user_stop(self):
+        agent = LLMAgent(system_prompt="sys")
+        agent.history.add(UserMessage("q"))
+        agent.history.add(AssistantMessage(content="a"))
+        agent.stop_event.set()
+        with mock.patch("universal_agents.compressors.summarize_history_plain") as summ:
+            result = agent._auto_summarize_dialogue(force=True)
+        self.assertFalse(result)
+        summ.assert_not_called()
+        # история не изменена: роли те же, summary-сообщение не добавлено
+        roles = [m.to_api_dict()["role"] for m in agent.history]
+        self.assertEqual(roles, ["system", "user", "assistant"])
+
+    def test_auto_summarize_sets_suppression_on_user_stop(self):
+        agent = LLMAgent(system_prompt="sys")
+        agent.history.add(UserMessage("q"))
+        agent.history.add(AssistantMessage(content="a"))
+        agent.stop_event.set()
+        with mock.patch("universal_agents.compressors.summarize_history_plain") as summ:
+            result = agent._auto_summarize_dialogue(force=True)
+        self.assertFalse(result)
+        self.assertTrue(agent._auto_summarize_suppressed)
+
+    def test_auto_summarize_clears_suppression_on_success(self):
+        agent = LLMAgent(system_prompt="sys")
+        agent._auto_summarize_suppressed = True
+        agent.history.add(UserMessage("question one"))
+        agent.history.add(AssistantMessage(content="answer one"))
+        agent.history.add(UserMessage("question two"))
+        agent.history.add(AssistantMessage(content="answer two"))
+        ids = ["1.1", "1.2", "1.3", "1.4", "1.5", "2.1", "2.2", "2.3",
+               "3.1", "4.1", "4.2", "4.3", "5.1", "6.1", "6.2", "7.1", "7.2"]
+        summary_body = "".join(f"{section_id} content. " for section_id in ids) + "Compressed."
+        with mock.patch(
+            "universal_agents.compressors.summarize_history_plain",
+            return_value=summary_body,
+        ):
+            result = agent._auto_summarize_dialogue(force=True)
+        self.assertTrue(result)
+        self.assertFalse(agent._auto_summarize_suppressed)
+
+    def test_auto_summarize_suppression_skips_and_chat_resets(self):
+        agent = LLMAgent(system_prompt="sys")
+        fake = AssistantMessage(content="answer")
+        # История над порогом, но компакция подавлена прерванной попыткой.
+        agent._auto_summarize_suppressed = True
+        with mock.patch("universal_agents.agent.LLMClient.call", return_value=(fake, None, None)), \
+                mock.patch.object(agent, "_auto_summarize_dialogue") as auto, \
+                mock.patch.object(agent, "_get_context_usage_percent", return_value=99.0), \
+                mock.patch.object(agent, "_autosave"):
+            agent.history.add(UserMessage("q"))
+            agent.history.add(AssistantMessage(content="a"))
+            agent._run_turn_loop(max_iter=1, prefill="")
+        auto.assert_not_called()
+        # Новый ход пользователя через chat() снимает cooldown.
+        fake2 = AssistantMessage(content="fresh answer")
+        with mock.patch("universal_agents.agent.LLMClient.call", return_value=(fake2, None, None)), \
+                mock.patch.object(agent, "_autosave"):
+            result = agent.chat("next user turn")
+        self.assertIn("fresh answer", result)
+        self.assertFalse(agent._auto_summarize_suppressed)
 
 
 if __name__ == "__main__":
