@@ -1296,6 +1296,10 @@ class LLMAgent(
                     return result_text
                 if self._auto_summarize_dialogue():
                     compacted = True
+                    # Одна компакция за ход: повторный авто-запуск в том же ходу —
+                    # бессмысленная перезапись только что написанного саммари (лишние
+                    # генерации с reasoning на глазах у пользователя). Кулдаун снимает chat().
+                    self._auto_summarize_suppressed = True
 
             if compacted:
                 state.reset_error_counts()
