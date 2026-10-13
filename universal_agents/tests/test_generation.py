@@ -82,7 +82,6 @@ class TestExtractOpeningTag(unittest.TestCase):
         self.assertIsNone(extract_opening_tag("<my!tag>\n"))
 
     def test_valid_tag_with_invalid_attribute(self):
-        # tag name 'my' is valid; attribute 'tag!' has invalid chars but that's fine
         self.assertEqual(extract_opening_tag("<my tag!>\n"), "my")
 
     def test_tag_with_colon(self):
@@ -139,7 +138,6 @@ class TestApplyStopMarkers(unittest.TestCase):
         content, hit = apply_stop_markers(
             "aaa</first>bbb</second>", ("</second>", "</first>")
         )
-        # </second> appears at index 10, </first> at 3; first marker in CONTENT is </first>
         self.assertEqual(content, "aaa</first>")
         self.assertTrue(hit)
 
@@ -214,7 +212,6 @@ class TestAgentStructuredOutput(unittest.TestCase):
                 ),
             )
 
-        # Phase 1 was the only response; phase 2 was NOT triggered
         self.assertEqual(result, "<a>\n</a>")
         self.assertEqual(len(responses), 0)
 
@@ -226,7 +223,6 @@ class TestAgentStructuredOutput(unittest.TestCase):
             autosave_enabled=False,
         )
 
-        # Content contains a tool-like reference (would normally trigger broken_call)
         phase1 = AssistantMessage(content="<output>\nresult of read(file)\n</output>")
         responses = [(phase1, None, None)]
 

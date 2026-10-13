@@ -90,7 +90,6 @@ class TestStreamInterrupt(unittest.TestCase):
 
         self.assertEqual(result, "")
         self.assertFalse(agent.stop_event.is_set())
-        # прерванный ход не оставляет битой последовательности ролей
         roles = [m.to_api_dict()["role"] for m in agent.history]
         self.assertEqual(roles, ["system", "user"])
 
@@ -120,11 +119,8 @@ class TestStreamDivergence(unittest.TestCase):
         self.assertIn("previous answer teXt!", msg.content)
         self.assertIn("calm continuation", msg.content)
         self.assertTrue(msg.streamed)
-        # расхождение зафиксировано после частичного совпадения — достройка идёт
-        # одним вызовом LLMClient.call
         self.assertEqual(s_stream.call_count, 1)
         self.assertEqual(s_call.call_count, 1)
-        # написанное передаётся prefill'ом — KV-cache продолжение, а не новая генерация
         self.assertEqual(s_call.call_args.kwargs["prefill"], "previous answer teXt!")
 
     def test_immediate_divergence_accepted_without_followup(self):

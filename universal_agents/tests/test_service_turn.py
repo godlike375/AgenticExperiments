@@ -41,7 +41,6 @@ class TestServiceTurn(unittest.TestCase):
         self.assertIsNone(err)
         self.assertIsNone(usage)
         hist_after = [m.content for m in agent.history.get_all()]
-        # Default (Config.SERVICE_TURN_KEEP_IN_HISTORY=False): промпт и ответ откачены.
         self.assertEqual(hist_after, hist_before)
 
     def test_keep_in_history_via_config(self):
@@ -53,13 +52,10 @@ class TestServiceTurn(unittest.TestCase):
             msg_obj, err, _ = agent.service_llm_call([{"role": "user", "content": "sami"}])
         self.assertEqual(msg_obj.content, "выжимка")
         contents = [m.content for m in agent.history.get_all()]
-        # Промпт сервисного вызова остался в истории после завершения.
         self.assertIn("sami", contents)
         self.assertIn("выжимка", contents)
 
     def test_append_prompt_dedup_when_already_last_user(self):
-        # Consistency-драфт: промпт равен последнему user-сообщению истории —
-        # он не должен дублироваться (иначе normalize склеит и испортит контент).
         agent = make_agent()
         agent.history.add(UserMessage("текущий вопрос"))
         agent.history.add(AssistantMessage(content="ответ на текущий вопрос"))
@@ -71,13 +67,9 @@ class TestServiceTurn(unittest.TestCase):
         self.assertEqual(msg_obj.content, "draft")
         sent_messages = mocked.call_args[0][0]
         user_contents = [m["content"] for m in sent_messages if m["role"] == "user"]
-        # Промпт не продублирован: в API-запросе ровно один user-контент, содержащий промпт
-        # (шапка <SYSTEM> в начале контента не должна считаться отдельным сообщением).
         self.assertEqual(sum("текущий вопрос" in (c or "") for c in user_contents), 1)
 
     def test_tools_never_executed_text_kept(self):
-        # Модель вернула tool_calls вместе с текстом: инструменты не исполняются,
-        # остаётся только текст (решение пользователя).
         agent = make_agent()
         self._base_history(agent)
         tc = ToolCall(id="call_1", name="some_tool", arguments="{}")
@@ -88,12 +80,9 @@ class TestServiceTurn(unittest.TestCase):
         ex.assert_not_called()
         self.assertEqual(msg_obj.content, "текст с объяснением")
         self.assertIsNone(err)
-        # Никаких ToolResult в истории от служебного хода.
         self.assertFalse(any(isinstance(m, ToolResult) for m in agent.history.get_all()))
 
     def test_bare_tool_call_regenerates(self):
-        # Голый вызов инструмента без текста: NO COMMENT-механика перегенерирует,
-        # после чего возвращается итоговый текст.
         agent = make_agent()
         self._base_history(agent)
         tc = ToolCall(id="call_1", name="some_tool", arguments="{}")
@@ -109,7 +98,6 @@ class TestServiceTurn(unittest.TestCase):
             msg_obj, err, _ = agent.service_llm_call([{"role": "user", "content": "prompt"}])
         self.assertEqual(msg_obj.content, "финальный текст")
         self.assertIsNone(err)
-        # Ответы служебного хода откачены — история вернулась к базовой (системный + вопрос + ответ).
         self.assertEqual([m.content for m in agent.history.get_all()],
                          ["You are a helpful assistant", "вопрос", "ответ"])
 
@@ -127,19 +115,15 @@ class TestServiceTurn(unittest.TestCase):
     def test_rollback_preserves_last_user_header_cache(self):
         agent = make_agent()
         self._base_history(agent)
-        # Тёплый кэш: последний user («вопрос») уже получил шапку (момент А).
         msgs_a = prepare_messages_for_api(agent, debug_hash_check=True)
         last_user_a = msgs_a[1]["content"]
         with mock.patch("universal_agents.agent.LLMClient.call",
                         return_value=(AssistantMessage(content="выжимка"), None, None)):
             agent.service_llm_call([{"role": "user", "content": "sami"}])
-        # После отката prepare даёт байт-идентичный префикс: шапка не пересобрана.
         msgs_b = prepare_messages_for_api(agent, debug_hash_check=True)
         self.assertEqual(msgs_b[1]["content"], last_user_a)
 
     def test_service_llm_call_passes_stop_check(self):
-        # Служебный вызов = один ход через общий движок; stop_check доходит до
-        # LLMClient.call как _stop_check агента (прерывание компакции через watchdog).
         agent = make_agent(system_prompt="sys")
         with mock.patch("universal_agents.agent.LLMClient.call",
                         return_value=(AssistantMessage(content="ok"), None, None)) as mocked:
@@ -157,7 +141,6 @@ class TestServiceTurn(unittest.TestCase):
                 structured_output=StructuredOutputConfig.from_prefill("<tag>\n"),
             )
         self.assertEqual(msg_obj.content, "<tag>\ndata\n</tag>")
-        # stop_markers should have been passed to LLMClient.call
         call_kwargs = m.call_args.kwargs
         self.assertEqual(call_kwargs.get("stop_markers"), ("</tag>",))
 

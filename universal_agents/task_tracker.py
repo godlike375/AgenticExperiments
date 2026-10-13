@@ -44,9 +44,7 @@ def set_plan(agent: AgentContext, plan_list: list) -> str:
         meta[tid] = {"title": str(entry.get("title", "") or "").strip()}
     agent.task_plan = list(meta.keys())
     agent.task_plan_map = meta
-    # Новый план — сбросить маркеры компактизации предыдущего, чтобы переиспользуемые id не считались выполненными.
     agent._compacted_task_ids = set()
-    # Динамически подключаем have_done — доступен только после успешного make_plan.
     tm = getattr(agent, "tools_manager", None)
     if tm is not None:
         try:
@@ -96,7 +94,6 @@ def _last_plan_position(history: list) -> int:
     return pos
 
 
-# Инструменты-маркеры, которые НЕ считаются реальной работой.
 _META_TOOLS = {PLAN_TOOL, DONE_TOOL, _load_tool_tool.__name__}
 
 
@@ -175,7 +172,6 @@ def validate_task_mark_call(history_before: list, args: dict, plan_map: dict,
     if tid not in leaves:
         return f"CANNOT MARK '{tid}': not in the plan."
 
-    # Учитываем только выполнение ТЕКУЩЕГО плана (маркеры после последнего make_plan), исключая утечку из предыдущего.
     plan_pos = _last_plan_position(history_before)
     done = set(compacted)
     done |= set(_done_marker_positions(history_before, leaves, after=plan_pos).keys())
@@ -191,7 +187,6 @@ def validate_task_mark_call(history_before: list, args: dict, plan_map: dict,
             f"Follow the plan order. To start from a different step, revise the plan with "
             f"make_plan(plan=[...])."
         )
-    # Защита от «фиктивного» выполнения: запрещаем have_done без реального инструмента после последнего done/создания плана.
     segment_after = max(plan_pos, _last_done_position(history_before, plan_pos))
     if _last_real_work_position(history_before, segment_after) == -1:
         return (
@@ -232,8 +227,6 @@ def _leaf_block(history: list, leaf: str, leaves: list, plan_pos: int) -> tuple:
     done = _done_marker_positions(history, leaves, after=plan_pos)
     done_idx = done[leaf]        # индекс результата have_done этой задачи
 
-    # Индекс самого вызова have_done: ассистент-сообщение с DONE_TOOL,
-    # чей tc.id совпадает с tool_call_id результата (обычно сразу перед ним).
     result_msg = history[done_idx]
     call_id = getattr(result_msg, 'tool_call_id', None)
     hd_call = done_idx - 1
@@ -246,7 +239,6 @@ def _leaf_block(history: list, leaf: str, leaves: list, plan_pos: int) -> tuple:
             hd_call = j
             break
 
-    # Последняя сохраняемая граница перед работой: результат make_plan либо have_done предыдущей задачи.
     boundary = plan_pos + 1
     idx = leaves.index(leaf)
     for i in range(idx):
@@ -268,7 +260,6 @@ def _compact_one_group(agent: AgentContext) -> Optional[str]:
     if not leaves:
         return None
 
-    # позиция последнего make_plan (текущий план) для границы сегмента
     plan_pos = _last_plan_position(history)
 
     leaf = _earliest_done_leaf(history, leaves, compacted, plan_pos=plan_pos)
@@ -297,7 +288,6 @@ def _compact_one_group(agent: AgentContext) -> Optional[str]:
         content=ok(f" ('{title}' [{leaf}] has been already marked as done so don't call have_done('{title}'):\n{summary} again. Just take next steps if anything remains undone.\n")
     )
     agent.history.replace_range(start, end, [summary_msg])
-    # Обрезаем раздутый summary в have_done: детали уже в компактизационном summary, дублировать не нужно.
     done_idx = done.get(leaf)
     hd = history[done_idx] if done_idx is not None else None
     if hd is not None and not getattr(hd, 'is_error', False):

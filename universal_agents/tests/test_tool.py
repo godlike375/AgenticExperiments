@@ -66,8 +66,6 @@ class TestBuildAllowedTools(unittest.TestCase):
         self.assertEqual(allowed, [_read_tool.__name__, _run_bash_host_tool.__name__, _load_tool_tool.__name__])
 
     def test_preloaded_not_required_in_loadable(self):
-        # Ключевой сценарий: предзагруженный инструмент отсутствует в LOADABLE_TOOLS,
-        # но всё равно попадает в allow-список (иначе ToolManager его отфильтрует).
         allowed = build_allowed_tools(
             loadable=[_run_bash_host_tool.__name__],
             preloaded=[_make_plan_tool.__name__, _have_done_tool.__name__],

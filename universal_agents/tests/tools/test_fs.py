@@ -272,13 +272,10 @@ class TestReadBatchMode(unittest.TestCase):
         self.assertIn("\n1 line 1 ", out)
         self.assertIn("\n2 line 2 ", out)
         self.assertIn("\n80 line 80 ", out)
-        # Периферийные строки помечены '~' и есть за пределами фокуса.
         self.assertIn("\n~", out)
         peri_idx = [int(l.split(" ")[0][1:]) for l in out.splitlines() if l.startswith("~")]
         self.assertTrue(all(i > 80 for i in peri_idx))
-        # Подсказка продолжать диапазоном — только когда файл реально обрезан.
         self.assertIn(f"Use start_line=81", out)
-        # Чтение регистрируется как «в контексте».
         self.assertEqual(agent._read_registrations, [path])
 
     def test_batch_respects_char_limit(self):
@@ -288,7 +285,6 @@ class TestReadBatchMode(unittest.TestCase):
         out = _read_tool(agent, path)
 
         self.assertIn("Full focus lines 1-", out)
-        # Только фокус-строки (без '~' и служебных) имеют счётные номера ≤ 80.
         nums = {int(l.split(" ")[0]) for l in out.splitlines() if l[:1].isdigit()}
         self.assertTrue(all(n <= Config.MAX_READ_LINES_PER_CALL for n in nums))
 
@@ -313,7 +309,6 @@ class TestReadBatchMode(unittest.TestCase):
         self.assertIn("re-reading", second)
 
     def test_range_read_unaffected(self):
-        # Порционное чтение диапазоном не зависит от флага структуризации.
         Config.BIG_FILE_SKELETON = False
         path = self._write("range.py", total_lines=120)
         agent = _make_fake_agent()
@@ -326,7 +321,6 @@ class TestReadBatchMode(unittest.TestCase):
         self.assertNotIn("Use start_line=", out)  # диапазон в пределах лимита
 
     def test_skeleton_mode_unchanged(self):
-        # Скелет-режим по-прежнему использует структуру, а не пачку строк.
         Config.BIG_FILE_SKELETON = True
         path = self._write("skeleton.py", total_lines=120)
         agent = _make_fake_agent()
@@ -404,7 +398,6 @@ class TestEditFileEndToEnd(unittest.TestCase):
         self.assertIn("Replaced", result)
         self.assertEqual(open(f, encoding="utf-8").read(), "hello")
 
-    # --- Строковый результат dry_run — обычный ответ, а не конфиг-ошибка. ---
 
     def test_dry_run_error_string_is_not_config_error(self):
         """Ненайденная подстрока в dry_run: модель видит 'substring not found', а не конфиг-ошибку."""

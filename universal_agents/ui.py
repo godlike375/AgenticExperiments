@@ -18,8 +18,6 @@ class ConsoleUI:
     _reasoning_started = False
     _answer_header_shown = False
     _service_stream_shown = False
-    # Функция ввода строки (переопределяется CLI на общую очередь ввода,
-    # чтобы и подтверждения, и промпты читали stdin через единый поток).
     _input_fn = staticmethod(input)
 
     @staticmethod
@@ -109,16 +107,13 @@ class CLI:
         self.agent = agent
         self.pending_prefill = None
         self.multiline = False
-        # Запрос подтверждения инструмента: поток генерации ставит его и ждёт ответа,
-        # а главный поток монитора читает stdin и отвечает. Единый читатель ввода
-        # исключает гонку «подтверждение против перехвата текста», из-за которой ответ
-        # на "Execute? (y/n)" мог быть съеден монитором как текст-прерывание и
-        # подтверждение зависало навсегда, замораживая генерацию и весь ввод.
+        # Единый читатель ввода (подтверждения + прерывания через одну очередь):
+        # иначе ответ на (y/n) монитор мог съесть как текст-прерывание,
+        # и подтверждение зависало навсегда.
         self._confirm_lock = threading.Lock()
         self._confirm_cond = threading.Condition(self._confirm_lock)
         self._confirm_request: Optional[tuple] = None  # (name, args) ожидающего подтверждения
         self._confirm_answer: Optional[bool] = None
-        # Подтверждения идут через CLI, а не напрямую в stdin.
         agent.on_confirm = self._ask_confirm
         self.commands = {
             "/regen": self.cmd_regen,
@@ -175,7 +170,6 @@ class CLI:
                 return
 
         if target_idx is None:
-            # Default: regenerate the most recent assistant response.
             user_msg = history.pop_until_user()
             self.agent._on_history_changed()
             if not user_msg:
@@ -185,8 +179,6 @@ class CLI:
             self._call_chat(user_msg, prefill=self.pending_prefill)
             return
 
-        # Regenerate from a previous assistant response: drop it and everything after,
-        # then re-answer the user message that preceded it.
         user_idx = None
         for j in range(target_idx - 1, -1, -1):
             if isinstance(msgs[j], UserMessage):
@@ -277,8 +269,6 @@ class CLI:
             for name in loaded_tools:
                 if name not in self.agent._all_tools:
                     self.agent.load_tool(name)
-            # Сбрасываем отладочное состояние сверки хэшей префикса: после
-            # подмены истории старые id объектов невалидны для сравнения.
             self.agent._prev_prefix_hashes = {}
             ConsoleUI.system_msg(
                 f"History loaded. Total messages: {len(self.agent.history)}. "
@@ -323,7 +313,6 @@ class CLI:
     def cmd_compact_history(self, parts: list[str]):
         before = self.agent._get_context_usage_percent()
         if getattr(self, "_line_queue", None) is None:
-            # Вне CLI (тесты): компакция синхронно, без stdin-монитора.
             try:
                 compacted = self.agent._auto_summarize_dialogue(force=True)
             except GenerationInterrupted:
@@ -333,9 +322,6 @@ class CLI:
             self._report_compaction(compacted, before, after)
             return
 
-        # Компакция идёт в отдельном потоке, а главный опрашивает stdin: иначе
-        # ввод во время сжатия (q+Enter или любая фраза) никто не читает, и
-        # остановка llm-service не срабатывает — компакция просто дорабатывает.
         result = {}
         pending_text = []
 
@@ -355,8 +341,6 @@ class CLI:
                 if line.lower() in ("q", "stop", "exit-gen", "!q"):
                     self._request_stop()
                     break
-                # Любая другая фраза тоже останавливает компакцию; текст возвращаем в
-                # очередь, чтобы он стал обычным сообщением для следующего хода.
                 pending_text.append(line)
                 self._request_stop()
                 break
@@ -415,9 +399,6 @@ class CLI:
         self._stdin_eof = False
         self._reader_thread = threading.Thread(target=self._stdin_reader, daemon=True)
         self._reader_thread.start()
-        # Подтверждения инструментов тоже читают через общую очередь ввода.
-        # Оборачиваем: _get_line не принимает аргументов, а confirm_action
-        # вызывает _input_fn(prompt) — проглатываем prompt.
         ConsoleUI._input_fn = lambda _prompt="": self._get_line()
 
     def _stdin_reader(self):
@@ -485,8 +466,6 @@ class CLI:
         elif resp in ('q', 'stop', 'exit-gen', '!q'):
             stop = True
         elif raw.strip():
-            # Не ответ на подтверждение: отказываем, текст сохраняем как ввод
-            # пользователя (иначе сообщение, введённое во время промпта, потеряется).
             self.agent.set_pending_interrupt(raw.strip())
         with self._confirm_cond:
             self._confirm_answer = answer
@@ -543,40 +522,28 @@ class CLI:
                         if self.agent.stop_event.is_set():
                             break
                         if self._confirm_request is not None:
-                            # Ждёт подтверждение инструмента — отвечаем до чтения текста,
-                            # чтобы ответ на (y/n) не был перехвачен как сообщение.
                             self._answer_next_confirm()
                             continue
                         line = self._poll_input()
                         if line is not None:
                             if self._confirm_request is not None:
-                                # Подтверждение появилось, пока мы забирали строку:
-                                # возвращаем её в очередь — ответит _answer_next_confirm.
                                 self._inject_line(line)
                                 continue
                             if line.lower() in ('q', 'stop', 'exit-gen', '!q'):
                                 self._request_stop()
                                 break
                             if self.agent._in_tool_execution:
-                                # Сценарий В: инструмент уже выполняется — не убиваем его,
-                                # а ждём завершения; текст вставится после результата.
                                 self.agent.set_pending_interrupt(line)
                                 ConsoleUI.system_msg(
                                     "⏸ Tool in progress — waiting for it to finish; "
                                     "your message will be processed right after the result."
                                 )
                             else:
-                                # Сценарии А/Б: генерация текста/рассуждения — прерываем сразу.
                                 self._request_stop()
                                 redirect = line
                                 break
                         time.sleep(0.05)
                 finally:
-                    # Транспортный InProcessStream по stop_check закрывает соединение
-                    # через shutdown на сокете, поэтому после остановки поток завершается
-                    # быстро. Отсоединения нет: джойним поток без ограничения, чтобы не
-                    # оставлять фонового зомби. Зависший в неинтерраптируемом инструменте
-                    # поток придётся переждать (выход из CLI — Ctrl+C).
                     gen.join(timeout=5)
                     if gen.is_alive():
                         ConsoleUI.system_msg("[hang] generation thread did not stop in 5s; "
@@ -601,7 +568,6 @@ class CLI:
             else:
                 self.agent.chat(message, prefill=prefill)
         except GenerationInterrupted:
-            # Уже выведено в agent.chat; управление возвращается пользователю.
             pass
         except Exception as e:
             ConsoleUI.system_msg(f"[chat error] {e}")

@@ -24,15 +24,12 @@ class TestProjectRoot(unittest.TestCase):
         self.assertEqual(find_project_root(deep), os.path.normpath(root))
 
     def test_skips_empty_git_dir(self):
-        # Пустой каталог .git не считается репозиторием (как и для самого git)
         root = self._make_repo(with_head=False)
         parent = tempfile.mkdtemp()
         os.rename(root, os.path.join(parent, "repo"))
-        # в parent нет .git, поэтому корень не находится
         self.assertIsNone(find_project_root(os.path.join(parent, "repo")))
 
     def test_gitdir_pointer_file(self):
-        # .git как файл-указатель gitdir: ... (субмодули/worktree)
         parent = tempfile.mkdtemp()
         repo = os.path.join(parent, "repo")
         os.makedirs(repo)
@@ -110,20 +107,16 @@ class TestCommandPaths(unittest.TestCase):
 
     def test_flags_not_paths(self):
         ws, _ = self._make_workspace()
-        # опции не должны давать пути
         self.assertEqual(extract_paths(f"Remove-Item -Path {ws}\\x.txt -Force", ws),
                          [os.path.normpath(os.path.join(ws, "x.txt"))])
 
     def test_css_pseudo_class_not_path(self):
-        # a:hover (CSS-псевдокласс) не должен распознаваться как диск/путь
         cmd = "cat > ./site.html << 'EOF'\na:hover { color: red; }\nEOF\n"
         found = extract_paths(cmd, ".")
-        # реальный путь вывода присутствует, а a:hover — нет
         self.assertIn(os.path.normpath("site.html"), found)
         self.assertEqual(len(found), 1)
 
     def test_windows_drive_with_separator_still_detected(self):
-        # настоящий Windows-путь с разделителем (C:\ / C:/) должен ловиться
         found = extract_paths("copy C:\\foo C:/bar", ".")
         self.assertIn(os.path.normpath("C:\\foo"), found)
         self.assertIn(os.path.normpath("C:/bar"), found)

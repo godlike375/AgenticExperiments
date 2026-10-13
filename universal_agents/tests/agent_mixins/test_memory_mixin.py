@@ -39,8 +39,6 @@ class FakeAgent(MemoryMixin):
         self.task_plan_map = {}
         self._compacted_task_ids = set()
         self.stop_event = threading.Event()
-        # Реальный service_llm_call поверх мок-агента: транспорт перехватывается
-        # через mock.patch("...LLMClient.call").
         from universal_agents.llm_client import LLMClient
 
         def _service(msgs, temp=None, timeout=None, tools=True, prefill=None, params=None):
@@ -96,7 +94,6 @@ class TestFirstCompaction(unittest.TestCase):
     def test_layout_summary_then_tail(self):
         self._run()
         msgs = self.agent.history.get_all()
-        # [system, саммари-user, хвост] — старые сообщения удалены
         self.assertEqual(len(msgs), 3)
         self.assertIsInstance(msgs[1], UserMessage)
         self.assertTrue(msgs[1].is_summary)
@@ -155,7 +152,6 @@ class TestSecondCompaction(unittest.TestCase):
         self.assertEqual([type(m).__name__ for m in msgs],
                          ["SystemMessage", "UserMessage", "UserMessage"])
         self.assertTrue(msgs[1].is_summary)
-        # Заметки переписаны с нуля тем же заготовленным текстом
         self.assertIn(SUMMARY_TEXT, msgs[1].content)
 
     def test_prompt_includes_existing_notes_and_segment(self):
@@ -167,14 +163,12 @@ class TestSecondCompaction(unittest.TestCase):
             self.agent._auto_summarize_dialogue()
         msgs = captured[-1]
         instruction = msgs[-1]["content"]
-        # Старые заметки передаются через полную историю, а не отдельным блоком в инструкции
         full_text = "\n".join(
             m["content"] for m in msgs
             if isinstance(m.get("content"), str)
         )
         self.assertIn("Задача: отчёт о дельфинах.", full_text)
         self.assertIn("go on", full_text)
-        # Инструкция напоминает принести свежие вещи, но не дублирует обёртку старого саммари
         self.assertIn(
             "If it's not the first summary then do your best to bring fresh things into this new detailed summary.",
             instruction,
@@ -201,7 +195,6 @@ class TestSecondCompaction(unittest.TestCase):
         ):
             self.agent._auto_summarize_dialogue()
         self.assertEqual(len(self.agent.history), before)
-        # существующее саммари не тронуто при неудаче служебного вызова
         self.assertTrue(_summary_msgs(self.agent.history))
         self.assertIn(SUMMARY_TEXT, self.agent.history.get_all()[1].content)
         self.assertTrue(any("Compression call failed" in n for n in notes))
@@ -209,8 +202,6 @@ class TestSecondCompaction(unittest.TestCase):
 
 class TestBoundary(unittest.TestCase):
     def test_compaction_allowed_on_completed_text_tail(self):
-        # Завершённый текстовый ответ ассистента — безопасная граница: сжатие
-        # разрешено, а сам финальный ответ сохраняется в хвосте (preserve_last).
         agent = FakeAgent()
         _seed_dialog(agent)
         agent.history.add(AssistantMessage(content="text answer only"))
@@ -244,7 +235,6 @@ class TestPersistenceRoundTrip(unittest.TestCase):
             tools, fs, summaries = fresh.load(path)
             extras = fresh.last_loaded_extras
 
-            # саммари восстановлено как user-сообщение с флагом
             smry = [m for m in fresh.get_all() if isinstance(m, UserMessage) and m.is_summary]
             self.assertEqual(len(smry), 1)
             self.assertIn(SUMMARY_TEXT, smry[0].content)
@@ -280,7 +270,6 @@ class TestRecallTools(unittest.TestCase):
 
 class TestSummaryHelpers(unittest.TestCase):
     def test_is_summary_message(self):
-        # Детекция только по метаданным объекта, без текстовых маркеров
         self.assertFalse(is_summary_message(UserMessage("xyz")))
         self.assertFalse(is_summary_message(UserMessage("[SUMMARY of messages 1-5]: xyz")))
         self.assertFalse(is_summary_message(UserMessage("It's an auto-generated text. Your past dialog summary")))
@@ -324,7 +313,6 @@ class TestAgentAutoSummarize(unittest.TestCase):
             result = agent._auto_summarize_dialogue(force=True)
         self.assertFalse(result)
         summ.assert_not_called()
-        # история не изменена: роли те же, summary-сообщение не добавлено
         roles = [m.to_api_dict()["role"] for m in agent.history]
         self.assertEqual(roles, ["system", "user", "assistant"])
 
@@ -359,7 +347,6 @@ class TestAgentAutoSummarize(unittest.TestCase):
     def test_auto_summarize_suppression_skips_and_chat_resets(self):
         agent = LLMAgent(system_prompt="sys")
         fake = AssistantMessage(content="answer")
-        # История над порогом, но компакция подавлена прерванной попыткой.
         agent._auto_summarize_suppressed = True
         with mock.patch("universal_agents.agent.LLMClient.call", return_value=(fake, None, None)), \
                 mock.patch.object(agent, "_auto_summarize_dialogue") as auto, \
@@ -369,7 +356,6 @@ class TestAgentAutoSummarize(unittest.TestCase):
             agent.history.add(AssistantMessage(content="a"))
             agent._run_turn_loop(max_iter=1, prefill="")
         auto.assert_not_called()
-        # Новый ход пользователя через chat() снимает cooldown.
         fake2 = AssistantMessage(content="fresh answer")
         with mock.patch("universal_agents.agent.LLMClient.call", return_value=(fake2, None, None)), \
                 mock.patch.object(agent, "_autosave"):

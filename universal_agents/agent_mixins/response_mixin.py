@@ -12,8 +12,6 @@ from universal_agents.models import AssistantMessage, ToolCall, ToolResult
 from universal_agents.tool_parsing import tc_name, tc_args, detect_broken_call, args_are_valid
 from universal_agents.tools.builtin import respond_to_system
 
-# Prefill для перегенерации голого вызова инструмента без пояснения.
-# 'Assistant:' — стартовая приставка, после которой модель должна написать текст.
 _NO_COMMENT_PREFILL = 'LLM Agent: "'
 
 
@@ -54,9 +52,6 @@ class SimReasoningGroup:
     (обычные параметры). Если модель дописала ответ или вызвала инструмент уже
     в фазе размышлений — принимается как есть, лишний вызов не нужен."""
 
-    # ── Симуляция reasoning (Config.SIMULATED_REASONING_*) ────────────────
-    # Имя секции берётся из Config.SIMULATED_REASONING_TAGS (единственный источник
-    # истины): ответ начинается с неё, а после её закрытия идёт свободный ответ.
 
     def __init__(self, retries: int):
         self.reset(retries)
@@ -70,24 +65,10 @@ class SimReasoningGroup:
         self.reasoning = ""
         self.retries_left = retries
         self._continuation = False
-        # Фаза: "think" (размышления отдельным вызовом), "answer" (ответ),
-        # "single" (старый режим одним вызовом — ни одна настройка не задана).
         self.phase = "think" if self._reasoning_overrides() else "single"
-        # Сколько ведущих символов self.content уже показано в живом выводе.
-        # Растёт по мере стриминга; при продолжении prefill = self.content, а
-        # показать надо только хвост после этой отметки (приставку NO COMMENT).
-        # Шлюз мог приклеить prefill к ответу (apply_prefill это уже учёл) либо обрезать
-        # его — тогда apply_prefill добавит обратно. Оффсеты вставок при этом сохраняются:
-        # приставка всегда в начале контента до этого вызова.
-        # Отметка — всегда длина контента: всё, что после неё, ещё не показано.
-        # Невыведенный \n перед отметкой — ок: срез prefill[_shown:] даёт именно
-        # невыведенный хвост, и продолжение ничего не дублирует.
         self._shown = 0
-        # Оффсеты вклиненных нами кусков (приставки _NO_COMMENT_PREFILL) в self.content:
-        # это наш prefill, а не текст модели — в ответ и историю он попадать не должен.
         self._injected: list[int] = []
 
-    # ── параметры вызова ─────────────────────────────────────────────────
 
     @staticmethod
     def _reasoning_overrides() -> dict:
@@ -129,7 +110,6 @@ class SimReasoningGroup:
         """Длина уже показанной части prefill — печатать в живой вывод только хвост."""
         return self._shown
 
-    # ── итог вызова ──────────────────────────────────────────────────────
 
     def absorb(self, message_obj, prefill: str) -> None:
         """Забирает ответ вызова (текст, tool_calls, reasoning) в накопленный контент."""
@@ -137,8 +117,6 @@ class SimReasoningGroup:
         self.content = raw
         self.tool_calls.extend(message_obj.tool_calls or [])
         self.reasoning += getattr(message_obj, "reasoning_content", "") or ""
-        # В живой вывод ушёл весь накопленный контент: prefill (с учётом уже показанной
-        # части) плюс все дельты стрима. Отметка нужна для следующего продолжения.
         self._shown = len(self.content)
 
     def close_section(self) -> None:
@@ -190,8 +168,6 @@ class SimReasoningGroup:
 
     def start_continuation(self) -> None:
         """Продолжение пустого ответа: приставка после секции, вынуждающая написать текст."""
-        # Приставка ещё не показана: отметка остаётся на границе уже выведенного
-        # контента, поэтому следующий вызов напечатает только её (prefill_shown).
         self._shown = len(self.content)
         self._injected.append(len(self.content))
         self.content += _NO_COMMENT_PREFILL
@@ -277,14 +253,10 @@ class ResponseMixin:
         group.close_section()
         appended = group.take_appended()
         if appended and getattr(self, "on_stream_chunk", None):
-            # Дописанный закрывающий тег в живой поток не попал (он не часть ответа
-            # модели) — показываем пользователю, иначе тег выглядит незакрытым.
             self.on_stream_chunk(appended)
         answer = group.answer_text()
         if answer.strip():
             return self._sim_message(group)
-        # Модель вправе закрыть рассуждение и сразу
-        # уйти в инструмент (продолжение тут только зациклило бы ход).
 
         if not group.tool_calls and group.retries_left > 0:
             group.retries_left -= 1
@@ -295,8 +267,6 @@ class ResponseMixin:
             )
             return None
         if group.tool_calls:
-            # Модель закрыла секцию и сразу ушла в инструмент: продолжение тут
-            # только зациклило бы ход — вызов принимается как есть (§2.8).
             self.on_system_msg(
                 f"[SIM REASONING] No answer text after </{group.tag}>; "
                 f"tool call accepted as-is."
@@ -310,8 +280,6 @@ class ResponseMixin:
 
     def _sim_message(self, group: SimReasoningGroup) -> AssistantMessage:
         """Собирает накопленный ответ в одно AssistantMessage (контент уже в стриме показан)."""
-        # В историю уходит ответ модели без наших вставок (как и в общем пути NO COMMENT):
-        # приставка _NO_COMMENT_PREFILL — служебный prefill, а не текст ассистента.
         return self._assemble_assistant_message(
             group.final_content(), group.tool_calls, group.reasoning, streamed=True
         )
@@ -342,20 +310,14 @@ class ResponseMixin:
 
         content = message_obj.content or ""
         clean_content = content.strip()
-        # Впрыснутый prefill сам по себе объяснением не считается:
-        # модель должна написать текст сама. Обычно prefill попадает в content как
-        # отдельное сообщение (тогда substantive == clean_content); если же шлюз
-        # приклеил его к ответу — срезаем маркер перед проверкой.
         substantive = clean_content
         if substantive.startswith(_NO_COMMENT_PREFILL):
             substantive = substantive[len(_NO_COMMENT_PREFILL):].strip()
         assistant_msg = self._build_assistant_msg(message_obj, clean_content)
 
-        # ── Служебный режим: инструменты не исполняются ──
         if not allow_tools and assistant_msg.has_tool_calls():
             tool_names = [tc.name for tc in assistant_msg.tool_calls]
             if substantive:
-                # Есть текст и tool_calls: инструменты отбрасываем, оставляем только текст.
                 assistant_msg.tool_calls = []
                 if message_obj.tool_calls:
                     message_obj.tool_calls = []
@@ -364,7 +326,6 @@ class ResponseMixin:
                     f"(tools not allowed); keeping text only."
                 )
             else:
-                # Нет текста — только tool_calls: перегенерируем (NO COMMENT / ошибка).
                 assistant_msg.tool_calls = []
                 if message_obj.tool_calls:
                     message_obj.tool_calls = []
@@ -398,15 +359,6 @@ class ResponseMixin:
                 if message_obj.tool_calls:
                     message_obj.tool_calls = [tc for tc in message_obj.tool_calls if tc.id == chosen_tc.id]
 
-        # Голый вызов инструмента без пояснения (reasoning выключен): стираем
-        # (не добавляем) пустой ответ ассистента и перегенерируем следующий ход
-        # с prefill, чтобы модель начала с текстового комментария перед вызовом.
-        # При активном reasoning это не нужено — модель уже прокомментировала ход
-        # в reasoning_content. Лимит ретраев у агента; пока они есть (попытка
-        # считается только когда prefill реально запрошен) — см. NO_COMMENT_RETRIES.
-        # Ретраи исчерпаны (это касается и respond_to_system без pending-задачи):
-        # принимаем голый вызов как есть — инструмент сам вернёт явную ошибку или
-        # выполнится без комментария, и цикл не зациклится.
         if (
             assistant_msg.has_tool_calls()
             and not substantive
@@ -431,19 +383,13 @@ class ResponseMixin:
             self.on_system_msg("[EMPTY RESPONSE] Model returned no content. Discarding and retrying...")
             return clean_content, True, False, None
 
-        # Snapshot pending ДО _execute_tools: edit-инструмент сам ставит pending из dry_run,
-        # и его превью-результат не должен считаться мусором подтверждения (§1.11).
         pending_before = self._pending_operation is not None
         self._append_assistant(assistant_msg)
         if pending_before and respond_to_system.__name__ not in [tc.name for tc in assistant_msg.tool_calls]:
-            # Текст вместо вызова или чужой инструмент при висящем pending — мусор.
             self._mark_confirmation_junk(assistant_msg)
 
         if not assistant_msg.has_tool_calls():
             scan_text = broken_scan_text if broken_scan_text is not None else clean_content
-            # Ответ при симуляции reasoning идёт без обязательных тегов формата:
-            # базовый гейт «есть XML-тег» неприменим, поэтому сканируем свободный
-            # текст (теги ВНУТРИ него и «голый» вызов на весь ответ).
             if not skip_broken_detection and detect_broken_call(
                 scan_text,
                 self._known_tool_names(),
@@ -459,18 +405,15 @@ class ResponseMixin:
             tname = name_by_id.get(tr.tool_call_id, "")
             if tname == respond_to_system.__name__:
                 if pending_before and tr.is_error and not tr.is_user_denied:
-                    # Упавшая пара answer (вызов + результат) внутри активного подтверждения.
                     self._mark_confirmation_junk(assistant_msg)
                     self._mark_confirmation_junk(tr)
             elif pending_before:
-                # Чужой инструмент при висящем pending — мусор.
                 self._mark_confirmation_junk(tr)
         self._append_tool_results(tool_results)
         if any(
                 tr.name == respond_to_system.__name__ and not tr.is_error and not tr.is_user_denied
             for tr in tool_results
         ):
-            # Подтверждение принято — вычищаем наг и неверные попытки (§1.11).
             self._scrub_confirmation_trail()
 
 

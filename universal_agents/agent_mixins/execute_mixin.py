@@ -27,8 +27,6 @@ class ExecuteMixin:
         history_before_current_turn = self.history.get_all()[:-1]
         seen_in_batch: set[str] = set()
 
-        # На время выполнения инструментов регистрируем флаг прерывания, чтобы
-        # долгий subprocess можно было принудительно убить по запросу пользователя.
         set_interrupt_event(self.stop_event)
         self._in_tool_execution = True
         try:
@@ -36,7 +34,6 @@ class ExecuteMixin:
                 name = tc.name
                 args_str = tc.arguments or "{}"
 
-                # Инструмент запрещён для суб-агента: схема в префиксе ради KV-cache, но вызов отклоняется.
                 if self.tools_manager.is_denied(name):
                     err_msg = err(
                         f": tool '{name}' is forbidden for this sub-agent. "
@@ -46,8 +43,6 @@ class ExecuteMixin:
                     results.append(ToolResult.error(tc.id, name, err_msg))
                     continue
 
-                # Инструмент помечен на отложенную выгрузку (unload_tool), но ещё не убран из
-                # префикса ради KV-кэша. Модель пытается его вызвать — возвращаем явную ошибку.
                 if self.tools_manager.is_pending_unload(name):
                     err_msg = err(
                         f": tool '{name}' was unloaded. "
@@ -57,7 +52,6 @@ class ExecuteMixin:
                     results.append(ToolResult.error(tc.id, name, err_msg))
                     continue
 
-                # Дубликат внутри текущего пакета (два одинаковых вызова в одном ответе)
                 norm = self.loop_detector.normalize_args(args_str)
                 batch_key = f"{name}:{norm}"
                 if batch_key in seen_in_batch:
@@ -92,8 +86,6 @@ class ExecuteMixin:
 
                 args_dict = parse_tool_args(args_str)
 
-                # Принудительный порядок декомпозиции: неверный вызов have_done
-                # → ошибка → существующий механизм перегенерации ответа модели.
                 if name == DONE_TOOL:
                     order_err = validate_task_mark_call(
                         history_before_current_turn, args_dict, self.task_plan_map, self._compacted_task_ids
@@ -119,11 +111,7 @@ class ExecuteMixin:
                             results.append(ToolResult.user_denied(tc.id, name))
                             continue
 
-                # Многофазное взаимодействие: dry_run → превью → respond_to_system() → реальное выполнение.
                 if tool_info.get('requires_model_confirmation', False):
-                    # Изолированный обёрнутый инструмент (docs/TOOL_ISOLATION_SPEC.md §4, §6.3):
-                    # тело (расчёт превью и применение правки) — в воркере группы; протокол
-                    # подтверждения (превью → respond_to_system → применение) остаётся в хосте.
                     if tool_info.get('is_external') and self.group_manager.isolated:
                         group = tool_info.get('group', 'internal')
                         wr = self.group_manager.call(
@@ -166,7 +154,6 @@ class ExecuteMixin:
                         results.append(ToolResult.error(tc.id, name, str(e)))
                         continue
 
-                    # Строковый результат dry_run (ошибка/'Nothing changed') — обычный ответ, не поломка.
                     if isinstance(result, str):
                         if is_error_content(result):
                             results.append(ToolResult(tc.id, name, result, is_error=True))
@@ -174,9 +161,6 @@ class ExecuteMixin:
                             results.append(ToolResult.success(tc.id, name, result))
                         continue
 
-                    # Инструмент обязан вернуть (preview, resolve, ask) из dry_run:
-                    # ask — строка с инструкцией зарезолвить операцию через 'answer',
-                    # которую инструмент составляет сам. Без ask инструмент сломан.
                     if not (isinstance(result, tuple) and len(result) == 3):
                         self.on_system_msg(f"⚠️ [ERROR] Tool '{name}' with requires_model_confirmation must return (preview, resolve, ask) from dry_run.")
                         results.append(ToolResult.error(tc.id, name, "Tool configuration error: dry_run must return (preview, resolve, ask)."))
@@ -198,7 +182,6 @@ class ExecuteMixin:
                     if tool_info.get('has_agent_param') or tool_info.get('is_instance_method'):
                         full_result = handler(self, **args_dict)
                     elif tool_info.get('is_external'):
-                        # Внешний инструмент: тело в воркере группы (или in-process без изоляции).
                         group = tool_info.get('group', 'internal')
                         wr = self.group_manager.call(group, name, args_dict, stop_check=self._stop_check)
                         if wr.status == "error":
@@ -206,8 +189,6 @@ class ExecuteMixin:
                         full_result = wr.value
                     else:
                         full_result = handler(**args_dict)
-                    # Инструмент вернул ToolOutput: текст идёт как обычно (усечение/
-                    # ошибки/саммаризация), картинки — в side-field ToolResult.images.
                     result_images: list[str] = []
                     if isinstance(full_result, ToolOutput):
                         result_images = full_result.images
@@ -216,9 +197,6 @@ class ExecuteMixin:
                     if is_error_content(content):
                         tr = ToolResult(tc.id, name, content, is_error=True)
                     else:
-                        # Жёсткий лимит вывода любого инструмента — держим контекст в рамках.
-                        # Инструменты с флагом self_truncating (@tool) уже сами режут вывод
-                        # (с подсказками по продолжению) — их не трогаем.
                         self_truncating = bool(
                             self.tools_manager.tools_map.get(name, {}).get("self_truncating")
                         )
@@ -232,14 +210,11 @@ class ExecuteMixin:
                         self._tool_usage[name] = self._tool_usage.get(name, 0) + 1
                         if name == _read_tool.__name__ and self._read_registrations:
                             self.file_states.mark_tool_call(self._read_registrations.pop(0), tr.tool_call_id)
-                        # Чтение не пересжимаем в память: скелет уже компактный, диапазон/маленький
-                        # файл — сырые строки, которые должны остаться в контексте как есть.
                         if name == _read_tool.__name__:
                             tr.skip_summarize = True
 
                     if result_images:
                         tr.images = list(result_images)
-                        # Картинки — короткая подпись (скриншот), суммаризация не нужна.
                         tr.skip_summarize = True
 
                     if not getattr(tr, 'skip_summarize', False):
@@ -251,9 +226,6 @@ class ExecuteMixin:
                     self.on_system_msg(f"⚠️ [ERROR] Tool '{name}' FAILED: {e}")
                     results.append(ToolResult.error(tc.id, name, str(e)))
 
-                # Авто-сохранение после КАЖДОГО выполненного инструмента, чтобы не терять
-                # промежуточный результат при сбое/остановке. (Один быстрый вызов — файл
-                # один на диалог, просто перезапись.)
                 try:
                     self.autosave()
                 except Exception:

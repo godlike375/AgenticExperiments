@@ -368,11 +368,8 @@ class TestLoopDetector(unittest.TestCase):
             UserMessage("hi"),
             AssistantMessage(content="", tool_calls=[ToolCall(id="t2", name=_search_tool.__name__, arguments="{}")]),
         ]
-        # read вызывался до начала хода — не считается дублем
         self.assertFalse(self.detector.check_duplicate_in_turn(_read_tool.__name__, "{}", history))
-        # search уже вызван в текущем ходу с теми же аргументами — дубль
         self.assertTrue(self.detector.check_duplicate_in_turn(_search_tool.__name__, "{}", history))
-        # другие аргументы — не дубль
         self.assertFalse(self.detector.check_duplicate_in_turn(_search_tool.__name__, '{"x": 1}', history))
 
     def test_detects_semantically_duplicate_after_user(self):
@@ -411,11 +408,9 @@ class TestLoopDetector(unittest.TestCase):
                 ToolCall(id="c1", name=PLAN_TOOL, arguments='{"plan":[{"id":"t1","title":"X"}]}')
             ]),
         ]
-        # Повторный read ПОСЛЕ make_plan не считается дублем (ревизия = граница контекста)
         self.assertFalse(self.detector.check_duplicate_in_turn(_read_tool.__name__, "{}", history))
 
     def test_failed_call_is_not_duplicate(self):
-        # have_done отклонён (NO-WORK-DONE) → повторный вызов после работы не дубль
         history = [
             UserMessage("do the task"),
             AssistantMessage(content="", tool_calls=[ToolCall(id="t1", name=_have_done_tool.__name__, arguments='{"id":"a1"}')]),
@@ -426,7 +421,6 @@ class TestLoopDetector(unittest.TestCase):
         self.assertFalse(self.detector.check_duplicate_in_turn(_have_done_tool.__name__, '{"id":"a1"}', history))
 
     def test_succeeded_call_still_counts_as_duplicate(self):
-        # успешный вызов с теми же аргументами — дубль (реального прогресса не было)
         history = [
             UserMessage("do the task"),
             AssistantMessage(content="", tool_calls=[ToolCall(id="t1", name=_read_tool.__name__, arguments="{}")]),
@@ -435,7 +429,6 @@ class TestLoopDetector(unittest.TestCase):
         self.assertTrue(self.detector.check_duplicate_in_turn(_read_tool.__name__, "{}", history))
 
     def test_duplicate_after_other_tool_is_not_loop(self):
-        # Если между двумя одинаковыми вызовами был другой инструмент — это не зацикливание.
         history = [
             UserMessage("do the task"),
             AssistantMessage(content="", tool_calls=[ToolCall(id="t1", name=_line_range_edit_tool.__name__, arguments='{"path":"x.txt"}')]),
@@ -446,7 +439,6 @@ class TestLoopDetector(unittest.TestCase):
         self.assertFalse(self.detector.check_duplicate_in_turn(_line_range_edit_tool.__name__, '{"path":"x.txt"}', history))
 
     def test_consecutive_same_call_is_still_duplicate(self):
-        # Два одинаковых вызова подряд (без другого инструмента между ними) — дубль
         history = [
             UserMessage("do the task"),
             AssistantMessage(content="", tool_calls=[ToolCall(id="t1", name=_line_range_edit_tool.__name__, arguments='{"path":"x.txt"}')]),
@@ -458,7 +450,6 @@ class TestLoopDetector(unittest.TestCase):
 
 class TestTokenUsageTracker(unittest.TestCase):
     def test_estimate_tokens(self):
-        # int(len / CHARS_PER_TOKEN): 46/2.35 = 19.57 -> 19, 47/2.35 = 20.0 -> 20
         self.assertEqual(TokenUsageTracker.estimate_tokens("x" * 46), 19)
         self.assertEqual(TokenUsageTracker.estimate_tokens("x" * 47), 20)
         self.assertEqual(TokenUsageTracker.estimate_tokens(""), 0)
@@ -474,7 +465,6 @@ class TestTokenUsageTracker(unittest.TestCase):
         self.assertEqual(tracker.format_user_token_info(), "")
         tracker.update_from_usage({"prompt_tokens": 300, "completion_tokens": 50, "total_tokens": 350})
         info = tracker.format_user_token_info()
-        # «Remaining» — окно контекста (max - prompt_tokens последнего вызова).
         self.assertIn("350", info)
         self.assertIn("700", info)
 

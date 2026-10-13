@@ -32,17 +32,11 @@ def is_error_content(content: str) -> bool:
     return s.startswith("Error")
 
 
-# Сильные признаки XML-вызова: известные имена тегов
 _STRONG_TAGS = ("tool_call", "tool", "function", "call")
 
 
-# Имя XML-тега (упрощённо, ASCII):
-#   NameStartChar: [a-zA-Z_:]
-#   NameChar:      [a-zA-Z0-9_:.\-]
 _XML_NAME = r'[a-zA-Z_:][a-zA-Z0-9_:.\-]*'
 
-# Валидный открывающий тег: <name, после которого идёт
-# пробел / '/' / '>' или конец строки (тег мог быть обрезан).
 _OPEN_TAG_RE = re.compile(rf'<\s*{_XML_NAME}(?=[\s/>]|$)')
 
 
@@ -85,25 +79,20 @@ def detect_broken_call(content: str, tool_names: set[str], require_tag: bool = T
     if not content or not content.strip():
         return False
 
-    # Базовый гейт: хотя бы один корректный открывающий тег.
     if require_tag and not _has_tag(content):
         return False
 
-    # 1) известные имена тегов (полное совпадение имени)
     if any(_has_tag(content, t) for t in _STRONG_TAGS):
         return True
 
     if require_tag:
-        # 2) тег уже есть (гейт пройден) + признак вызова известного инструмента
         return any(
             re.search(rf'\b{re.escape(name)}\s*[\({{]', content)
             for name in tool_names
         )
 
-    # 3) гейт снят извне (сканируется свободный ответ при симуляции reasoning):
-    #    теги ВНУТРИ него уже проверены выше, а упоминание инструмента в прозе — норма,
-    #    а не сломанный вызов («read() выполнен», «Вызываю read() для…»). Ловим только
-    #    заведомо сломанный синтаксис — когда вызов занимает ВЕСЬ ответ.
+    # Гейт снят (require_tag=False): reasoning-теги иначе давали ложный BROKEN CALL
+    # на обычной прозе. Ловим только заведомо сломанный синтаксис — вызов на весь ответ.
     return _is_standalone_call(content, tool_names)
 
 

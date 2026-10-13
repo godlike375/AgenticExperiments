@@ -33,7 +33,6 @@ def run_subagent_once(agent, prompt: str, temp: float = 0.2, max_iter: int = Non
     result = sub.run(prompt)
     agent.on_system_msg(f"[DELEGATE] Completed. Context size in sub-agent: {sub.tokens_spent}")
 
-    # read-skip: наследуем прочитанные субагентом файлы родителем.
     parent_regs = getattr(agent, '_read_registrations', None)
     if parent_regs is not None:
         for p in sub._agent._read_registrations:
@@ -80,10 +79,8 @@ class SubAgent:
         self._depth = depth
         self._group_manager = group_manager
 
-        # Если указан системный промпт родителя — используем его для разделения KV-кеша
         effective_system_prompt = parent_system_prompt if parent_system_prompt is not None else system_prompt
 
-        # Полный контекст: без деления бюджета — сервер сам управляет limits
         effective_max_context_tokens = max_context_tokens if max_context_tokens is not None else Config.MAX_CONTEXT_TOKENS
         self._own_tracker = TokenUsageTracker(effective_system_prompt, effective_max_context_tokens)
 
@@ -92,7 +89,6 @@ class SubAgent:
             if output:
                 on_log(output)
 
-        # Streaming для субагента (по умолчанию — вывод в stdout)
         if on_stream_chunk is None:
             def _sub_stream_start():
                 sys.stdout.write("[🤖sub-agent] ")
@@ -146,7 +142,6 @@ class SubAgent:
             disable_per_msg_summarization=disable_per_msg_summarization,
         )
 
-        # Клонируем историю родителя как префикс для KV-cache reuse
         if parent_history:
             self._agent.history.extend(parent_history)
 

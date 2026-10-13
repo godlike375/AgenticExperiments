@@ -10,7 +10,6 @@ from universal_agents.tools.builtin import (
     unload_tool as _unload_tool_tool,
 )
 
-# Инструменты, которые нельзя отключить.
 CORE_TOOLS = (_load_tool_tool.__name__, _unload_tool_tool.__name__)
 
 
@@ -19,7 +18,6 @@ def _tools_directory() -> str:
     return os.path.join(os.path.dirname(__file__), "tools")
 
 
-# Инструменты, управляемые системой (модель не грузит их через load_tool): have_done подключается только после успешного make_plan.
 MANAGED_TOOLS = {_have_done_tool.__name__}
 
 
@@ -34,9 +32,7 @@ class ToolManager:
         self._tools_config = tools_config
         self._tools_map: dict[str, dict] = {}
         self._all_known_names: Optional[set[str]] = None
-        # Инструменты, помеченные unload_tool, но ещё не выгруженные: остаются в префиксе (KV-cache safe), вызов возвращает ошибку «was unloaded»; реальное удаление — flush_pending_unloads().
         self._pending_unload: set[str] = set()
-        # Запретительный конфиг denied_tools: схемы остаются в префиксе (KV-cache safe), вызов возвращает ошибку «forbidden» (см. ExecuteMixin).
         self._denied: set[str] = set()
         if external_plugins:
             for name, func in external_plugins.items():
@@ -61,7 +57,6 @@ class ToolManager:
 
     @property
     def schemas(self) -> list[dict]:
-        # Детерминированный порядок схем: KV-кэш переиспользуется только при байт-идентичном массиве, поэтому не меняем порядок присутствующих схем.
         return [self._tools_map[n]["schema"] for n in sorted(self._tools_map)]
 
     @property
@@ -69,8 +64,6 @@ class ToolManager:
         return self._tools_config
 
     def _filter(self) -> None:
-        # Скрытые низкоуровневые инструменты (hidden=True) не попадают в активную карту:
-        # их вызывает только воркер своей группы, модель их не видит и через load_tool не грузит.
         all_names = {k for k, v in self._tools_map.items() if not v.get("hidden")}
         if self._tools_config is None:
             active = all_names
@@ -107,7 +100,6 @@ class ToolManager:
 
     def load(self, name: str) -> str:
         """Включает ранее отключённый инструмент по имени."""
-        # Если инструмент был на отложенной выгрузке — снимаем метку (он ещё в _tools_map, префикс не менялся), повторно не грузим.
         if name in self._pending_unload:
             self._pending_unload.discard(name)
             return f"'{name}' re-enabled (unload cancelled)."

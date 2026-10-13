@@ -33,31 +33,20 @@ from universal_agents.agent_mixins import (
 )
 from universal_agents.exceptions import GenerationInterrupted
 
-# Лимит повторов ошибок за один chat() до сдачи (§1.10): счёт по-сигнатурный —
-# любая сигнатура (инструмент + аргументы + текст ошибки), набравшая лимит, прерывает ход.
 MAX_CONSECUTIVE_ERRORS = 10
 
-# Стабильная категория ошибок без инструмента (пустой ответ и т.п.).
 _NO_TOOL_ERROR_SIGNATURE = "<no_tool_call>"
 
-# Вердикт детектора дублей «повтор при живой pending-операции»: текст модели — не дубль
-# качества, а невыполненный протокол подтверждения. Ответ не трогает лестница дублей:
-# его обрабатывает guard в _run_turn_loop (стирание, лимит срабатываний, наг, §1.11).
 _CONFIRMATION_GUARD_VERDICT = "confirmation_guard"
 
-# Наг за повторённый ответ: вшивается в конец последнего сообщения при детекции повтора
-# ответа или reasoning-блока (тот же механизм устранения повтора из §1).
 _REPEAT_ANSWER_NAG = (
     f"\n\n{ENVIRONMENT_PREFIX} Your previous answer was the same to the latest one. "
     f"Please do NOT repeat it again and answer differently."
     f"{ENVIRONMENT_PREFIX_END}"
 )
 
-# Устойчивый префикс нага answer-guard'а: тесты проверяют его присутствие в истории
-# и API-пейлоаде, поэтому он живёт в одном месте. Формулировка не меняется.
 _GUARD_NAG_PREFIX = "You can't continue"
 
-# Шаблон системной шапки, которую prepare_messages_for_api приклеивает к user-контенту.
 _SYSTEM_HEADER_RE = re.compile(r"^\{<SYSTEM>:.*?\}\n\n", re.DOTALL)
 
 
@@ -77,14 +66,11 @@ class TurnState:
     """
 
     prefill: Optional[str] = None
-    # Per-signature счётчики ошибок за ход: каждая сигнатура (см. _last_failed_tool_signature)
-    # растит свой счётчик, чередование [A,B,A,B,...] — тоже зацикливание и прерывается.
     error_counts: dict[str, int] = field(default_factory=dict)
     tool_error_retries_left: int = field(default_factory=lambda: Config.ERROR_RECOVERY_RETRIES)
     broken_regen_left: int = field(default_factory=lambda: Config.BROKEN_CALL_REGEN_RETRIES)
     broken_fix_left: int = field(default_factory=lambda: Config.BROKEN_CALL_FIX_RETRIES)
     no_comment_retries_left: int = field(default_factory=lambda: Config.NO_COMMENT_RETRIES)
-    # Осталось срабатываний guard'а pending-операции за ход; после исчерпания — сдача хода.
     guard_retries_left: int = field(default_factory=lambda: Config.ANSWER_GUARD_MAX_RETRIES)
     structured_output: Optional[StructuredOutputConfig] = None
     structured_output_phase: int = 0
@@ -227,7 +213,6 @@ class LLMAgent(
         self.on_system_msg = on_system_msg
         self.self_consistency_mode = False
         self.sc_samples = 3
-        # Внешний трекер (общий учёт с суб-агентом) или собственный.
         if token_tracker is not None:
             self.token_tracker = token_tracker
         else:
@@ -271,31 +256,19 @@ class LLMAgent(
         self.task_plan: list[str] = []
         self.task_plan_map: dict = {}
         self._pending_operation: Optional[dict] = None
-        # Переиспользуемый наг guard'а (один объект на цикл — байт-стабильный KV-префикс).
         self._guard_nag_message: Optional[UserMessage] = None
-        # Мусор подтверждения до успешного respond_to_system (id→obj, identity-проверка).
         self._confirmation_junk: dict[int, object] = {}
 
-        # Авто-сохранение (защита от сбоев): один файл на диалог с меткой времени
-        # запуска/сброса; перезаписывается при каждом снимке. Ротация оставляет
-        # AUTOSAVE_KEEP последних файлов (по одному на диалог/запуск).
-        # Пользовательский ввод во время генерации (redirect): когда выполняется инструмент,
-        # текст пользователя не прерывает инструмент, а ждёт его завершения, после чего
-        # вставляется в историю и запускается новая генерация (сценарий В).
         self.autosave_enabled = Config.AUTOSAVE_ENABLED if autosave_enabled is None else autosave_enabled
         self.autosave_dir = Config.AUTOSAVE_DIR if autosave_dir is None else autosave_dir
         self.autosave_keep = Config.AUTOSAVE_KEEP if autosave_keep is None else autosave_keep
         self._autosave_path = None
         self.reset_autosave_path()
-        # Прерывание генерации: Event ставится из фонового монитора (CLI) или on_interrupt_check.
         self.stop_event = threading.Event()
         self.on_interrupt_check = on_interrupt_check if on_interrupt_check is not None else (lambda: False)
         self._stop_check = lambda: self.stop_event.is_set() or bool(self.on_interrupt_check())
         self.pending_interrupt: Optional[str] = None
-        # True, пока поток генерации исполняет инструменты (нужно UI для выбора поведения).
         self._in_tool_execution = False
-        # True во время служебного хода (_run_service_turn): блокирует per-message
-        # суммаризацию (сообщения служебного хода откатываются), авто-сейв и компакцию.
         self._in_service_turn = False
 
     @property
@@ -552,7 +525,6 @@ class LLMAgent(
     def clear_pending_interrupt(self) -> None:
         self.pending_interrupt = None
 
-    # --------------------------------------------------------
 
     def _call_llm(
         self,
@@ -592,10 +564,6 @@ class LLMAgent(
             reasoning_effort=reasoning_effort,
             stop_markers=stop_markers,
         )
-        # Обрезка и определение флага: LLMClient.call уже обрезал при реальном вызове
-        # и вернул flag на message_obj.stopped_at_marker; при мокировании (тесты) вызов
-        # проходит мимо и флаг теряется. Повторная обрезка безопасна — если маркер уже
-        # удалён, apply_stop_markers вернёт (контент, False).
         stopped_at_marker = bool(getattr(message_obj, "stopped_at_marker", False))
         if stop_markers and message_obj is not None and getattr(message_obj, "content", None):
             content, marker_hit = apply_stop_markers(message_obj.content, stop_markers)
@@ -631,8 +599,6 @@ class LLMAgent(
                 prompt = m.get("content")
                 break
         last_user = self.history.get_last_user_message()
-        # prepare_messages_for_api приклеивает шапку <SYSTEM> к последнему user-контенту;
-        # сравниваем с историей, срезав шапку (иначе consistency-драфты дублировали бы промпт).
         prompt_clean = _strip_system_header(prompt) if prompt else None
         if prompt_clean is not None and last_user is not None and (last_user.content or "") == prompt_clean:
             append_prompt = False  # промпт уже последнее сообщение в истории (consistency-драфт)
@@ -676,7 +642,6 @@ class LLMAgent(
         keep = Config.SERVICE_TURN_KEEP_IN_HISTORY if keep_in_history is None else keep_in_history
         max_iter = max_iter if max_iter is not None else Config.SERVICE_TURN_MAX_ITER
         start_len = len(self.history.get_all())
-        # Отдельный служебный стрим-канал: сервисный контент не должен течь в основной поток.
         stream_swap = None
         if self.streaming_enabled and self.on_service_stream_chunk:
             stream_swap = (self.on_stream_start, self.on_stream_chunk, self.on_stream_end)
@@ -687,7 +652,6 @@ class LLMAgent(
         prev_suppressed = self._auto_summarize_suppressed
         self._auto_summarize_suppressed = True
         self._in_service_turn = True
-        # Служебный ход применяет свои temp/timeout/params поверх текущих _gen_params.
         prev_params = self._gen_params
         if params is not None or temp is not None or timeout is not None:
             p = params or GenerationParams()
@@ -706,13 +670,9 @@ class LLMAgent(
                 service_mode=True,
             ) or ""
         finally:
-            # Откат даже при исключении: служебные сообщения не должны оставаться
-            # в истории (разве что keep). Восстановление флагов/стрим-канала — тоже.
             if not keep:
                 end = len(self.history.get_all())
                 if end > start_len:
-                    # Откат не трогает шапки уцелевших сообщений: их байта не менялись,
-                    # поэтому префикс остаётся байт-идентичным (§1.2).
                     self.history.remove_at(range(start_len, end))
                     self.history.normalize()
                     self._on_history_changed()
@@ -799,12 +759,10 @@ class LLMAgent(
             seen_in_batch: set[str] = set()
             for tc in message_obj.tool_calls:
                 norm = self.loop_detector.normalize_args(tc_args(tc))
-                # Дубликат внутри текущего пакета (два одинаковых вызова в одном ответе)
                 batch_key = f"{tc_name(tc)}:{norm}"
                 if batch_key in seen_in_batch:
                     return 'tool_call', (tc_name(tc), tc_args(tc))
                 seen_in_batch.add(batch_key)
-                # Дубликат с предыдущими вызовами в текущем ходу
                 if self.loop_detector.check_duplicate_in_turn(tc_name(tc), tc_args(tc), current_history):
                     return 'tool_call', (tc_name(tc), tc_args(tc))
             return None
@@ -861,7 +819,6 @@ class LLMAgent(
                 last_msg = active_messages[-1]
                 last_msg["content"] = (last_msg.get("content") or "") + last_retry_warning
 
-            # Транспорт выбирается внутри _call_llm (стриминг или обычный вызов)
             message_obj, err, usage, stopped_at_marker = self._call_llm(
                 active_messages,
                 prefill=step_prefill,
@@ -887,25 +844,11 @@ class LLMAgent(
                 api_error_occurred = True
                 break
 
-            # Правильный вызов подтверждения с повторённой шапкой при висящей операции:
-            # текст проверяется детектором дублей ПЕРВЫМ (в т.ч. для сообщений с вызовами),
-            # и без этого ответ выбрасывался бы вместе с вызовом — подтверждение не наступило
-            # бы никогда. Выполнение протокола важнее лестницы дублей.
-            # Точный повтор текста или reasoning где угодно в истории, включая сообщения с
-            # вызовами инструментов: модель, вызывающая разные инструменты, обязана менять и
-            # сопроводительный текст (иначе это «пластинка», см. prefill 'LLM:\\n"').
+            # Детектор дублей проверяется ПЕРВЫМ: правильный respond_to_system
+            # с повторённой «пластинкой»-шапкой иначе выбрасывался бы вместе
+            # с вызовом, и подтверждение не наступало никогда (§1.11).
             duplicate = is_duplicate_fn(message_obj)
             if duplicate is not None and duplicate[0] == _CONFIRMATION_GUARD_VERDICT:
-                # Повтор при висящей pending-операции — это не дубль качества текста,
-                # а невыполненный протокол подтверждения (§1.11). Лестница дублей молча
-                # сожгла бы все попытки и сдала ход, а модель так и не увидела бы, чего
-                # от неё ждут. Вердикт отдаётся guard'у в _run_turn_loop (наг + лестница
-                # ANSWER_GUARD_MAX_RETRIES). Тот же приоритет у ответа, который протокол
-                # уже выполняет: «пластинка»-шапка не должна съесть вызов respond_to_system
-                # (для него _detect_duplicate вердиктов не выдаёт вовсе).
-                # Эскалация: первые дубли просто отбрасываются с бустом температуры, NAG
-                # вставляется только после DUPLICATE_NAG_THRESHOLD дублей подряд — чтобы не
-                # тратить токены и не раздражать модель голосом предупреждений при единичных сбоях.
                 duplicate = None
             if duplicate is not None:
                 dup_count += 1
@@ -914,8 +857,6 @@ class LLMAgent(
                     dup_name, dup_args = payload
                     tag, reason = 'PROACTIVE LOOP DETECTED', f"Intercepted duplicate call to '{dup_name}'"
                 elif kind == 'reasoning':
-                    # Повтор reasoning-блока из истории. Без watch-достройки: стриминговый
-                    # watch сравнивает контент, не reasoning.
                     dup_watch_target = None
                     tag, reason = 'REPEATED REASONING DETECTED', 'Model repeated a reasoning block from history'
                 else:
@@ -937,8 +878,6 @@ class LLMAgent(
 
             break
         else:
-            # Дубли не вылечились за max_generation_attempts попыток. Дубль НЕ пропускается
-            # как есть — сдаём ход пользователю, а не платим за повторный ответ.
             message_obj = None
             self.on_system_msg(
                 "[PROACTIVE LOOP DETECTOR] Max re-generation attempts reached. Handing control to user."
@@ -974,7 +913,6 @@ class LLMAgent(
             )
             return
         if kind == 'answer_guard':
-            # Текстовые ответы вместо вызова respond_to_system — лимит guard'а исчерпан, сдача хода.
             self.history.normalize(is_error_recovery=True)
             self.on_system_msg(
                 f"⚠️ [CONFIRMATION LOOP] Model kept replying in text instead of calling "
@@ -1008,8 +946,6 @@ class LLMAgent(
         max_iter = max_iter if max_iter is not None else Config.MAX_ITER
         if self.self_consistency_mode:
             return self._chat_self_consistent(message, prefill)
-        # Новый ход пользователя: снимаем cooldown авто-компакции (следующая
-        # компакция снова разрешена один раз), прерванная продолжаться не должна.
         self._auto_summarize_suppressed = False
         self._prepare_turn(message)
         return self._run_turn_loop(max_iter, prefill, structured_output=structured_output)
@@ -1069,19 +1005,14 @@ class LLMAgent(
                        structured_output: Optional[StructuredOutputConfig] = None,
                        service_mode: bool = False) -> str:
         current_prefill = get_effective_prefill(prefill)
-        # В контроллерном режиме стартовый prefill диктует контроллер (первый тег схемы).
         if structured_output is not None and structured_output.controller is not None:
             controller_prefill = structured_output.controller.initial_prefill()
             if controller_prefill is not None:
                 current_prefill = controller_prefill
-        # Разовый thinking-тоггл (_thinking_once) фиксируется ОДИН раз за ход: и API
-        # (call_with_retries), и обработчик ответа (_process_llm_response) должны видеть
-        # одинаковый reasoning_effort.
         turn_reasoning = self._reasoning_effort
         self._thinking_once = False
         state = TurnState(prefill=current_prefill, structured_output=structured_output)
 
-        # ── Симуляция reasoning (Config.SIMULATED_REASONING_*) ──
         sim_group = SimReasoningGroup(Config.SIMULATED_REASONING_REPAIRS) if (
                 Config.SIMULATED_REASONING_ENABLED
                 and turn_reasoning == "none"
@@ -1111,8 +1042,6 @@ class LLMAgent(
 
         try:
             for _ in range(max_iter):
-                # Пользователь ввёл новый текст, пока выполнялся инструмент (сценарий В):
-                # завершаем ход на чистой границе истории.
                 if self.pending_interrupt is not None:
                     return _finish_turn("")
 
@@ -1164,7 +1093,6 @@ class LLMAgent(
                     self._recover('api_error' if api_error_occurred else 'duplicate_loop')
                     return _finish_turn("")
 
-                # ── Активный контроллер ──
                 controller_verdict = None
                 if (structured_output is not None
                         and structured_output.controller is not None
@@ -1183,7 +1111,6 @@ class LLMAgent(
                     state.structured_output_phase += 1
                     continue
 
-                # ── Симуляция reasoning ──
                 sim_broken_scan = None
                 if sim_group is not None and message_obj is not None:
                     sim_group.absorb(message_obj, step_prefill)
@@ -1341,9 +1268,6 @@ class LLMAgent(
                 if not message_obj.tool_calls and not tool_error_occurred:
                     return _finish_turn(result_text)
 
-            # max_iter исчерпан без выхода: не оставляем открытый live-блок.
             return _finish_turn("")
         finally:
-            # Страховка: даже если что-то улетело исключением мимо всех обработчиков
-            # (например, ошибка в on_system_msg/on_render), блок вывода закрывается.
             _close_sim_stream()

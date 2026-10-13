@@ -23,7 +23,6 @@ from universal_agents import tool_session
 if TYPE_CHECKING:
     from universal_agents.context import AgentContext
 
-# Лимиты поиска: не «виснуть» и не съесть гигабайты на больших деревьях/бинарниках.
 SEARCH_MAX_FILE_SIZE = 1 * 1024 * 1024    # пропускать файлы крупнее 5 МБ
 SEARCH_MAX_MATCH_FILES = Config.MAX_READ_LINES_PER_CALL  # макс. число файлов с совпадениями в ответе
 SEARCH_MAX_OUTPUT_CHARS = Config.MAX_READ_CHARS_PER_CALL # макс. размер текста результата (до усечения)
@@ -88,8 +87,6 @@ def cwd(path: str = None):
         try:
             path = os.path.abspath(path)
             os.chdir(path)
-            # Рабочая папка — состояние группы workspace (docs/TOOL_ISOLATION_SPEC.md §5.3):
-            # воркер без собственной памяти, поэтому cwd хранит хост и передаёт с каждым вызовом.
             session["cwd"] = os.getcwd()
             return ok(f"Has set cwd to {os.getcwd()}")
         except Exception as e:
@@ -133,7 +130,6 @@ def _apply_edit_result(
         return f"Nothing changed: {nothing}"
 
     if dry_run:
-        # Дифф файла до/после (не диапазона против нового текста).
         preview = _make_diff_preview(
             content, new_content, path,
             replaced=len(replaced_lines) if replaced is None else replaced,
@@ -151,8 +147,6 @@ def _apply_edit_result(
                 return f"Replaced {label} in {Path(path).name}"
             return None
 
-        # Инструмент сам говорит модели, как ему ответить. execute_mixin лишь
-        # склеит это с превью. Ответ инструмента всегда должен вызывать 'respond_to_system'.
         ask = (
             f"{ENVIRONMENT_PREFIX} ATTENTION: this needs assistant's (AI) confirmation. Call '{_builtin.respond_to_system.__name__}' "
             f"with text='yes' to apply it or text='no' to cancel. You can't continue with common prose {ENVIRONMENT_PREFIX_END}"
@@ -191,7 +185,6 @@ def line_range_edit(path: str, new_text: str, start_line: int = None, end_line: 
     with open(path, "r", encoding="utf-8") as f:
         content = f.read()
 
-    # Режим по номерам строк: заменяем [start_line..end_line] (1-based, инклюзивно) на 'new'; '\n' старых строк отбрасываются, 'new' пишется как есть.
     lines = content.splitlines()
     start = max(1, start_line if start_line is not None else 1)
     if end_line is None:
@@ -247,7 +240,6 @@ def match_replace_edit(path: str, old: str, new_text: str, mode: str = "one", dr
     new_clean = new_text.rstrip('\n')
 
     if not os.path.isfile(path):
-        # old='' подразумевает создание/перезапись файла целиком; иначе сопоставлять не с чем.
         if old_text:
             return err(f": file '{path}' does not exist — nothing to match. Use line_range_edit or pass old='' to create a new file")
         _ensure_file_exists(path)
@@ -256,7 +248,6 @@ def match_replace_edit(path: str, old: str, new_text: str, mode: str = "one", dr
         content = f.read()
 
     if not old_text:
-        # Режим «весь файл»: для создания нового файла или полной перезаписи.
         return _apply_edit_result(
             path, content, new_clean, new_clean, content.splitlines(),
             label="whole file",
@@ -295,7 +286,6 @@ def match_replace_edit(path: str, old: str, new_text: str, mode: str = "one", dr
             nothing="pattern equal to replacement",
         )
 
-    # mode='all': дифф файла до/после; заголовок — объём вхождений, а не размер файла.
     new_content = content.replace(old_text, new_text)
     return _apply_edit_result(
         path, content, new_content, new_text.rstrip('\n'), content.splitlines(),
@@ -327,11 +317,8 @@ def _make_diff_preview(old_text: str, new_text: str, path: str,
     changed = False
     rows: list[tuple[str, str]] = []
 
-    # Дедупликация ТОЛЬКО подряд идущих контекстных строк одинакового
-    # содержимого (граница, общая для двух соседних хунков). Добавленные и
-    # удалённые строки НИКОГДА не схлопываются: каждая соответствует реальной
-    # строке файла, даже если текст повторяется (два `return False` подряд и т.п.).
-
+    # Дедуп только подряд идущих контекстных строк; добавленные/удалённые
+    # строки не схлопываются — каждая соответствует реальной строке файла.
     for tag, i1, i2, j1, j2 in sm.get_opcodes():
         if tag == "equal":
             continue
@@ -415,17 +402,11 @@ def _summarize_file(content: str, agent) -> str:
     truncated = len(content) > max_chars
     snippet = content[:max_chars]
     raw_lines = snippet.split("\n")
-    # Вырезаем пустые строки: они не несут структурной информации, а модель
-    # тратит на них токены и хуже ориентируется. Оригинальные номера строк
-    # сохраняются (дыры в нумерации допустимы), чтобы диапазоны сразу
-    # соответствовали реальному файлу для read(start_line=...).
     numbered_text = "\n".join(
         f"{i + 1} {line}" for i, line in enumerate(raw_lines) if line.strip()
     )
 
     if Config.SKELETON_RANGES_MODE:
-        # Новый режим: модель возвращает ТОЛЬКО диапазоны строк, заголовки
-        # подставляются программно из файла (см. _ranges_to_structure).
         task = (
             f"{ENVIRONMENT_PREFIX} NOW IGNORE previous instructions! Act as file structure generator. "
             "Output ONLY the line ranges of the most top-level items (signatures of classes, functions, "
@@ -438,7 +419,6 @@ def _summarize_file(content: str, agent) -> str:
         schema = "<content_structure_lines/>"
         prefill_suffix = "\n"
     else:
-        # Старый fallback-режим: модель пишет таблицу целиком (тег <content_structure>).
         task = (
             f"{ENVIRONMENT_PREFIX} NOW IGNORE previous instructions! Act as file content structure writer. "
             "Start with tag <content_structure> and write very compact shallow content structure table "
@@ -470,9 +450,8 @@ def _summarize_file(content: str, agent) -> str:
     if err or not msg_obj or not msg_obj.content:
         if err:
             agent.on_system_msg(f"[file skeleton] LLM error: {err}")
-        # Возвращаем None (а не err-строку), чтобы read мог вернуть подсказку ЦЕЛИКОМ.
-        # Если засунуть err-текст внутрь успешного контента read, is_error_content
-        # его не заметит (вложенный [[SYSTEM]] Error не детектится).
+        # None, а не err-строку: иначе read обернёт ошибку в успешный контент,
+        # и is_error_content не заметит вложенный [[SYSTEM]] Error.
         return None
     result = msg_obj.content.strip()
     result = result.strip()
@@ -480,7 +459,6 @@ def _summarize_file(content: str, agent) -> str:
         return None
     if Config.SKELETON_RANGES_MODE:
         return _ranges_to_structure(result, content)
-    # Старый режим: модель уже вернула готовую таблицу структуры.
     return result
 
 
@@ -500,14 +478,10 @@ def _ranges_to_structure(ranges_text: str, content: str) -> str | None:
         if start < 1 or end < start or start > total:
             continue
         end = min(end, total)
-        # Заголовок берём с первой НЕпустой строки диапазона (пустые/пробельные
-        # строки после strip считаются пустыми). Если start пустая — пробуем
-        # start-1, затем start+1, затем ближайшую по обе стороны.
         repr_idx = _pick_nonempty_line(start, end, lines)
         head = lines[repr_idx - 1].strip()
         if len(head) > 120:
             head = head[:117] + "..."
-        # Убираем лишние пробелы/табы внутри для компактности.
         head = re.sub(r"\s+", " ", head)
         out.append(f"L{start}-{end} {head}")
     if not out:
@@ -600,8 +574,6 @@ def _build_portion_content(
         right_far = total if peri_span <= 0 else min(total, actual_end + peri_span)
         peripheral.update(_peripheral_indices(actual_end + 1, right_far, total, Config.PERIPHERAL_GAP_GROWTH))
     peripheral -= set(focus_idx)
-    # Локальный контекст периферии: вокруг каждой выбранной строки
-    # добавляем ±N соседей (без строк фокуса).
     if Config.PERIPHERAL_LINE_CONTEXT:
         ctx = int(Config.PERIPHERAL_LINE_CONTEXT)
         extra: set[int] = set()
@@ -611,9 +583,6 @@ def _build_portion_content(
                 if 1 <= j <= total and not (start <= j <= actual_end):
                     extra.add(j)
         peripheral |= extra
-    # Собираем строки: фокус + периферия, упорядоченно по номеру,
-    # чтобы сохранить пространственную картину файла. Периферийные
-    # строки (маркер '~') обрезаются по длине (только контекст).
     included = sorted(set(focus_idx) | peripheral)
     max_peri = Config.PERIPHERAL_MAX_LINE_CHARS
     numbered = []
@@ -657,7 +626,6 @@ def read(agent: 'AgentContext', path: str = '.', start_line: int = None, end_lin
         mtime = datetime.datetime.fromtimestamp(os.stat(path).st_mtime).strftime("%Y-%m-%d %H:%M:%S")
         if os.path.isfile(path):
             if start_line is not None or end_line is not None:
-                # Порционное чтение ДИАПАЗОНА с жёстким лимитом объёма (файл не выгружается в контекст за раз).
                 raw, read_err = _raw_read(agent, path)
                 if read_err:
                     return read_err
@@ -671,7 +639,6 @@ def read(agent: 'AgentContext', path: str = '.', start_line: int = None, end_lin
                 selected, truncated = _limit_read_chunk(lines[start - 1:end])
                 actual_end = start + len(selected) - 1
                 return _build_portion_content(path, mtime, lines, total, start, actual_end, truncated)
-            # Без диапазона
             raw, read_err = _raw_read(agent, path)
             if read_err:
                 return read_err
@@ -683,14 +650,9 @@ def read(agent: 'AgentContext', path: str = '.', start_line: int = None, end_lin
                 numbered = [f"{i+1} {line}" for i, line in enumerate(lines)]
                 content = header + "Content:\n---\n" + ("\n".join(numbered) if numbered else "") + f"\n"
                 return _finish_read(agent, path, raw, content, disk_hash)
-            # БОЛЬШОЙ файл: ровно один раз отдаём скелет (или первый батч, если скелет выключен);
-            # повторные целиком-файловые чтения без изменений запрещены.
             if agent.file_states.should_skip(path, disk_hash):
                 return _reread_err(path)
             if not Config.BIG_FILE_SKELETON:
-                # Структуризация отключена: вместо структуры отдаём «пачку» строк файла
-                # от 1 до лимита по строкам/символам + периферию до краёв — как при
-                # порционном чтении с неявным start_line=1.
                 selected, truncated = _limit_read_chunk(lines)
                 actual_end = len(selected)
                 content = _build_portion_content(path, mtime, lines, total, 1, actual_end, truncated)
@@ -814,7 +776,6 @@ def search(pattern: str, path: str = ".", include: str = None, exclude: str = No
             skipped += 1
             continue
 
-        # Детекция бинарников по NUL-байту в префиксе (иначе — мусор-совпадения и раздутый вывод).
         try:
             with open(filepath, 'rb') as fb:
                 probe = fb.read(SEARCH_BINARY_PROBE)
@@ -842,7 +803,6 @@ def search(pattern: str, path: str = ".", include: str = None, exclude: str = No
         file_count += 1
         total += sum(1 for i, line in enumerate(lines) if matcher(line))
 
-        # Build grouped blocks
         sorted_idx = sorted(match_indices)
         blocks = []
         block = [sorted_idx[0]]
@@ -854,7 +814,6 @@ def search(pattern: str, path: str = ".", include: str = None, exclude: str = No
                 block = [idx]
         blocks.append(block)
 
-        # Format blocks with line numbers
         formatted = []
         for block in blocks:
             for i in block:
@@ -863,7 +822,6 @@ def search(pattern: str, path: str = ".", include: str = None, exclude: str = No
             formatted.append("     ...")
 
         block_text = f"\n{filepath}:\n" + "\n".join(formatted)
-        # Усечение «на лету», чтобы не копить гигантский вывод в память.
         if out_len + len(block_text) > SEARCH_MAX_OUTPUT_CHARS:
             remaining = SEARCH_MAX_OUTPUT_CHARS - out_len
             if remaining > 0:

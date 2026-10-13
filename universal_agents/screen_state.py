@@ -11,7 +11,6 @@ from __future__ import annotations
 
 from universal_agents import tool_session
 
-# Фолбэк для прямых (неизолированных) вызовов: screen_state.last_scale.
 last_scale: float | None = None
 
 

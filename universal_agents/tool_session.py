@@ -16,7 +16,6 @@ from __future__ import annotations
 import contextvars
 from typing import Optional
 
-# Дефолтная сессия для прямых (неизолированных) вызовов инструментов вне хода агента.
 _default_session: dict = {}
 
 

@@ -18,11 +18,8 @@ try:
     )
     _PC_TOOLS = (screenshot, mouse_move, mouse_click, scroll, press_key)
 except ImportError:
-    # pyautogui не установлен — PC-инструменты просто недоступны, агент работает без них
     _PC_TOOLS = ()
 
-# Инструменты, которые модель подключает сама через load_tool (allow-list: без
-# строки здесь load_tool вернёт «not allowed», и инструмент не покажется в промпте).
 LOADABLE_TOOLS = [run_bash_host.__name__] + [t.__name__ for t in _PC_TOOLS]
 
 
@@ -52,7 +49,6 @@ def parse_args() -> argparse.Namespace:
 if __name__ == "__main__":
     args = parse_args()
 
-    # Приоритет: CLI --project-root > Config.PROJECT_ROOT > авто-поиск.
     explicit_root = args.project_root or getattr(Config, "PROJECT_ROOT", None)
     if explicit_root:
         if not os.path.isdir(explicit_root):
@@ -80,12 +76,8 @@ if __name__ == "__main__":
     project_root = find_project_root() or '(not found - no .git upwards)'
     root_line = f"Current project root: {project_root}, working dir: {os.getcwd()}"
 
-    # Предзагруженные инструменты всегда разрешены к использованию, даже если их
-    # нет в LOADABLE_TOOLS (который задаёт ДОПОЛНИТЕЛЬНО доступные для загрузки).
     allowed_tools = build_allowed_tools(LOADABLE_TOOLS, PRELOADED_TOOLS)
 
-    # Список загружаемых (пока не активных) инструментов — встраиваем в системный
-    # промпт, чтобы модель знала, что можно подключить через load_tool.
     tools_manager = ToolManager(tools_config=allowed_tools, external_plugins=startup_tools)
     available_tools_text = tools_manager.list_available()
     loaded_tools_text = tools_manager.list_loaded()
@@ -126,5 +118,4 @@ if __name__ == "__main__":
     try:
         cli.run()
     finally:
-        # Останавливаем воркеры групп изоляции (иначе осядут фоновые процессы).
         agent.close_tool_workers()

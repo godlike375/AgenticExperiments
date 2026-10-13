@@ -91,9 +91,7 @@ class TestAnswerRequiredGuard(unittest.TestCase):
         with mock.patch("universal_agents.agent.LLMClient.call", side_effect=fake_call):
             agent = self.make_agent()
             agent.on_system_msg = sysmsgs.append
-            # Первый ход: обычный текстовый ответ уходит в историю (pending ещё нет).
             agent.chat("Привет", max_iter=5)
-            # Второй ход: pending + повтор той же фразы.
             result = agent.chat("Отрезай hello", max_iter=10)
 
         self.assertIn("Операция завершена", result)
@@ -145,12 +143,9 @@ class TestAnswerRequiredGuard(unittest.TestCase):
 
         self.assertIn("Операция завершена", result)
         self.assertIsNone(agent._pending_operation)
-        # Правка применена только после настоящего вызова answer.
         with open(path, encoding="utf-8") as f:
             self.assertEqual(f.read(), "world")
 
-        # Наг guard'а МОДЕЛЬ видела (между срабатыванием и успехом), но после успеха
-        # он вычищен — в контексте остаётся только правильный путь подтверждения (§1.11).
         self.assertTrue(any(_GUARD_NAG_PREFIX in t for content in seen for t in content),
                         "Модель должна была получить сообщение-ошибку о вызове answer")
         msgs = agent.history.get_all()
@@ -198,13 +193,10 @@ class TestAnswerRequiredGuard(unittest.TestCase):
             result = agent.chat("Измени файл", max_iter=10)
 
         self.assertIn("Готово", result)
-        # Отмена: файл не тронут, pending-операция снята.
         with open(path, encoding="utf-8") as f:
             self.assertEqual(f.read(), "a\n")
         self.assertIsNone(agent._pending_operation)
-        # Модель получала наг «call answer» минимум один раз...
         self.assertTrue(any(_GUARD_NAG_PREFIX in t for content in seen for t in content))
-        # ...но после успешного подтверждения (даже 'no') наг вычищен из истории (§1.11).
         msgs = agent.history.get_all()
         self.assertEqual(nag_contents(msgs), [])
 
@@ -251,9 +243,7 @@ class TestAnswerRequiredGuard(unittest.TestCase):
         with open(path, encoding="utf-8") as f:
             self.assertEqual(f.read(), "b")
         self.assertIsNone(agent._pending_operation)
-        # Голый answer был перегенерирован: до следующего вызова LLM дошёл prefill 'Assistant:'.
         self.assertIn(_NO_COMMENT_PREFILL, seen)
-        # В истории есть только осознанный ответ модели (с текстом), а не голый вызов.
         msgs = agent.history.get_all()
         texts = [getattr(m, "content", "") or "" for m in msgs]
         self.assertTrue(any("Подтверждаю правку" in t for t in texts))
@@ -302,14 +292,10 @@ class TestAnswerRequiredGuard(unittest.TestCase):
             result = agent.chat("Измени файл", max_iter=10)
 
         self.assertIn("Готово", result)
-        # Применена первая правка (ответ 'yes'), голый повторный line_range_edit не исполнился.
         with open(path, encoding="utf-8") as f:
             self.assertEqual(f.read(), "b")
         self.assertIsNone(agent._pending_operation)
-        # Prefill 'Assistant:' дошёл до следующего вызова LLM — guard его не съел.
         self.assertIn(_NO_COMMENT_PREFILL, seen)
-        # Guard всё равно сработал после перегенерации (модель так и не ответила)
-        # и был вычищен после успешного подтверждения (§1.11).
         self.assertTrue(any(_GUARD_NAG_PREFIX in t for content in seen_content for t in content))
         msgs = agent.history.get_all()
         self.assertEqual(nag_contents(msgs), [])
@@ -359,7 +345,6 @@ class TestAnswerRequiredGuard(unittest.TestCase):
         self.assertIn("Готово", result)
         with open(path, encoding="utf-8") as f:
             self.assertEqual(f.read(), "b")
-        # Исполнился ровно один answer — только осознанный (с настоящим текстом).
         msgs = agent.history.get_all()
         answers = [m for m in msgs if m.to_api_dict()["role"] == "tool" and m.name == answer_tool_name]
         self.assertEqual(len(answers), 1)
@@ -386,7 +371,6 @@ class TestAnswerRequiredGuard(unittest.TestCase):
             result = agent.chat("Расскажи что умеешь", max_iter=10)
 
         self.assertIn("Я умею работать с файлами", result)
-        # В истории остался результат инструмента с явной ошибкой (не 'Recorded').
         msgs = agent.history.get_all()
         tool_results = [m.content for m in msgs if m.to_api_dict()["role"] == "tool"]
         self.assertTrue(any("requires a pending" in c for c in tool_results))
@@ -425,9 +409,7 @@ class TestAnswerRequiredGuard(unittest.TestCase):
             result = agent.chat("Привет", max_iter=10)
 
         self.assertIn("Всё, готово", result)
-        # Голый answer перегенерировался ровно NO_COMMENT_RETRIES раз с prefill.
         self.assertEqual(seen.count(_NO_COMMENT_PREFILL), retries)
-        # Инструмент исполнился один раз (когда ретраи кончились) и вернул ошибку.
         msgs = agent.history.get_all()
         answers = [m for m in msgs if m.to_api_dict()["role"] == "tool" and m.name == answer_tool_name]
         self.assertEqual(len(answers), 1)
@@ -460,7 +442,6 @@ class TestAnswerRequiredGuard(unittest.TestCase):
         self.assertIn("Готово", result)
         with open(path, encoding="utf-8") as f:
             self.assertEqual(f.read(), "b")
-        # Правка применена — answer с pending не вернул ошибку.
         msgs = agent.history.get_all()
         answers = [m for m in msgs if m.to_api_dict()["role"] == "tool" and m.name == answer_tool_name]
         self.assertEqual(len(answers), 1)
@@ -495,12 +476,9 @@ class TestAnswerRequiredGuard(unittest.TestCase):
             agent = self.make_agent()
             result = agent.chat("Измени файл", max_iter=50)
 
-        # Guard сдал ход пользователю ровно после MAX_RETRIES+1 текстового ответа.
         self.assertEqual(result, "")
         self.assertEqual(len(calls), 1 + n_text)
-        # Операция так и не подтверждена — pending висит, решать будет пользователь.
         self.assertIsNotNone(agent._pending_operation)
-        # В истории ровно ОДИН наг (переиспользуется, не копится между срабатываниями).
         msgs = agent.history.get_all()
         nags = [m for m in msgs if isinstance(m, UserMessage) and _GUARD_NAG_PREFIX in (m.content or "")]
         self.assertEqual(len(nags), 1)
@@ -518,7 +496,6 @@ class TestAnswerRequiredGuard(unittest.TestCase):
             tool_calls=[ToolCall(id="c1", name=line_range_edit_tool_name, arguments=json.dumps({
                 "path": path, "new_text": "b\n", "start_line": 1, "end_line": 1}))],
         )
-        # Модель застряла: вместо answer вызывает чужой инструмент (read).
         wrong_call = AssistantMessage(
             content="Проверю файл перед подтверждением.",
             tool_calls=[ToolCall(id="c2", name=_read_tool.__name__, arguments=json.dumps({"path": path}))],
@@ -538,12 +515,10 @@ class TestAnswerRequiredGuard(unittest.TestCase):
 
         self.assertIn("Готово", result)
         self.assertIsNone(agent._pending_operation)
-        # Правильный путь подтверждения остался: превью edit ("ATTENTION") и answer.
         msgs = agent.history.get_all()
         contents = [getattr(m, "content", "") or "" for m in msgs]
         self.assertTrue(any("ATTENTION" in c for c in contents), "Превью-превью правки должно остаться")
         self.assertTrue(any("Подтверждаю" in c for c in contents))
-        # Мусор вычищен: чужих вызовов read (assistant + результат) и нагов нет.
         wrong_assistant = [m for m in msgs
                            if isinstance(m, AssistantMessage) and any(tc.name == _read_tool.__name__ for tc in m.tool_calls)]
         wrong_results = [m for m in msgs if isinstance(m, ToolResult) and m.name in (_read_tool.__name__,)]
@@ -595,7 +570,6 @@ class TestAnswerRequiredGuard(unittest.TestCase):
         self.assertGreaterEqual(len(user_contents[2]), 1)
         self.assertEqual(user_contents[2], user_contents[3],
                          "User-часть префикса должна быть байт-стабильной между срабатываниями guard'а")
-        # И сам наг в префиксе ровно один (не накапливается).
         for content in user_contents:
             nags = [t for t in content if _GUARD_NAG_PREFIX in t]
             self.assertLessEqual(len(nags), 1, "Наг не должен накапливаться")
@@ -648,7 +622,6 @@ class TestAnswerRequiredGuard(unittest.TestCase):
         self.assertIn("Готово", result)
         self.assertEqual([m for m in system_msgs if "[PREFIX-HASH]" in m], [],
                          "Вычистка нага не должна сдвигать префикс")
-        # Вызовы: 1=edit, 2=text (guard, наг добавлен), 3=answer (наг вычищен), 4=reply.
         self.assertEqual(len(user_contents), 4)
         self.assertEqual(user_contents[0], user_contents[1])
         self.assertEqual(user_contents[1][0], user_contents[3][0],

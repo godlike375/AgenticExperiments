@@ -1,6 +1,5 @@
 """Общие константы фреймворка."""
 
-# Маркер, которым системные сообщения помечаются в истории и промптах
 ENVIRONMENT_PREFIX = '<SYSTEM>'
 ENVIRONMENT_PREFIX_END = '</SYSTEM>'
 
@@ -14,9 +13,7 @@ def ok(msg: str) -> str:
     """Единый формат системного сообщения инструмента. ``msg`` — текст сразу после префикса для побайтово точной замены."""
     return f"{ENVIRONMENT_PREFIX} {msg} {ENVIRONMENT_PREFIX_END}"
 
-# Маркер авто-саммари заменён на метаданные UserMessage.is_summary (текстовых маркеров в контенте больше нет).
 
-# Префиксы плотных per-message саммари (единый источник для MemoryMixin и compressors, чтобы метки не разъехались).
 SUMMARY_PREFIX_USER = "USER:"
 SUMMARY_PREFIX_AI = "AI:"
 SUMMARY_PREFIX_TOOL_CALL = "TOOL:"
@@ -24,7 +21,6 @@ SUMMARY_PREFIX_TOOL_RESULT = "RESULT:"
 SUMMARY_PREFIX_TOOL_NAMED = "TOOL({name}):"
 SUMMARY_MARKER = "[PAST-SUMMARY]"
 
-# Заголовок для сообщения пользователя при прерывании генерации
 INTERRUPT_HEADER = (f"{ENVIRONMENT_PREFIX} User interrupted generation and wants to say something more important. "
                     f"Treat it carefully before continuing {ENVIRONMENT_PREFIX_END}")
 

@@ -24,11 +24,8 @@ class ControllerVerdict:
         next_prefill: Optional[str] = None,
         complete: bool = False,
     ) -> None:
-        # Контент фазы после стирания ошибочного тега (пойдёт в историю).
         self.corrected_content = corrected_content
-        # Следующий нужный тег как prefill следующей фазы (None = модель продолжает сама).
         self.next_prefill = next_prefill
-        # True, когда вся схема корректно завершена (закрыт корень).
         self.complete = complete
 
 
@@ -95,21 +92,11 @@ class XMLStructureController:
     root указывает на первую секцию, а токены строятся по всем siblings).
     """
 
-    # Корень схемы (None у сестринской схемы — см. siblings).
     root: Optional[XNode] = None
-    # Произвольный текст сразу после открывающего тега корня (вставляется в prefill,
-    # чтобы направить модель: например "<content_structure>\nL" — сигнал начать
-    # содержимое с номеров строк). Этот текст пишет модель как часть фазы, на
-    # сравнение с токенами он не влияет.
     prefill_suffix: str = ""
-    # Схема из нескольких сестринских корневых секций ('<a/><b/>' → <a>…</a> сразу
-    # затем <b>…</b>, без обёртки-корня). Задаётся только через from_sibling_schema.
     siblings: tuple[XNode, ...] = ()
-    # Плоская последовательность ожидаемых токенов в порядке DFS.
     _tokens: tuple[str, ...] = field(default=(), init=False, repr=False)
-    # Текущая позиция в последовательности.
     _cursor: int = field(default=0, init=False, repr=False)
-    # Накопленный корректный документ.
     _document: str = field(default="", init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -236,11 +223,8 @@ class XMLStructureController:
             raise ValueError("Multiple root tags are not supported")
         return roots[0]
 
-    # ── интерфейс PhaseController ─────────────────────────────────────────
 
     def initial_prefill(self) -> Optional[str]:
-        # Первый opening-токен схемы: у вложенной схемы это <root>, у сестринской —
-        # тег первой секции (обёртки нет, ответ начинается с него).
         return f"{self._tokens[0]}{self.prefill_suffix}"
 
     def markers(self) -> tuple[str, ...]:
@@ -250,7 +234,6 @@ class XMLStructureController:
         return [tok.split("<")[1].rsplit(">", 1)[0] for tok in self._tokens if tok.startswith("<") and not tok.startswith("</")]
 
     def advance(self, content: str) -> ControllerVerdict:
-        # Токены контента фазы с позициями в исходной строке.
         positions: list[tuple[tuple[str, str], int]] = []
         i = 0
         n = len(content)
@@ -282,7 +265,6 @@ class XMLStructureController:
         tokens = self._tokens
         for idx, ((kind, name), pos) in enumerate(positions):
             if cursor >= len(tokens):
-                # Модель пишет больше, чем нужно: стираем лишнее и завершаем документ.
                 corrected = content[:pos]
                 self._document += corrected
                 return ControllerVerdict(corrected, None, True)
@@ -291,16 +273,11 @@ class XMLStructureController:
             if kind == expected_kind and name == expected_name:
                 cursor += 1
                 continue
-            # Несовпадение: стираем всё, начиная с ошибочного токена, и подсказываем
-            # ожидаемый токен как следующий prefill. Согласованный префикс до ошибки
-            # фиксируется в курсоре, чтобы следующая фаза продолжила с правильного места.
             corrected = content[:pos]
             self._cursor = cursor
             self._document += corrected
             return ControllerVerdict(corrected, expected, False)
 
-        # Всё совпало до конца контента фазы. Если курсор в конце (вся схема пройдена),
-        # обрезаем content до конца последнего совпавшего тега (убираем хвостовый текст).
         if cursor >= len(tokens) and positions:
             last_tag_start = positions[-1][1]
             end = content.find(">", last_tag_start)
@@ -313,14 +290,9 @@ class XMLStructureController:
         if cursor >= len(tokens):
             return ControllerVerdict(content, None, True)
 
-        # Пустой контент (модель ничего не написала) не даёт повода ни закрывать,
-        # ни подсказывать следующий тег — оставляем прежний путь (empty → None).
         if not content.strip():
             return ControllerVerdict(content, None, False)
 
-        # Автозакрытие при досрочном завершении ответа: оставшиеся токены
-        # с текущей позиции — это либо закрывающие теги (дописываем их), либо
-        #Opening-теги (ставим next_prefill и передаём управление обратно в цикл).
         remaining = self._tokens[cursor:]
         auto_closed: list[str] = []
         closed_count = 0
@@ -338,10 +310,8 @@ class XMLStructureController:
             self._cursor = new_cursor
             if new_cursor >= len(tokens):
                 return ControllerVerdict(content + suffix, None, True)
-            # Следующий токен — opening: модель заполнит его на следующей фазе.
             return ControllerVerdict(content + suffix, self._tokens[new_cursor], False)
 
-        # Следующий токен — opening (незаполненный ребёнок): возвращаем prefill.
         return ControllerVerdict(content, self._tokens[cursor], False)
 
     @staticmethod

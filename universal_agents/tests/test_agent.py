@@ -48,10 +48,8 @@ class TestAgentTurnLoop(unittest.TestCase):
         fake = AssistantMessage(content="ok")
         with mock.patch("universal_agents.agent.LLMClient.call", return_value=(fake, None, None)):
             agent.inject_user_interrupt("stop, instead do X")
-        # шапка и текст пользователя дописаны в конец вывода инструмента
         self.assertIn(INTERRUPT_HEADER, tr.content)
         self.assertIn("stop, instead do X", tr.content)
-        # отдельного user-сообщения с текстом прерывания нет, пустой заглушки ассистента нет
         self.assertFalse(
             any(isinstance(m, UserMessage) and "stop, instead do X" in m.content for m in agent.history.get_all())
         )
@@ -90,7 +88,6 @@ class TestAgentTurnLoop(unittest.TestCase):
             content="calling",
             tool_calls=[ToolCall(id="t1", name="double_me", arguments='{"value": 2}')],
         ))
-        # висящий вызов без результата — должен быть удалён при вставке нового сообщения
         agent._prepare_turn("redirect")
         roles = [m.to_api_dict()["role"] for m in agent.history]
         self.assertEqual(roles, ["system", "user", "assistant", "user"])
@@ -128,7 +125,6 @@ class TestAgentTurnLoop(unittest.TestCase):
         ):
             result = agent.chat("do x")
         self.assertEqual(result, "ok done")
-        # сломанное сообщение стёрто из истории, финальный ответ остался
         last = agent.history.get_last_message()
         self.assertEqual(last.content, "ok done")
 
@@ -234,7 +230,6 @@ class TestDuplicateTextAcrossHistory(unittest.TestCase):
             tool_calls=[ToolCall(id="t1", name="double_me", arguments='{"value": 2}')],
         ))
         agent.history.add(ToolResult.success("t1", "double_me", "4"))
-        # тот же комментарий, но другой вызов
         dup = AssistantMessage(
             content=old_comment,
             tool_calls=[ToolCall(id="t2", name="double_me", arguments='{"value": 3}')],
@@ -266,7 +261,6 @@ class TestDuplicateTextAcrossHistory(unittest.TestCase):
         ):
             result = agent.chat("third")
         self.assertEqual(result, "final")
-        # в истории остался только тот old_reasoning, что мы сами подложили в setup
         count = sum(
             1 for m in agent.history.get_all()
             if getattr(m, "reasoning_content", "") == old_reasoning
@@ -321,8 +315,6 @@ class TestDuplicateEscalation(unittest.TestCase):
         with mock.patch("universal_agents.agent.LLMClient.call", side_effect=fake_call):
             result = agent.chat("q3")
         self.assertEqual(result, "new")
-        # NAG не вставлялся ни в один запрос (один дубль ниже порога) — проверяем
-        # последнее сообщение, куда NAG вшивается
         for msgs in captured:
             self.assertNotIn(_REPEAT_ANSWER_NAG, msgs[-1][1])
 
@@ -345,7 +337,6 @@ class TestDuplicateEscalation(unittest.TestCase):
         with mock.patch("universal_agents.agent.LLMClient.call", side_effect=fake_call):
             agent.chat("q2")
 
-        # до порога дублей подряд — без NAG, с порога — NAG в контексте (в последнем сообщении)
         def _has_nag(msgs):
             return _REPEAT_ANSWER_NAG in msgs[-1][1]
 
@@ -370,7 +361,6 @@ class TestDuplicateEscalation(unittest.TestCase):
         ):
             result = agent.chat("q2")
         self.assertEqual(result, "")
-        # отброшенный дубль ни разу НЕ попал в историю — только наш setup
         count = sum(
             1 for m in agent.history.get_all()
             if isinstance(m, AssistantMessage) and m.content == "same"
@@ -395,7 +385,6 @@ class TestDuplicateEscalation(unittest.TestCase):
         streamed: list[str] = []
 
         def fake_stream(messages, **kwargs):
-            # каждое повторение ответа стримится целиком — никакого прерывания по расхождению
             content = "same answer text" if len(streamed) == 0 else "a different answer"
             streamed.append(content)
             for piece in [content[:10], content[10:20], content[20:]]:
@@ -406,7 +395,6 @@ class TestDuplicateEscalation(unittest.TestCase):
         with mock.patch("universal_agents.agent.LLMClient.open_stream", side_effect=fake_stream):
             result = agent.chat("q2")
         self.assertEqual(result, "a different answer")
-        # стрим открывался на каждую попытку (дубль + свежий ответ), дубль отброшен без достройки
         self.assertEqual(streamed, ["same answer text", "a different answer"])
 
 
@@ -439,7 +427,6 @@ class TestIdenticalErrorLimit(unittest.TestCase):
         agent = _make_failing_agent(calls.append)
         agent._thinking_enabled = True
         fail = _error_tool_call(_failing_tool.__name__, '{"message": "boom"}')
-        # ровно MAX_CONSECUTIVE_ERRORS одинаковых ошибок — на последней лимит срабатывает
         with mock.patch(
             "universal_agents.agent.LLMClient.call",
             return_value=(fail, None, None),
@@ -466,7 +453,6 @@ class TestIdenticalErrorLimit(unittest.TestCase):
             side_effect=responses,
         ):
             result = agent.chat("сделай что-нибудь", max_iter=10)
-        # меньше порога — не прерываем, ход завершается нормальным ответом
         self.assertEqual(result, "сдаюсь")
         self.assertFalse(any("LIMIT REACHED" in m for m in calls))
 
@@ -479,7 +465,6 @@ class TestVaryingErrorNoLimit(unittest.TestCase):
         calls = []
         agent = _make_failing_agent(calls.append)
         agent._thinking_enabled = True
-        # каждый префиксный проход возвращает новую ошибку — постоянно «диагностирует»
         responses = [
             (_error_tool_call(_failing_tool.__name__, '{"message": "a"}'), None, None),
             (_error_tool_call(_failing_tool.__name__, '{"message": "b"}'), None, None),
@@ -505,8 +490,6 @@ class TestVaryingErrorNoLimit(unittest.TestCase):
         agent._thinking_enabled = True
         boom = _error_tool_call(_failing_tool.__name__, '{"message": "boom"}')
         glitch = _error_tool_call(_failing_tool.__name__, '{"message": "glitch"}')
-        # 3 одинаковых (серия=3) → 1 другая (сброс) → ещё 3 одинаковых (серия=3)
-        # суммарно 3+1+3=7 ошибок, но ни одна серия не достигает порога 5
         responses = [(boom, None, None)] * 3 + [(glitch, None, None)] + [(boom, None, None)] * 3
         responses.append((AssistantMessage(content="итог"), None, None))
         with mock.patch(
@@ -578,7 +561,6 @@ class TestTurnStateSignature(unittest.TestCase):
         state = TurnState()
         for i in range(2 * MAX_CONSECUTIVE_ERRORS - 2):
             state.record_tool_error("A" if i % 2 == 0 else "B")
-        # каждая сигнатура вернулась MAX-1 раз, лимита ещё нет
         self.assertEqual(state.error_counts["A"], MAX_CONSECUTIVE_ERRORS - 1)
         self.assertEqual(state.error_counts["B"], MAX_CONSECUTIVE_ERRORS - 1)
         self.assertFalse(state.max_errors_reached)
@@ -594,7 +576,6 @@ class TestTurnStateSignature(unittest.TestCase):
         state = TurnState()
         for i in range(2 * MAX_CONSECUTIVE_ERRORS - 1):
             state.record_tool_error("A" if i % 2 == 0 else "B")
-        # (2*MAX-1)-я запись — нечётная позиция (B), A уже набрала MAX
         self.assertEqual(state.error_counts["A"], MAX_CONSECUTIVE_ERRORS)
         self.assertEqual(state.error_counts["B"], MAX_CONSECUTIVE_ERRORS - 1)
         self.assertTrue(state.max_errors_reached)
@@ -654,7 +635,6 @@ class TestAlternatingErrorsReachLimit(unittest.TestCase):
         agent._thinking_enabled = True
         sa = _error_tool_call(_failing_tool.__name__, '{"message": "a"}')
         sb = _error_tool_call(_failing_tool.__name__, '{"message": "b"}')
-        # A,B повторяются 2*MAX раз: каждая сигнатура достигает MAX → лимит срабатывает
         responses = [(sa, None, None), (sb, None, None)] * (2 * MAX_CONSECUTIVE_ERRORS)
         responses.append((AssistantMessage(content="недостижимо"), None, None))
         with mock.patch(
@@ -677,7 +657,6 @@ class TestCompressionResetsCounters(unittest.TestCase):
         state = {"usage": 0, "compressed": 0}
 
         def fake_usage() -> float:
-            # порог переходим только на 4-й итерации (после 3 ошибок)
             state["usage"] += 1
             return 100.0 if state["usage"] == 4 else 0.0
 
@@ -698,7 +677,6 @@ class TestCompressionResetsCounters(unittest.TestCase):
     def test_compression_resets_accumulated_counts(self):
         calls = []
         agent = self._agent_compressing_once()
-        # фиксируем callback системных сообщений, чтобы проверить отсутствие LIMIT
         agent.on_system_msg = calls.append
         fail = _error_tool_call(_failing_tool.__name__, '{"message": "boom"}')
         responses = [(fail, None, None)] * 6

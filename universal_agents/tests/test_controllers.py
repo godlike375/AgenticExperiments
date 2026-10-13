@@ -11,7 +11,6 @@ from universal_agents.generation import StructuredOutputConfig
 from universal_agents.models import AssistantMessage
 
 
-# ── Вспомогательные ────────────────────────────────────────────────
 
 def _ctrl(schema: str, max_phases: int = 5) -> StructuredOutputConfig:
     """Фабрика конфига с XML-контроллером из текстовой схемы."""
@@ -21,7 +20,6 @@ def _ctrl(schema: str, max_phases: int = 5) -> StructuredOutputConfig:
     )
 
 
-# ── Парсер ─────────────────────────────────────────────────────────
 
 class TestXMLParser(unittest.TestCase):
     def test_flat_self_closing(self):
@@ -64,15 +62,12 @@ class TestXMLParser(unittest.TestCase):
             XMLStructureController.from_schema_text("  \n  ")
 
 
-# ── advance() ──────────────────────────────────────────────────────
 
 class TestAdvance(unittest.TestCase):
     """Unit-тесты advance(): правильные/неправильные теги, partial match, complete."""
 
     def test_correct_full_document_single_phase(self):
         ctrl = XMLStructureController.from_schema_text("<root><a/></root>")
-        # Фаза 1: <root><a>hello</a> (prefill + модель). После </a> остаётся только
-        # закрывающий </root> — контроллер дописывает его сам (автозакрытие).
         v = ctrl.advance("<root><a>hello</a>")
         self.assertTrue(v.complete)
         self.assertIsNone(v.next_prefill)
@@ -81,18 +76,15 @@ class TestAdvance(unittest.TestCase):
     def test_wrong_close_erases_and_suggests_prefill(self):
         ctrl = XMLStructureController.from_schema_text("<root><a/></root>")
         v = ctrl.advance("<root></root>")
-        # Корень сразу закрыт: ожидаем <a>
         self.assertFalse(v.complete)
         self.assertEqual(v.next_prefill, "<a>")
         self.assertEqual(v.corrected_content, "<root>")
-        # Документ накопил согласованный префикс.
         self.assertEqual(ctrl.document(), "<root>")
 
     def test_correct_partial_advances_cursor(self):
         ctrl = XMLStructureController.from_schema_text("<root><a/><b/></root>")
         v = ctrl.advance("<root><a>text</a>")
         self.assertFalse(v.complete)
-        # Следующий токен — opening <b>: ставим prefill, модель заполнит его дальше.
         self.assertEqual(v.next_prefill, "<b>")
         self.assertEqual(ctrl.document(), "<root><a>text</a>")
 
@@ -107,7 +99,6 @@ class TestAdvance(unittest.TestCase):
         """Модель открыла неверный дочерний тег <z> вместо ожидаемого <a>."""
         ctrl = XMLStructureController.from_schema_text("<root><a/></root>")
         v = ctrl.advance("<root><z>x</z>")
-        # позиция <z> mismatches <a>
         self.assertFalse(v.complete)
         self.assertEqual(v.next_prefill, "<a>")
         self.assertEqual(v.corrected_content, "<root>")
@@ -123,8 +114,6 @@ class TestAdvance(unittest.TestCase):
     def test_self_closing_tag_matches_both_tokens(self):
         ctrl = XMLStructureController.from_schema_text("<root><b/></root>")
         v = ctrl.advance("<root><b/>")
-        # <b/> should consume both <b> and </b> at the same position; остаётся только
-        # </root> — контроллер закрывает его сам (автозакрытие).
         self.assertTrue(v.complete)
         self.assertEqual(v.corrected_content, "<root><b/></root>")
         self.assertEqual(ctrl.document(), "<root><b/></root>")
@@ -141,7 +130,6 @@ class TestAdvance(unittest.TestCase):
         ctrl = XMLStructureController.from_schema_text("<root><a/></root>")
         v = ctrl.advance("<root><z>x</z><b>nope</b></root>")
         self.assertEqual(v.next_prefill, "<a>")
-        # Стирает всё начиная с <z> (позиция 6).
         self.assertEqual(v.corrected_content, "<root>")
 
     def test_document_accumulates_across_phases(self):
@@ -153,19 +141,15 @@ class TestAdvance(unittest.TestCase):
 
     def test_text_between_tags_not_confused_with_tags(self):
         ctrl = XMLStructureController.from_schema_text("<root><a/></root>")
-        # Пробелы, переносы, текст — не разбираются как токены. Все токены пройдены,
-        # остаётся только </root> → автозакрытие.
         v = ctrl.advance("<root>\n  <a>data</a>\n")
         self.assertTrue(v.complete)
         self.assertEqual(ctrl.document(), "<root>\n  <a>data</a>\n</root>")
 
-    # ── Автозакрытие при досрочном завершении ответа ──
 
     def test_prefill_suffix_in_initial_prefill(self):
         """prefill_suffix добавляется после открывающего тега корня в initial_prefill()."""
         ctrl = XMLStructureController.from_schema_text("<content_structure/>", prefill_suffix="\nL")
         self.assertEqual(ctrl.initial_prefill(), "<content_structure>\nL")
-        # Токены и маркеры не зависят от суффикса.
         self.assertEqual(ctrl._tokens, ("<content_structure>", "</content_structure>"))
         self.assertEqual(ctrl.markers(), ("</content_structure>",))
 
@@ -260,14 +244,12 @@ class TestAdvance(unittest.TestCase):
     def test_expect_tokens_ignores_mismatch(self):
         """expect_tokens не чинит рассинхрон: неожиданный токен игнорируется без побочных эффектов."""
         ctrl = XMLStructureController.from_sibling_schema("<a/><b/>")
-        # Курсор ждёт <a> — переданный </a> не сдвигает его, документ разбирает advance().
         ctrl.expect_tokens("</a>")
         v = ctrl.advance("<a>текст</a><b>ответ</b>")
         self.assertTrue(v.complete)
         self.assertEqual(v.corrected_content, "<a>текст</a><b>ответ</b>")
 
 
-# ── Интеграция с agent.chat() ─────────────────────────────────────
 
 class TestAgentController(unittest.TestCase):
     """E2E тесты контроллерного режима через agent.chat()."""
@@ -290,7 +272,6 @@ class TestAgentController(unittest.TestCase):
 
         def fake_call(messages, prefill=None, stop_markers=(), **kwargs):
             content = next(it)
-            # Имитируем apply_prefill + apply_stop_markers транспорта:
             if prefill and not content.startswith(prefill):
                 content = prefill + content
             if stop_markers:
@@ -340,8 +321,6 @@ class TestAgentController(unittest.TestCase):
     def test_max_phases_stops(self):
         """Если max_phases=2 и модель не закрывает корень — документ возвращается как есть."""
         ctrl_cfg = _ctrl("<root><a/></root>", max_phases=2)
-        # Фаза 1: правильный partial (cursor=3, ожидается </root>). Фаза 2: неверный контент
-        # (модель открыла <a> вместо закрытия </root>) → empty erase → max_phases стоп.
         with mock.patch(
             "universal_agents.agent.LLMClient.call",
             side_effect=self._mock_call([
@@ -351,7 +330,6 @@ class TestAgentController(unittest.TestCase):
         ):
             result = self._agent().chat("go", structured_output=ctrl_cfg)
 
-        # Документ содержит накопленный partial из фазы 1 (фаза 2 стёрта).
         self.assertIn("<a>x</a>", result)
         self.assertIn("<root>", result)
 
@@ -428,7 +406,6 @@ class TestAgentController(unittest.TestCase):
             )
         self.assertEqual(result, "<structure>\ndata\n</structure>")
 
-    # ── Автозакрытие при досрочном завершении ответа (E2E) ──
 
     def test_autoclose_on_premature_end(self):
         """Модель написала корень и досрочно остановилась (не закрыла тег) — контроллер
@@ -457,7 +434,6 @@ class TestAgentController(unittest.TestCase):
         ):
             result = self._agent().chat("go", structured_output=ctrl_cfg)
 
-        # После phase2 контроллер видит cursor на </root> → автозакрывает.
         self.assertEqual(result, "<root><a>one</a><b>two</b></root>")
 
 

@@ -33,7 +33,6 @@ class TestContextBuilderImages(unittest.TestCase):
         self.assertIsInstance(user["content"], list)
         text_part = user["content"][0]
         self.assertEqual(text_part["type"], "text")
-        # Шапка (KV-заголовок с таймстемпом) и текст — в одной текстовой части.
         self.assertIn(ENVIRONMENT_PREFIX, text_part["text"])
         self.assertIn("текст задачи", text_part["text"])
         self.assertEqual(user["content"][1]["type"], "image_url")
@@ -75,10 +74,8 @@ class TestHeaderCachePolicy(unittest.TestCase):
         prepare_messages_for_api(agent)
         agent.token_tracker.update_from_usage({"prompt_tokens": 50_000, "total_tokens": 50_000})
         before = prepare_messages_for_api(agent)
-        # «задача» не была последним вопросом — строки бюджета у неё ещё нет.
         self.assertNotIn("Memory:", before[1]["content"])
 
-        # Удаляем хвост с последним user-сообщением: «последность» возвращается к «задаче».
         agent.history.remove_at({4, 5})
         after = prepare_messages_for_api(agent)
 
@@ -105,7 +102,6 @@ class TestHeaderCachePolicy(unittest.TestCase):
         header = target._cached_header
         self.assertIsNotNone(header)
 
-        # Удаляем всё перед «уточнением»: оно переезжает с индекса 4 на 1.
         agent.history.delete_range(1, 3)
         self.assertIs(agent.history[1], target)
 

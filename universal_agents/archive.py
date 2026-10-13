@@ -123,7 +123,6 @@ class HistoryArchive:
                     f"Archived range covers seq {min(known)}..{max(known)}."
                 )
             return "[recall_read] Archive is empty."
-        # Записи отсортированы по seq, т.к. блоки памяти получают seq позже хвоста.
         selected.sort(key=lambda e: e["seq"])
 
         parts: list[str] = []

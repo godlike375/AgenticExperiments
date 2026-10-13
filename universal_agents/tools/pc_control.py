@@ -40,7 +40,6 @@ COLORS = {
 }
 
 
-# ─── Скриншот с сеткой (перенос из screen_agent.py) ─────────────────────────
 
 def take_screenshot() -> tuple[str, int, int, int, int, float]:
     """Делает скриншот с наложенной сеткой.
@@ -63,8 +62,6 @@ def take_screenshot() -> tuple[str, int, int, int, int, float]:
             print(f"[screenshot] debug save failed: {e}")
     b64 = base64.b64encode(buf.getvalue()).decode()
     img_w, img_h = img.size
-    # Масштаб фиксируется здесь же: любой вызовующий (не только @tool-обёртка)
-    # обновляет координатное пространство для mouse-инструментов.
     screen_state.set_last_scale(scale)
     return b64, w, h, img_w, img_h, scale
 
@@ -89,14 +86,12 @@ def draw_grid(img: Image.Image, cursor_x=None, cursor_y=None) -> None:
     font_small = _get_font(10)
     lw = max(2, min(w, h) // 300)
 
-    # ── Линии сетки ──
     for i in range(1, 4):
         x = int(w * i / 4)
         draw.line([(x, 0), (x, h)], fill=COLORS["grid"], width=lw)
         y = int(h * i / 4)
         draw.line([(0, y), (w, y)], fill=COLORS["grid"], width=lw)
 
-    # ── Подписи квадрантов (A1, A2, ..., D4) ──
     for row in range(4):
         for col in range(4):
             x1 = int(w * col / 4)
@@ -113,7 +108,6 @@ def draw_grid(img: Image.Image, cursor_x=None, cursor_y=None) -> None:
             )
             draw.text((cx - tw // 2, cy - th // 2), label, fill=COLORS["quadrant_label"], font=font_small)
 
-    # ── Координаты углов каждого квадранта ──
     for row in range(4):
         for col in range(4):
             x1 = int(w * col / 4) + 2
@@ -128,7 +122,6 @@ def draw_grid(img: Image.Image, cursor_x=None, cursor_y=None) -> None:
             )
             draw.text((x1 + 1, y1), text, fill=COLORS["coord"], font=font_small)
 
-    # ── Курсор мыши ──
     if cursor_x is not None and cursor_y is not None:
         cr = max(5, min(w, h) // 80)
         draw.ellipse(
@@ -157,7 +150,6 @@ def draw_grid(img: Image.Image, cursor_x=None, cursor_y=None) -> None:
         draw.text((lx, ly), label, fill=(0, 255, 0), font=font)
 
 
-# ─── Координаты: изображение → экран ─────────────────────────────────────────
 
 def _current_scale() -> float:
     """Масштаб перевода координат изображения в экранные.
@@ -178,18 +170,6 @@ def _to_screen(x: int, y: int) -> tuple[int, int]:
     return round(x / scale), round(y / scale)
 
 
-# ─── Клавиатура: SendInput напрямую, минуя pyautogui ────────────────────────
-#
-# pyautogui на Windows раскладывает буквы через VkKeyScan текущей раскладки: на русской
-# клавиатуре 'a' и 'v' дают -1, и вместо клавиш в очередь ввода уходят мусорные
-# VK-коды (255/18/17/16) — Ctrl+V не срабатывает ни в чём. Поэтому события ввода
-# отправляем сами:
-#   • модификаторы и именованные клавиши — по VK: комбинации (ctrl+v, alt+tab) в любой
-#     раскладке остаются одними и теми же, потому что акселератор приложения смотрит на VK;
-#   • печатные символы — по scancode физической клавиши (US set-1), чтобы не зависеть
-#     от VkKeyScan (но сам символ, как и у живого человека, печатается по текущей
-#     раскладке — поэтому текст tool'а идёт через буфер обмена).
-# Раскладку и фокус не меняем: ввод уходит в то окно, которое сейчас в фокусе.
 
 _IS_WINDOWS = sys.platform == "win32"
 
@@ -209,7 +189,6 @@ _MODIFIER_VKS = {
     "win": 0x5B, "super": 0x5B, "cmd": 0x5B, "command": 0x5B,
 }
 
-# именованные клавиши → (VK, нужна ли EXTENDEDKEY)
 _NAMED_KEYS = {
     "enter": (0x0D, False), "return": (0x0D, False),
     "esc": (0x1B, False), "escape": (0x1B, False),
@@ -232,7 +211,9 @@ for _f in range(1, 25):
     _NAMED_KEYS[f"f{_f}"] = (0x6F + _f, False)
 del _f
 
-# печатные символы → scancode клавиши в US set-1
+# SendInput напрямую, минуя pyautogui: VkKeyScan текущей раскладки на русской
+# клавиатуре ломает буквы (Ctrl+V не срабатывает). Модификаторы — по VK,
+# печатные символы — по scancode физической клавиши (US set-1).
 _SCAN_CODES = {
     "a": 0x1E, "b": 0x30, "c": 0x2E, "d": 0x20, "e": 0x12, "f": 0x21, "g": 0x22, "h": 0x23,
     "i": 0x17, "j": 0x24, "k": 0x25, "l": 0x26, "m": 0x32, "n": 0x31, "o": 0x18, "p": 0x19,
@@ -318,7 +299,6 @@ def _send_combo(parts: list[str]) -> str | None:
     return None
 
 
-# ─── Инструменты ─────────────────────────────────────────────────────────────
 
 @tool(
     description=(

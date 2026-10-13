@@ -5,10 +5,6 @@ import inspect
 from typing import Callable
 
 
-# Кэш уже загруженных плагинов (по абсолютному пути файла). Повторный exec_module
-# плодил бы новые объекты функций при каждом load_tool и прогонял module-level код;
-# здесь существующие файлы переиспользуются (identity хэндлеров стабильна), НОВЫЕ
-# файлы подхватываются автоматически, а удалённые вычищаются из кэша.
 _PLUGIN_CACHE: dict[str, dict[str, Callable]] = {}
 
 
@@ -55,7 +51,6 @@ def load_external_plugins(plugins_dir: str = "tools") -> dict[str, Callable]:
         except Exception as e:
             print(f"Error loading plugin {filename}: {e}")
 
-    # Вычищаем кэш от файлов, которых больше нет в директории.
     for cached_path in list(_PLUGIN_CACHE):
         if not os.path.exists(cached_path):
             del _PLUGIN_CACHE[cached_path]
@@ -78,7 +73,5 @@ def build_tool_dict(func: Callable, is_instance_method: bool) -> dict:
         "self_truncating": getattr(func, '_self_truncating', False),
         "group": group,
         "hidden": getattr(func, '_tool_hidden', False),
-        # Внешний инструмент (docs/TOOL_ISOLATION_SPEC.md §4): нет параметра-агента и группа
-        # не internal → тело исполняется в воркере группы, а не в процессе хоста.
         "is_external": (not has_agent) and group != "internal",
     }

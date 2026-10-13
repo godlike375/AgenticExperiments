@@ -41,8 +41,6 @@ from universal_agents.tool_worker import invoke_tool
 __all__ = ["GroupManager", "WorkerCallResult"]
 
 
-# Результат вызова через группу: status ∈ {"ok", "error", "wrapped"}; при "wrapped"
-# value = (preview, ask) — dry_run обёрнутого инструмента (протокол подтверждения).
 WorkerCallResult = namedtuple("WorkerCallResult", "status value session")
 
 
@@ -115,9 +113,6 @@ class SubprocessGroupWorker:
         self._lock = threading.Lock()
         self._proc: Optional[subprocess.Popen] = None
         self._stderr_thread: Optional[threading.Thread] = None
-        # Конфиг воркера переносится через env: subprocess не даёт передать объект,
-        # а нам нужны лимиты (MAX_READ_*, BASH_*, SCREENSHOT_*). Кладём JSON-ом
-        # одной переменной окружения, ребёнок применит поверх свежего Config.
         overrides_json = json.dumps(config_overrides or {}, ensure_ascii=False)
         env = os.environ.copy()
         env["PYTHONUNBUFFERED"] = "1"
@@ -149,15 +144,11 @@ class SubprocessGroupWorker:
         except Exception as e:
             raise RuntimeError(f"failed to launch worker for group '{group}': {e}")
 
-        # stderr ребёнка пробрасываем в stderr родителя: видны готовность и traceback'и.
         self._stderr_thread = threading.Thread(target=self._pump_stderr, daemon=True)
         self._stderr_thread.start()
 
-        # Готовность: noop-запрос с таймаутом. Для нас важен сам факт ответа —
-        # "__noop__" в группе нет, воркер вернёт status="error", это нормально.
         self._warmup(timeout=startup_timeout)
 
-    # -------------------------------------------------------- stderr
 
     def _pump_stderr(self) -> None:
         proc = self._proc
@@ -170,7 +161,6 @@ class SubprocessGroupWorker:
         except Exception:
             pass
 
-    # -------------------------------------------------------- lifecycle
 
     def _warmup(self, timeout: float) -> None:
         """Проверяем, что воркер отвечает. Если нет — не бросаем исключение: следующий
@@ -208,7 +198,6 @@ class SubprocessGroupWorker:
             except Exception:
                 pass
 
-    # -------------------------------------------------------- вызов
 
     def call(
             self,
@@ -238,8 +227,6 @@ class SubprocessGroupWorker:
             except (BrokenPipeError, OSError):
                 return WorkerCallResult("error", _worker_died_message(self.group), session)
 
-            # Чтение строки с возможностью проверить stop_check по ходу ожидания:
-            # сам readline() блокирующий, поэтому отдаём его отдельному потоку.
             box: list = []
             done = threading.Event()
 
@@ -370,7 +357,6 @@ class GroupManager:
         self._sessions: dict[str, dict] = {}
         self._workers: dict[str, object] = {}
 
-    # -------------------------------------------------------- Состояние групп
 
     def session(self, group: str) -> dict:
         """Состояние группы (владеет хост). Создаётся лениво. Рабочая папка
@@ -382,7 +368,6 @@ class GroupManager:
             self._sessions[group] = session
         return session
 
-    # -------------------------------------------------------- Делегирование
 
     def call(
             self,
@@ -396,14 +381,10 @@ class GroupManager:
         worker = self._get_worker(group)
         result = worker.call(name, args, self.session(group), dry_run, stop_check, timeout)
         if self.isolated and result.status == "error" and result.value == _worker_died_message(group):
-            # Воркер не поднялся (например, сбой запуска процесса). Не роняем ход:
-            # разово деградируем в in-process, чтобы приложение оставалось рабочим,
-            # и отключаем изоляцию до конца сессии.
             self._workers.pop(group, None)
             self._degrade_to_in_process("worker failed to start")
             worker = self._get_worker(group)
             result = worker.call(name, args, self.session(group), dry_run, stop_check, timeout)
-        # Обновляем состояние группы (воркер вернул его же объектом).
         if isinstance(result.session, dict):
             self._sessions[group] = result.session
         self._sync_host_cwd(group)
@@ -460,7 +441,6 @@ class GroupManager:
                 f"for this session."
             )
 
-    # -------------------------------------------------------- Управление процессами
 
     def kill(self, group: str) -> None:
         worker = self._workers.pop(group, None)

@@ -26,7 +26,6 @@ def multimodal_content(text: str, images: list[str]) -> str | list[dict]:
 @dataclass(eq=False)
 class Message(ABC):
     timestamp: datetime = field(init=False)
-    # Стабильный монотонный id сессии; назначается ChatHistory, переживает /save+/load, в API не уходит.
     seq: Optional[int] = field(init=False, default=None, repr=False)
 
     def __post_init__(self):
@@ -55,12 +54,8 @@ class SystemMessage(Message):
 class UserMessage(Message):
     content: str
     is_summary: bool = False
-    # Base64 JPEG-картинки, приложенные к сообщению (пусто у обычных сообщений).
-    # Живут только в памяти и в API; в JSON-файлы попадают лишь при Config.SAVE_IMAGES=True.
     images: list[str] = field(default_factory=list)
     _cached_header: Optional[str] = field(default=None, init=False, repr=False)
-    # Метка нага guard'а respond_to_system: в API не уходит, переживает save/load (scrub
-    # находит наг по флагу — текст дублируется превью edit'а, матчинг дал бы ложь).
     _is_guard_nag: bool = field(default=False, init=False, repr=False)
 
     def reset_header_cache(self) -> None:
@@ -80,7 +75,6 @@ class UserMessage(Message):
         return {"role": "user", "content": multimodal_content(self.content, self.images)}
 
     def to_persist_dict(self) -> dict[str, Any]:
-        # content кладём строковым полем (не to_api_dict): файл истории — не запрос к LLM.
         d: dict[str, Any] = {"role": "user", "content": self.content}
         d["_is_summary"] = self.is_summary
         d["_is_guard_nag"] = self._is_guard_nag
@@ -134,11 +128,7 @@ class ToolResult(Message):
     execution_time_ms: Optional[float] = None
     retry_count: int = 0
     skip_summarize: bool = False
-    # Подсказка сжатия: воспроизводимый результат (чтение/поиск) сворачивается агрессивнее, чем невосстановимый.
     recoverable_hint: bool = False
-    # Base64 JPEG-картинки результата (скриншот): в API уходят как image_url-части
-    # рядом с текстом (спайк фазы 0: LM Studio принимает image в role=tool).
-    # Поведенчески content остаётся строкой — парсинг ошибок/усечение/саммаризация не меняются.
     images: list[str] = field(default_factory=list)
 
     def to_api_dict(self) -> dict[str, Any]:
@@ -150,14 +140,12 @@ class ToolResult(Message):
         }
 
     def to_persist_dict(self) -> dict[str, Any]:
-        # content кладём строковым полем (не to_api_dict): файл истории — не запрос к LLM.
         d: dict[str, Any] = {
             "role": "tool",
             "tool_call_id": self.tool_call_id,
             "name": self.name,
             "content": self.content,
         }
-        # Служебные метаданные через underscore-префикс — не конфликтуют с API и не уходят в запрос к модели.
         d["_ts"] = self.timestamp.isoformat()
         d.update({
             "_is_error": self.is_error,

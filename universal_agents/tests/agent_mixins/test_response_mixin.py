@@ -132,7 +132,6 @@ class SimReasoningTestCase(unittest.TestCase):
         return [m for m in agent.history.get_all() if isinstance(m, ToolResult)]
 
 
-# ── Схема формата ─────────────────────────────────────────────────────────
 
 class TestSimSchema(unittest.TestCase):
     def test_schema_is_single_section(self):
@@ -142,13 +141,11 @@ class TestSimSchema(unittest.TestCase):
         ))
 
     def test_controller_generic_api_unchanged(self):
-        # Контроллер больше не используется симуляцией, но остаётся общим механизмом.
         ctrl = XMLStructureController.from_schema_text("<root><a/></root>")
         self.assertEqual(ctrl.initial_prefill(), "<root>")
         self.assertEqual(ctrl.markers(), ("</root>", "</a>"))
 
 
-# ── Один вызов: модель сама закрывает секцию и пишет ответ ────────────────
 
 class TestSingleCallFlow(SimReasoningTestCase):
     def test_self_closed_section_keeps_answer_and_uses_no_stop_markers(self):
@@ -157,8 +154,6 @@ class TestSingleCallFlow(SimReasoningTestCase):
         with mock.patch("universal_agents.agent.LLMClient.call", side_effect=fake):
             result = agent.chat("сколько будет 21*2?")
 
-        # Один вызов, prefill открывает секцию, стоп-маркеров нет: закрыв секцию,
-        # модель дописывает ответ в том же потоке, и мы его не режем.
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0].prefill, OPEN_T)
         self.assertEqual(calls[0].markers, ())
@@ -178,7 +173,6 @@ class TestSingleCallFlow(SimReasoningTestCase):
     def test_unclosed_section_is_closed_by_agent(self):
         agent = self._agent()
         fake, calls = _transport([("мысли", None), ("42", None)])
-        # Даже когда секция не закрыта, ответа в первом вызове нет — продолжим.
         with mock.patch("universal_agents.agent.LLMClient.call", side_effect=fake):
             result = agent.chat("сколько будет 21*2?")
 
@@ -192,19 +186,16 @@ class TestSingleCallFlow(SimReasoningTestCase):
         with mock.patch("universal_agents.agent.LLMClient.call", side_effect=fake):
             result = agent.chat("что-то")
 
-        # Стоп-маркеров нет: ничего после закрытия секции не выбрасывается.
         self.assertEqual(calls[0].markers, ())
         self.assertEqual(result, f"{OPEN_T}мысли{CLOSE_T}\n{answer}")
 
 
-# ── Живой вывод: блок один, закрыт один раз, автозакрытие видно ───────────
 
 class TestSimStreaming(SimReasoningTestCase):
     def test_unclosed_section_is_echoed_in_live_output(self):
         chunks = []
         events = []
         agent = self._streaming_agent(chunks, events)
-        # Первый вызов: секция не закрыта → автозакрытие + продолжение пустого ответа.
         script = [["мысли"], ["теперь скажу"]]
         stream, calls = self._scripted_stream(script)
 
@@ -237,8 +228,6 @@ class TestSimStreaming(SimReasoningTestCase):
         self.assertEqual(kinds.count("end"), 1)
         self.assertEqual(kinds[0], "start")
         self.assertEqual(kinds[-1], "end")
-        # Ответ уже выведен дальше тега в том же стриме: перевод строки есть
-        # в истории, но в живой вывод задним числом не вставляется.
         self.assertEqual("".join(chunks), f"{OPEN_T}мысли{CLOSE_T}42")
         self.assertEqual(result, f"{OPEN_T}мысли{CLOSE_T}\n42")
         self.assertEqual(calls, [OPEN_T])
@@ -265,7 +254,6 @@ class TestSimStreaming(SimReasoningTestCase):
         self.assertEqual(result, f"{OPEN_T}мысли{CLOSE_T}\nтеперь скажу")
 
 
-# ── Пустой ответ: продолжение с _NO_COMMENT_PREFILL ───────────────────────
 
 class TestEmptyAnswerContinuation(SimReasoningTestCase):
     def test_empty_answer_continues_with_no_comment_prefill(self):
@@ -278,10 +266,8 @@ class TestEmptyAnswerContinuation(SimReasoningTestCase):
         with mock.patch("universal_agents.agent.LLMClient.call", side_effect=fake):
             result = agent.chat("сколько будет 21*2?")
 
-        # Рассуждение не перегенерируется: продолжаем ровно с его конца.
         self.assertEqual(len(calls), 2)
         self.assertEqual(calls[1].prefill, f"{OPEN_T}мысли{CLOSE_T}\n" + _NO_COMMENT_PREFILL)
-        # Приставка была нашим prefill — в ответ и в историю она не попадает.
         self.assertEqual(result, f"{OPEN_T}мысли{CLOSE_T}\nтеперь скажу")
         self.assertTrue(any("No answer text" in m for m in msgs), msgs)
         self.assertEqual(self._assistant_contents(agent), [result])
@@ -298,12 +284,10 @@ class TestEmptyAnswerContinuation(SimReasoningTestCase):
         with mock.patch("universal_agents.agent.LLMClient.call", side_effect=fake):
             result = agent.chat("сколько будет 21*2?")
 
-        # Ровно SIMULATED_REASONING_REPAIRS продолжений: бюджет не даёт зациклиться.
         self.assertEqual(len(calls), repairs + 1)
         self.assertIn(f"retries left: {repairs - 1}", msgs[0])
         self.assertIn("retries left: 0", msgs[repairs - 1])
         self.assertIn("всё равно пусто", result)
-        # Вклинённая приставка — наш prefill, в ответе её быть не должно.
         self.assertNotIn("LLM Assistant", result)
 
     def test_zero_repair_budget_accepts_empty_answer(self):
@@ -315,8 +299,6 @@ class TestEmptyAnswerContinuation(SimReasoningTestCase):
             result = agent.chat("сколько будет 21*2?")
 
         self.assertEqual(len(calls), 1)
-        # Ответ пуст — висячий перевод строки срезан нормализацией контента
-        # (_process_llm_response: content.strip()); за тегом всё равно ничего нет.
         self.assertEqual(result, f"{OPEN_T}мысли{CLOSE_T}")
         self.assertTrue(any("budget exhausted" in m for m in msgs))
 
@@ -344,7 +326,6 @@ class TestTwoPhaseReasoning(SimReasoningTestCase):
             result = agent.chat("сколько будет 21*2?")
 
         self.assertEqual(len(calls), 2)
-        # Фаза размышлений: открывающий prefill, стоп-маркер закрытия, свои параметры.
         self.assertEqual(calls[0].prefill, OPEN_T)
         self.assertEqual(calls[0].markers, (CLOSE_T,))
         think = calls[0].params
@@ -353,12 +334,10 @@ class TestTwoPhaseReasoning(SimReasoningTestCase):
              think.frequency_penalty, think.presence_penalty),
             (0.9, 0.5, 0.1, 0.3, 0.4),
         )
-        # Фаза ответа: накопленный prefill, без маркеров, обычные параметры.
         self.assertEqual(calls[1].prefill, f"{OPEN_T}мысли{CLOSE_T}\n")
         self.assertEqual(calls[1].markers, ())
         answer = calls[1].params
         self.assertEqual(answer.temp, Config.TEMP)
-        # min_p не задан для размышлений — унаследован глобальный (по умолчанию None).
         self.assertEqual(answer.min_p, Config.MIN_P)
         self.assertNotEqual(answer.temp, think.temp)
         self.assertEqual(result, f"{OPEN_T}мысли{CLOSE_T}\nготовый ответ")
@@ -377,7 +356,6 @@ class TestTwoPhaseReasoning(SimReasoningTestCase):
         self.assertEqual(len(calls), 2)
         think = calls[0].params
         self.assertEqual(think.temp, 0.9)
-        # Остальное унаследовано от базовых параметров хода.
         self.assertEqual(think.top_p, Config.TOP_P)
         self.assertEqual(think.min_p, Config.MIN_P)
 
@@ -393,8 +371,6 @@ class TestTwoPhaseReasoning(SimReasoningTestCase):
         with mock.patch("universal_agents.agent.LLMClient.call", side_effect=fake):
             result = agent.chat("удвой 21")
 
-        # Инструмент из фазы размышлений исполнен сразу, без фазы ответа;
-        # следующее сообщение — новая think-фаза с теми же параметрами.
         self.assertEqual(len(calls), 3)
         self.assertEqual(calls[0].markers, (CLOSE_T,))
         self.assertEqual(calls[1].prefill, OPEN_T)
@@ -428,7 +404,6 @@ class TestTwoPhaseReasoning(SimReasoningTestCase):
         with mock.patch("universal_agents.agent.LLMClient.call", side_effect=fake):
             result = agent.chat("сколько будет 21*2?")
 
-        # think + пустой answer + одно NO COMMENT-продолжение.
         self.assertEqual(len(calls), 3)
         self.assertTrue(any("No answer text" in m for m in msgs), msgs)
         self.assertEqual(result, f"{OPEN_T}мысли{CLOSE_T}\nнашёлся ответ")
@@ -446,7 +421,6 @@ class TestTwoPhaseReasoning(SimReasoningTestCase):
              mock.patch("universal_agents.llm_client.LLMClient.close_stream"):
             result = agent.chat("сколько будет 21*2?")
 
-        # Две фазы — один блок вывода: мысли и ответ идут подряд без дублей.
         kinds = [kind for kind, _ in events]
         self.assertEqual(kinds.count("start"), 1)
         self.assertEqual(kinds.count("end"), 1)
@@ -454,7 +428,6 @@ class TestTwoPhaseReasoning(SimReasoningTestCase):
         self.assertEqual(result, f"{OPEN_T}мысли{CLOSE_T}\nготовый ответ")
 
 
-# ── Инструменты: группа перезапускается, один вызов за сообщение ───────────
 
 class TestSimulatedReasoningWithTools(SimReasoningTestCase):
     def _tool_call(self, value=21):
@@ -469,7 +442,6 @@ class TestSimulatedReasoningWithTools(SimReasoningTestCase):
         with mock.patch("universal_agents.agent.LLMClient.call", side_effect=fake):
             result = agent.chat("удвой 21")
 
-        # Структура начинается заново на каждом assistant-сообщении.
         self.assertEqual([c.prefill for c in calls], [OPEN_T, OPEN_T])
         self.assertEqual(result, f"{OPEN_T}проверяю{CLOSE_T}\nПолучилось 42")
         self.assertEqual([m.content for m in self._tool_results(agent)], ["42"])
@@ -484,14 +456,12 @@ class TestSimulatedReasoningWithTools(SimReasoningTestCase):
         with mock.patch("universal_agents.agent.LLMClient.call", side_effect=fake):
             result = agent.chat("удвой 21")
 
-        # Модели нечего сказать — продолжение тут только зациклило бы ход (§2.8).
         self.assertEqual(len(calls), 2)
         self.assertEqual([m.content for m in self._tool_results(agent)], ["42"])
         self.assertTrue(any("tool call accepted as-is" in m for m in msgs), msgs)
         self.assertFalse(any("[NO COMMENT]" in m for m in msgs), msgs)
         self.assertEqual(
             self._assistant_contents(agent)[0],
-            # Пустой ответ: висячий перевод срезан нормализацией (см. выше).
             f"{OPEN_T}сразу беру инструмент{CLOSE_T}",
         )
         self.assertEqual(result, f"{OPEN_T}инструмент отработал{CLOSE_T}\n42")
@@ -506,13 +476,11 @@ class TestSimulatedReasoningWithTools(SimReasoningTestCase):
         with mock.patch("universal_agents.agent.LLMClient.call", side_effect=fake):
             agent.chat("удвой 21", max_iter=5)
 
-        # Инвариант §1.3: в сообщение попадает ровно один вызов.
         tool_call_counts = [len(m.tool_calls) for m in agent.history.get_all()
                             if isinstance(m, AssistantMessage)]
         self.assertTrue(all(c <= 1 for c in tool_call_counts), tool_call_counts)
 
 
-# ── Дефолтный выключатель формата ─────────────────────────────────────────
 
 class TestSimulatedReasoningDisabled(SimReasoningTestCase):
     def test_thinking_on_keeps_plain_answers(self):
@@ -544,7 +512,6 @@ class TestSimulatedReasoningDisabled(SimReasoningTestCase):
         self.assertEqual(msg.content, "итог саммари")
 
 
-# ── Детекция сломанного вызова не ловит прозу ─────────────────────────────
 
 class TestBrokenCallScanning(SimReasoningTestCase):
     def test_tool_mention_in_reasoning_is_not_broken_call(self):
@@ -562,7 +529,6 @@ class TestBrokenCallScanning(SimReasoningTestCase):
     def test_tool_mention_in_prose_answer_is_not_broken_call(self):
         msgs = []
         agent = self._agent(tools=True, system_msgs=msgs)
-        # Именно этот сценарий ловил ложный BROKEN CALL: проза с упоминанием read().
         answer = "read() выполнен: показана структура каталога. Вызываю read() для деталей."
         fake, _calls = _transport([(f"посмотрел{CLOSE_T}{answer}", None)])
         with mock.patch("universal_agents.agent.LLMClient.call", side_effect=fake):
@@ -584,8 +550,6 @@ class TestBrokenCallScanning(SimReasoningTestCase):
         self.assertTrue(any("[BROKEN CALL]" in m for m in msgs), msgs)
 
     def test_tool_mention_prose_variants_are_not_broken_call(self):
-        # Регрессия: реальный баг — гейт «есть XML-тег» выполнялся по контенту ВМЕСТЕ
-        # с тегом секции, поэтому любая проза про инструмент давала ложный BROKEN CALL.
         variants = [
             "read() выполнен: показана структура каталога.",
             "Вызываю read() для просмотра содержимого текущей директории:",
@@ -606,8 +570,6 @@ class TestBrokenCallScanning(SimReasoningTestCase):
                 self.assertFalse(any("[BROKEN CALL]" in m for m in msgs), msgs)
 
     def test_section_tags_alone_do_not_enable_the_gate(self):
-        # Теги секции не должны открывать гейт скана: скан идёт по ответу, а не по
-        # контенту вместе с секцией рассуждения.
         msgs = []
         agent = self._agent(tools=True, system_msgs=msgs)
         fake, _calls = _transport([(f"мысли про read(){CLOSE_T}итог без вызовов", None)])
@@ -640,7 +602,6 @@ class TestNoCommentResponse(unittest.TestCase):
         text, tool_err, broken, rerun = agent._process_llm_response(msg)
         self.assertEqual(rerun, _NO_COMMENT_PREFILL)
         self.assertEqual(text, "")
-        # пустой ответ не попал в историю, инструмент не исполнялся
         roles = [m.to_api_dict()["role"] for m in agent.history]
         self.assertEqual(roles, ["system", "user"])
 

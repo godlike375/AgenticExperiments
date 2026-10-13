@@ -102,7 +102,6 @@ class TestConfirmCoordination(unittest.TestCase):
             cli._answer_next_confirm()
         t.join(5)
         self.assertFalse(result.get("answer"))
-        # Текст не потерян — он станет сообщением пользователя после шага.
         self.assertEqual(agent.take_pending_interrupt(), "не подтверждаю, сделай иначе")
 
     def test_confirm_q_denies_and_requests_stop(self):
@@ -134,7 +133,6 @@ class TestConfirmCoordination(unittest.TestCase):
         t = threading.Thread(target=worker, daemon=True)
         t.start()
         self.assertTrue(self._wait_request(cli))
-        # Монитор умер/не пришёл — но стоп-запрос всё равно разблокирует ожидание.
         agent.request_stop()
         t.join(5)
         self.assertFalse(t.is_alive())
@@ -226,8 +224,6 @@ class TestCompactHistory(unittest.TestCase):
             self.assertTrue(started.wait(5))
             cli._inject_line("продолжай\n")
             t.join(10)
-            # Текст пользователя возвращён в очередь (после инжектированного '\n'), чтобы
-            # стать обычным сообщением для следующего хода.
             self.assertEqual(list(cli._line_queue), ["\n", "продолжай"])
         self.assertTrue(done.is_set(), "compaction didn't stop on plain text")
         self.assertTrue(cli.agent.stop_event.is_set())

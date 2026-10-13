@@ -95,7 +95,6 @@ def _dense_summarize_message(agent: AgentContext, content: str) -> Optional[str]
         f"Output ONLY the dense structured summary.\n"
         f"{ENVIRONMENT_PREFIX_END}"
     )
-        # Тот же формат, что у основного диалога (закэшированные заголовки), чтобы переиспользовался KV-кэш.
     history_msgs = prepare_messages_for_api(agent, normalize=False)
     msgs = history_msgs + [{"role": "user", "content": prompt}]
     msg_obj, err, usage = agent.service_llm_call(msgs, temp=Config.TEMP, timeout=Config.TIMEOUT)
@@ -221,7 +220,6 @@ def auto_compress_tool_result(agent: AgentContext, tool_result: ToolResult) -> N
 
     if len(new_tool_result_content) < original_len * 0.95:
         tool_result.content = new_tool_result_content
-        # Результат сжат — сбрасываем кэш хэша файла, чтобы следующий read перечитал.
         agent._on_history_changed()
         agent.on_system_msg(
             f"[AUTO-COMPRESS] Summarized '{tool_result.name}' output: "
@@ -356,7 +354,6 @@ def summarize_history_plain(
         f"{extra_instruction if extra_instruction else ''}"
     )
     prompt += f"{ENVIRONMENT_PREFIX_END}"
-    # history_msgs содержит system prompt первым — префикс совпадает, KV-cache переиспользуется.
     msgs = list(history_msgs) + [{"role": "user", "content": prompt}]
     msg_obj, err, usage = agent.service_llm_call(msgs, temp=temp, timeout=Config.TIMEOUT, prefill='* 1.1 ')
     if err or not msg_obj or not msg_obj.content:
@@ -456,15 +453,10 @@ class SummaryService:
         Возвращает True, если история реально сжата."""
         preserve_last = Config.AUTO_SUMMARY_PRESERVE_LAST
 
-        # Остановка пользователя: не начинаем долгую компакцию и не трогаем историю.
         if agent.stop_event.is_set():
             agent._auto_summarize_suppressed = True
             return False
 
-        # --- Точка срабатывания: только на «безопасных» границах (force — сжимаем в любом месте) ---
-        # Безопасные границы: ToolResult, UserMessage и завершённый текстовый ответ ассистента
-        # (после pop_pending_tool_calls его хвост гарантированно без tool_calls; последнее
-        # сообщение всё равно сохраняется через preserve_last).
         popped_calls = agent.history.pop_pending_tool_calls()
 
         last = agent.history.get_last_message()
@@ -496,33 +488,27 @@ class SummaryService:
 
         original_len = agent.history.content_len(start_id, end_id)
 
-        # --- 1. Архивация оригиналов ДО удаления (recall остаётся возможен) ---
         if Config.MEMORY_ARCHIVE_ENABLED and hasattr(agent, "archive"):
             added = agent.archive.append_messages(messages[start_id:end_id + 1])
             agent.on_system_msg(f"[ARCHIVE] Stored {added} original message(s) for recall.")
 
-        # Один вызов LLM: переписываем заметки с нуля. Подаём полную историю как structured API-сообщения
-        # (system prompt первым) в ТОМ ЖЕ формате, что и диалог, иначе префикс разойдётся и KV-кэш сбросится.
         history_msgs = prepare_messages_for_api(agent, normalize=False)
         FORBID_TOOLS_MSG = (
             f"{ENVIRONMENT_PREFIX} Возможно, ты попытался вызвать инструмент, но здесь "
             f"инструменты ЗАПРЕЩЕНЫ — сгенерируй саммари ТОЛЬКО текстом, без вызовов "
             f"инструментов. Попробуй ещё раз.{ENVIRONMENT_PREFIX_END}"
         )
-        # Старая саммари (для детекта повтора: новая не должна быть ей тождественна).
         prev_summary = agent.history.get_session_summary()
 
         summary_text = None
         include_73 = prev_summary is not None
         for attempt in range(1, Config.AUTO_SUMMARY_MAX_RETRIES + 1):
-            # Пользователь запросил остановку — прекращаем ретраи, не открывая новые стримы.
             if agent.stop_event.is_set():
                 agent._auto_summarize_suppressed = True
                 agent.on_system_msg(
                     "[AUTO-SUMMARY] Compaction stopped by user; history left unchanged."
                 )
                 return False
-            # Лёгкий рост температуры между попытками, чтобы не повторять ту же ошибку.
             if (prev_summary is not None and summary_text is not None
                     and _raw_summary(summary_text) == _raw_summary(prev_summary)):
                 temp = Config.SUMMARY_DUPLICATE_TEMP
@@ -534,8 +520,6 @@ class SummaryService:
                 include_new_to_previous=include_73,
             )
             if summary_text:
-                # Повтор саммари: модель проигнорировала новый контент и вернула старую —
-                # заставляем перегенерировать (как и при других повторах), с бустом температуры.
                 if prev_summary is not None and _raw_summary(summary_text) == _raw_summary(prev_summary):
                     agent.on_system_msg(
                         f"[AUTO-SUMMARY] New summary is identical to the existing one "
@@ -543,7 +527,6 @@ class SummaryService:
                         f"regenerating with temperature boost ({Config.SUMMARY_DUPLICATE_TEMP})."
                     )
                     continue
-                # Проверяем, что саммари содержит все обязательные разделы (1.1-7.2/7.3).
                 missing = _validate_summary_sections(summary_text, include_73=include_73)
                 if missing:
                     agent.on_system_msg(
@@ -565,7 +548,6 @@ class SummaryService:
             )
             return False
 
-        # --- 3. Удаляем сегмент из истории, оставляя текст как контекст ---
         agent.history.compress_old_messages(summary_text, preserve_last)
 
         agent._on_history_changed()

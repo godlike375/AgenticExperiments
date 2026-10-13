@@ -65,8 +65,6 @@ class TestDetectBrokenCallWithoutGate(unittest.TestCase):
     NAMES = {_read_tool.__name__, _line_range_edit_tool.__name__, _run_powershell_tool.__name__}
 
     def test_prose_mention_is_not_broken_call(self):
-        # Регрессия: гейт выполнялся по контенту вместе с тегом секции, и любая проза
-        # про инструмент давала ложный BROKEN CALL.
         for text in (
             "read() выполнен: показана структура каталога.",
             "Вызываю read() для просмотра содержимого текущей директории:",
@@ -78,7 +76,6 @@ class TestDetectBrokenCallWithoutGate(unittest.TestCase):
                 self.assertFalse(detect_broken_call(text, self.NAMES, require_tag=False))
 
     def test_standalone_call_is_broken_call(self):
-        # Единственный случай, когда голый вызов ловится без гейта: он занимает ВЕСЬ ответ.
         self.assertTrue(detect_broken_call('read({"path": "a.txt"})', self.NAMES, require_tag=False))
         self.assertTrue(detect_broken_call("read({}).", self.NAMES, require_tag=False))
 

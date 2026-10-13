@@ -11,13 +11,9 @@ from universal_agents.models import (
 class ChatHistory:
     def __init__(self, system_prompt: str):
         self._messages: list[Message] = [SystemMessage(system_prompt)]
-        # Стабильные монотонные идентификаторы сообщений (переживают /load).
         self._next_seq: int = 1
-        # Рабочая память (вне контекста): плотные per-message саммари для сборки короткого диалога при сжатии.
         self._per_msg_summaries: dict[int, str] = {}
-        # Extras последней загрузки (архив, состояние плана) — читаются после load().
         self.last_loaded_extras: dict = {}
-        # Dirty-флаг: normalize() дорог и сбрасывает кэш заголовков, запускаем только при реальном изменении истории.
         self._needs_normalize: bool = False
 
     def _mark_dirty(self) -> None:
@@ -130,8 +126,6 @@ class ChatHistory:
                 return err(f": Substr '{old_text}' not found in message {idx}")
             msg.content = msg.content.replace(old_text, new_text, 1)
         if isinstance(msg, UserMessage):
-            # Контент сообщения изменился — его KV и так мёртв, шапку можно пересобрать
-            # бесплатно (товарища по принципу §1.2: инвалидируем только то, что сами и сломали).
             msg.reset_header_cache()
         if not msg.content.strip() and idx >= Config.AFTER_SYSTEM_PROMPT:
             self.delete_range(idx, idx)
@@ -139,7 +133,6 @@ class ChatHistory:
         return ok(" Success")
 
     def normalize(self, is_error_recovery: bool = False):
-        # Пересборка дорога — только если история менялась (или recovery).
         if not self._needs_normalize and not is_error_recovery:
             return
 
@@ -150,12 +143,10 @@ class ChatHistory:
         raw = self._messages
         valid = [raw[0]]
 
-        # Ищем первое сообщение пользователя
         first_user_idx = Config.AFTER_SYSTEM_PROMPT
         while first_user_idx < len(raw) and not isinstance(raw[first_user_idx], UserMessage):
             first_user_idx += 1
 
-        # Если сообщений пользователя нет вовсе — возвращаем историю к исходному системному промпту
         if first_user_idx >= len(raw):
             self._messages = valid
             self._needs_normalize = False
@@ -163,7 +154,6 @@ class ChatHistory:
 
         valid.append(raw[first_user_idx])
 
-        # Фильтруем и объединяем историю; блоки гибридной памяти (STATE/EPISODES) не склеиваем — их структура значима.
         for i in range(first_user_idx + 1, len(raw)):
             msg = raw[i]
             last = valid[-1]
@@ -180,13 +170,8 @@ class ChatHistory:
                 and isinstance(msg, (UserMessage, AssistantMessage))
             ):
                 last.content = (last.content or "") + "\n\n" + (msg.content or "")
-                # Картинки склеиваемого user-сообщения не должны теряться молча
-                # (content склеивается, images — side-field, их надо переносить руками).
                 if isinstance(msg, UserMessage) and isinstance(last, UserMessage) and msg.images:
                     last.images = last.images + msg.images
-                    # Контент склеенного сообщения изменился — его KV и так мёртв,
-                    # шапку пересобрать бесплатно. Сообщения, которых normalize не тронул,
-                    # сохраняют байт-идентичные заголовки (§1.2).
                 if isinstance(last, UserMessage):
                     last.reset_header_cache()
                 if isinstance(msg, AssistantMessage) and msg.has_tool_calls():
@@ -198,8 +183,6 @@ class ChatHistory:
         changed = len(valid) != len(raw)
         self._messages = valid
         self._needs_normalize = False
-        # Состав истории изменился (склейка/удаление) — у последнего вопроса устарел
-        # токен-бюджет; пересобираем его шапку (KV от этой точки и так пересобран).
         if changed:
             self._resync_last_user_header()
 
@@ -239,7 +222,6 @@ class ChatHistory:
              extras: dict = None):
         """Сохраняет историю. extras — произвольные данные верхнего уровня
         (архив сессии, состояние плана и т.п.), которые переживут /load."""
-        # Саммари рабочей памяти сохраняем списком по индексам сообщений (ключ id() не переживёт перезагрузку); если пусто — пишем [] для обратной совместимости.
         summaries: list[str] = (
             [] if not self._per_msg_summaries
             else [self._per_msg_summaries.get(id(m)) or "" for m in self._messages]
@@ -339,7 +321,6 @@ class ChatHistory:
             extras = raw.get("extras")
             self.last_loaded_extras = extras if isinstance(extras, dict) else {}
 
-        # Перепривязываем сохранённые per-message саммари к пересозданным объектам (ключ id() меняется).
         self._per_msg_summaries = {}
         for i, s in enumerate(summaries):
             if s and i < len(self._messages):
@@ -443,8 +424,6 @@ class ChatHistory:
             return
 
         msgs = self._messages
-        # Сдвигаем границу назад, пока первое сохраняемое сообщение — ToolResult,
-        # а непосредственно перед ним — ассистент с вызовами инструментов.
         while (
             safe_end > Config.AFTER_SYSTEM_PROMPT
             and isinstance(msgs[safe_end], ToolResult)
@@ -457,14 +436,9 @@ class ChatHistory:
             content=f"{ENVIRONMENT_PREFIX}: {SUMMARY_MARKER}:\n{summary}\n{ENVIRONMENT_PREFIX_END}",
             is_summary=True,
         )
-        # Саммари живёт в истории и при следующих компакциях архивируется —
-        # ему нужен собственный стабильный seq.
         self._assign_seq(summary_msg)
 
         preserved = msgs[safe_end:]
         self._messages = [msgs[0], summary_msg] + preserved
-        # Компакция вставила summary в начало — весь префикс после неё и так пересобирается,
-        # поэтому честный бюджет на текущем вопросе бесплатен (и обязателен: до-компакционная
-        # цифра занижена). Шапки остальных сохранённых сообщений не трогаем — их байты целы.
         self._mark_dirty()
         self._resync_last_user_header()

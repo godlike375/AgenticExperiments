@@ -107,9 +107,7 @@ class LoopDetector:
         norm_args = self.normalize_args(arguments)
         failed_call_ids = set()
 
-        # Идем с конца истории сообщений
         for msg in reversed(messages):
-            # Дошли до сообщения пользователя — текущий ход начался здесь; всё до него не считаем.
             if isinstance(msg, UserMessage):
                 break
 
@@ -119,7 +117,6 @@ class LoopDetector:
                 continue
 
             if isinstance(msg, AssistantMessage):
-                # make_plan особый случай: повтор с теми же аргументами = зацикливание, с другими = ревизия плана (вызовы после него не повтор).
                 found_plan = False
                 for tc in msg.tool_calls:
                     if getattr(tc, "name", "") == _make_plan_tool.__name__:
@@ -130,14 +127,10 @@ class LoopDetector:
                     break
                 for tc in msg.tool_calls:
                     if tc.name == tool_name:
-                        # вызов, упавший с ошибкой/отклонением, не является дубликатом
                         if tc.id in failed_call_ids:
                             continue
                         if self.normalize_args(tc.arguments) == norm_args:
                             return True
-                # Проверяем только самый последний AssistantMessage: если между
-                # двумя одинаковыми вызовами был другой инструмент (прогресс),
-                # это не зацикливание.
                 break
         return False
 
@@ -153,14 +146,7 @@ class StreamAccumulator:
         self.usage = None
         self.reasoning_started = False
         self._prefill_pending = prefill
-        # Сколько ВЕДУЩИХ символов prefill пользователь уже видел в живом потоке:
-        # показываем только хвост prefill[prefill_shown:]. Для обычного вызова это 0
-        # (показываем prefill целиком). Для продолжения симуляции reasoning — длина
-        # уже показанного накопленного контента: перепечатывать мысли целиком нельзя,
-        # но новую приставку (NO COMMENT) пользователь должен увидеть.
         self._prefill_shown = max(0, prefill_shown or 0)
-        # Начало ответа, по которому ещё нельзя понять, повторил ли шлюз prefill.
-        # Сырой llama.cpp может вернуть prefill в первых дельтах, а LM Studio — нет.
         self._unresolved_head = ""
         self.on_stream_chunk = on_stream_chunk
         self.on_reasoning_start = on_reasoning_start
@@ -217,7 +203,6 @@ class StreamAccumulator:
         pending = self._prefill_pending or ""
         head, self._unresolved_head = self._unresolved_head, ""
         self._prefill_pending = None
-        # Незавершённый буфер уже учтён в self.content: здесь только показываем его.
         self._emit_text(self._prefill_tail(pending))
         self._emit_text(head)
 
@@ -250,8 +235,6 @@ class StreamAccumulator:
                 visible = self._resolve_prefill_echo(delta.content)
             else:
                 visible = delta.content
-            # Накопление всегда отражает сырой ответ шлюза: финальный prefill
-            # добавляется/сверяется отдельно и дубля в истории не даёт.
             added = delta.content
             self.content += added
             self._emit_text(visible)
@@ -351,15 +334,10 @@ class StreamSession:
         stopped = False
         _watch_done = threading.Event()
         try:
-            # Стоп уже запрошен до начала потребления — не начинаем блокирующий цикл.
             if stop_check and stop_check():
                 return "stopped", True
             if on_stream_start:
                 on_stream_start()
-            # Остановка пользователя: watchdog-поток закрывает стрим (shutdown на
-            # сокете будит блокирующий recv), чтобы разблокировать next(). Стартует
-            # ДО первого чанка — иначе долгий префилл/сетевая задержка первого next()
-            # не были бы прерываемы.
             if stop_check is not None:
                 def _watcher():
                     while not _watch_done.is_set():
@@ -376,8 +354,6 @@ class StreamSession:
             if isinstance(first, dict) and "error" in first:
                 return f"stream creation failed: {first['error']}", False
             self.acc.process(first)
-            # Проверка стоп-маркера сразу после первого чанк: если маркер уже появился
-            # (единственный чанк), обрезаем и выходим — иначе check только в цикле ниже.
             if stop_markers:
                 content, marker_hit = apply_stop_markers(self.acc.content, stop_markers)
                 if marker_hit:
@@ -409,12 +385,7 @@ class StreamSession:
             error = str(e)
         finally:
             _watch_done.set()
-            # Освобождаем соединение независимо от исхода (нормальный конец,
-            # stop/marker/расхождение, ошибка). close() идемпотентен и для уже
-            # закрытого watchdog'ом стрима, и для error-generator.
             LLMClient.close_stream(self._raw)
-        # Модель могла уйти в tool call без текстовых чанков — prefill всё равно
-        # часть сообщения, дописываем его в живой вывод.
         if not error:
             self.acc.flush_prefill()
         return error, stopped
@@ -487,8 +458,6 @@ class InProcessStream:
         }
         if tools:
             body["tools"] = tools
-        # min_p нет в сигнатуре OpenAI-клиента — уходит сырым полем JSON-тела
-        # (llama.cpp / LM Studio). None — не отправлять вообще.
         if min_p is not None:
             body["min_p"] = min_p
 

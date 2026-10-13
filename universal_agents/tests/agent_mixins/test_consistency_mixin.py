@@ -39,12 +39,8 @@ class TestThinkingConsistency(unittest.TestCase):
             result = agent.chat("compute")
 
         self.assertEqual(result, "Готово.")
-        # Все API-вызовы хода получили reasoning 'low' (разовый тоггл активен):
-        # ни один обработчик не увидел 'none' — регрессия на рассинхрон между API и NO COMMENT-веткой.
         self.assertTrue(seen, "должен быть хотя бы один API-вызов")
         self.assertTrue(all(e == "low" for e in seen), seen)
-        # Голый вызов исполнен сразу (reasoning 'low' для обработчика) — без
-        # NO COMMENT-перегенераций: в истории есть tool-результат.
         roles = [m.to_api_dict()["role"] for m in agent.history]
         self.assertIn("tool", roles)
         tr = [m for m in agent.history.get_all() if m.to_api_dict()["role"] == "tool"][-1]

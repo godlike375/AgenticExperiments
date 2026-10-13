@@ -127,7 +127,6 @@ class TestChatHistory(unittest.TestCase):
         h[5]._cached_header = "cached-u2"
         h.edit_message(5, "u2-исправлено", old_text="u2")
         self.assertIsNone(h[5]._cached_header)
-        # Соседние сообщения не тронуты.
         self.assertEqual(h[1]._cached_header, "cached-u1")
 
     def test_compress_old_messages(self):
@@ -136,10 +135,7 @@ class TestChatHistory(unittest.TestCase):
         h.compress_old_messages("long summary", preserve_last=2)
         self.assertEqual(h[0].to_api_dict()["role"], "system")
         self.assertTrue("summary" in h[1].content)
-        # preserve_last = 2 последних сообщения сохраняются
         self.assertEqual(h[-1].content, "a3")
-        # Компакция освободила место — бюджет текущего вопроса пересобираем (иначе цифра
-        # осталась бы заниженной).
         self.assertIsNone(h[-2]._cached_header)
 
     def test_save_load_roundtrip(self, tmpdir=None):

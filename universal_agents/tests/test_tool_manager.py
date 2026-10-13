@@ -80,11 +80,9 @@ class TestToolManagerLoadUnload(unittest.TestCase):
         self.assertIn(real_unload_tool.__name__, tm.tools_map)
         res = tm.unload("alpha")
         self.assertIn("will be unloaded", res)
-        # ещё не удалён — остаётся в префиксе ради KV-кэша
         self.assertIn("alpha", tm.tools_map)
         self.assertIn(real_unload_tool.__name__, tm.tools_map)
         self.assertTrue(tm.is_pending_unload("alpha"))
-        # реальная выгрузка только при изменении истории
         flushed = tm.flush_pending_unloads()
         self.assertEqual(flushed, ["alpha"])
         self.assertNotIn("alpha", tm.tools_map)
@@ -173,7 +171,6 @@ class TestToolManagerListLoaded(unittest.TestCase):
         self.assertEqual(tm.list_loaded(), "LOADED TOOLS:\n")
 
     def test_list_loaded_omits_desc_when_missing(self):
-        # alpha/beta из верхнего блока не имеют short_description
         tm = ToolManager(None, external_plugins={"alpha": alpha, "beta": beta})
         text = tm.list_loaded()
         self.assertIn("alpha", text)

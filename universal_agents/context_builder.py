@@ -42,11 +42,9 @@ def _check_prefix_hashes(agent: "AgentContext", pairs: list) -> None:
         if old is not None and old[2] != h:
             content = (api_dict.get("content") or "")
             if not isinstance(content, str):
-                # Мультимодальный content (список частей с картинками): не тащим base64 в лог.
                 content = f"<{type(content).__name__}: {len(content)} parts>"
             changed.append((idx, api_dict.get("role"), content))
 
-    # Аргументы запроса, влияющие на реальный префикс KV-кэша.
     tools = getattr(agent, "tools", None)
     tools_hash = _hash_api_message(tools) if tools is not None else ""
     model = Config.MODEL_NAME
@@ -110,8 +108,6 @@ def prepare_messages_for_api(agent: AgentContext, normalize: bool = True,
         agent.history.normalize()
     api_pairs: list = []  # (объект сообщения, api-словарь)
 
-    # Токен-бюджет вешает только «настоящий» текущий вопрос: служебные summary/наг guard'а
-    # исключены (get_last_user_message).
     last_user_msg = agent.history.get_last_user_message()
 
     for i, msg in enumerate(agent.history):
@@ -126,8 +122,6 @@ def prepare_messages_for_api(agent: AgentContext, normalize: bool = True,
                     )
                 header += _format_closing_header()
                 msg._cached_header = header
-            # Шапка (KV-заголовок) идёт внутрь ТЕКСТОВОЙ части; картинки — отдельными
-            # частями после неё. Без картинок content остаётся строкой как раньше.
             api_pairs.append((msg, {
                 "role": "user",
                 "content": multimodal_content(msg._cached_header + msg.content, msg.images),

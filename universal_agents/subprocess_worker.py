@@ -52,8 +52,6 @@ def _main() -> None:
                         "value": f"tool '{req['name']}' not available in group '{opts.group}'",
                         "session": session}
             else:
-                # invoke_tool возвращает (status, payload) — payload может быть
-                # как простым значением, так и tuple (preview, ask) для wrapped.
                 status, payload = invoke_tool(func, req.get("args", {}), req.get("dry_run", False))
                 resp = {"status": status, "value": payload, "session": session}
         except Exception as e:

@@ -37,14 +37,11 @@ class UnifiedDockerAgent:
         if not os.path.isdir(repo_path):
             return err(f": repo not found: {repo_path}")
 
-        # Если контейнер уже запущен, просто возвращаем статус
         if cls._is_container_running():
             return f"Container {cls.CONTAINER_NAME} is already running at {repo_path}."
 
-        # Если контейнер существует, но остановлен — удалим его, чтобы пересоздать с новым путем
         subprocess.run(["docker", "rm", "-f", cls.CONTAINER_NAME], capture_output=True)
 
-        # Поиск .git
         git_dir = None
         current_path = repo_path
         while True:

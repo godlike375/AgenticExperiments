@@ -43,7 +43,6 @@ def _resolve_bash_backend() -> str:
         return "wsl"
     if backend == "system":
         return "system"
-    # auto: при наличии Git Bash предпочитаем его, иначе WSL
     if _git_bash_candidates():
         return "gitbash"
     if shutil.which("bash"):
@@ -61,7 +60,6 @@ def _build_bash_command(command: str) -> list[str]:
         bash = _git_bash_candidates()[0] if _git_bash_candidates() else None
         if not bash:
             raise RuntimeError("Git Bash not found. Install Git or set Config.GIT_BASH_PATH")
-        # Git Bash: -c запускает команду; --login не нужен
         return [bash, "-c", command]
 
     if backend == "wsl":
@@ -72,7 +70,6 @@ def _build_bash_command(command: str) -> list[str]:
             return [wsl, "bash", "-c", command]
         return [wsl, "-c", command]
 
-    # system: просто bash -c
     bash = shutil.which("bash")
     if not bash:
         raise RuntimeError("bash executable not found on this host")
@@ -93,15 +90,13 @@ def _build_bash_command(command: str) -> list[str]:
 def run_powershell(command: str, timeout: int = 60) -> str:
     pwsh = shutil.which("pwsh")
     if pwsh:
-        # PowerShell 7+ в pipe отдаёт UTF-8 — команду не трогаем.
         output = run_capture([pwsh, "-NoProfile", "-NonInteractive", "-Command", command], timeout)
     else:
         legacy = shutil.which("powershell")
         if not legacy:
             return err(" PowerShell executable not found")
-        # PowerShell 5.1 в pipe отдаёт OEM-кодировку системы (на ru-RU — cp866), а не UTF-8.
-        # Не подмешиваем префикс к команде (это меняет её семантику), а просим run_capture
-        # декодировать сырые байты с фолбэком на OEM ("oem" резолвится в текущую OEM-CP).
+        # PowerShell 5.1 в pipe отдаёт OEM-кодировку (на ru-RU — cp866), не UTF-8.
+        # Декодируем сырые байты сами с фолбэком на OEM.
         output = run_capture(
             [legacy, "-NoProfile", "-NonInteractive", "-Command", command],
             timeout,

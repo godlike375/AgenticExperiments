@@ -198,7 +198,6 @@ class TestOrderValidation(unittest.TestCase):
         h.add(ToolResult.success("c", PLAN_TOOL, "Plan set"))
         h.add(_assistant_done("A1"))
         h.add(ToolResult.success("c", DONE_TOOL, "ok"))
-        # Новый план переиспользует те же id, но порядок: A3,A1,A2
         planB = [{"id": "A3"}, {"id": "A1"}, {"id": "A2"}]
         pm_b = {e["id"]: {"title": ""} for e in planB}
         h.add(AssistantMessage(content="", tool_calls=[_plan_call(planB)]))
@@ -208,7 +207,6 @@ class TestOrderValidation(unittest.TestCase):
         self.assertIsNone(validate_task_mark_call(h.get_all(), {"id": "A3"}, pm_b, set()))
         h.add(_assistant_done("A3"))
         h.add(_done_result("A3"))
-        # по новому плану следующая — A1, несмотря на done-маркер из старого плана
         h.add(_work("w2"))
         h.add(_work_result("w2"))
         self.assertIsNone(validate_task_mark_call(h.get_all(), {"id": "A1"}, pm_b, set()))
@@ -228,37 +226,30 @@ class TestOrderValidation(unittest.TestCase):
         self.assertIsNotNone(err)
 
     def test_rejects_done_without_real_work(self):
-        # Сразу после make_plan помечаем задачу выполненной без реальных инструментов
         h, pm = self._history(self.PLAN)
         err = validate_task_mark_call(h.get_all(), {"id": "A1"}, pm, set())
         self.assertIsNotNone(err)
         self.assertIn("NO-WORK-DONE", err)
 
     def test_rejected_done_does_not_mark_task_complete(self):
-        # Ошибочный (отклонённый) have_done не должен считаться выполненным:
-        # после него следующей задачей всё ещё остаётся A1, а не A2.
         h, pm = self._history(self.PLAN)
         h.add(_assistant_done("A1"))  # отклонённый вызов (без успешного ToolResult)
         h.add(ToolResult.error("x", DONE_TOOL, "NO-WORK-DONE"))
         err = validate_task_mark_call(h.get_all(), {"id": "A1"}, pm, set())
-        # всё ещё A1 (нет успешного done-маркера), а не OUT-OF-ORDER на A2
         self.assertIsNotNone(err)
         self.assertIn("NO-WORK-DONE", err)
         self.assertNotIn("OUT-OF-ORDER", err)
 
     def test_accepts_done_after_real_work(self):
         h, pm = self._history(self.PLAN)
-        # реальная работа: вызов read между планом и have_done
         h.add(AssistantMessage(content="", tool_calls=[ToolCall("r", _read_tool.__name__, '{"path":"a"}')]))
         h.add(ToolResult.success("r", _read_tool.__name__, "file contents"))
         self.assertIsNone(validate_task_mark_call(h.get_all(), {"id": "A1"}, pm, set()))
         h.add(_assistant_done("A1"))
         h.add(_done_result("A1"))
-        # следующая задача без работы — снова отклоняется
         err = validate_task_mark_call(h.get_all(), {"id": "A2"}, pm, set())
         self.assertIsNotNone(err)
         self.assertIn("NO-WORK-DONE", err)
-        # добавляем работу для A2
         h.add(AssistantMessage(content="", tool_calls=[ToolCall("r", _read_tool.__name__, '{"path":"b"}')]))
         h.add(ToolResult.success("r", _read_tool.__name__, "more"))
         self.assertIsNone(validate_task_mark_call(h.get_all(), {"id": "A2"}, pm, set()))
@@ -278,7 +269,6 @@ class TestCompaction(unittest.TestCase):
         self.assertLess(after, before)
         summary_msgs = [m for m in agent.history if isinstance(m, UserMessage) and ENVIRONMENT_PREFIX in m.content]
         self.assertTrue(summary_msgs)
-        # маркеры make_plan и have_done сохраняются (не компактизируются)
         remaining = [m for m in agent.history if isinstance(m, AssistantMessage) and m.has_tool_calls()]
         self.assertTrue(
             any(any(tc.name == PLAN_TOOL for tc in m.tool_calls) for m in remaining)
@@ -286,7 +276,6 @@ class TestCompaction(unittest.TestCase):
         done_calls = [
             tc.name for m in remaining for tc in m.tool_calls if tc.name == DONE_TOOL
         ]
-        # A1 и A2 размечены и их have_done-маркеры остаются в истории
         self.assertEqual(len(done_calls), 2)
 
     def test_compaction_trims_bloated_have_done_summary(self):

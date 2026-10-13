@@ -24,7 +24,6 @@ from universal_agents.config import Config
 from universal_agents.constants import ENVIRONMENT_PREFIX, ENVIRONMENT_PREFIX_END
 from universal_agents.exceptions import GenerationInterrupted
 
-# --- Windows Job Object API (через ctypes) ---
 _IS_WINDOWS = os.name == "nt"
 
 if _IS_WINDOWS:
@@ -139,22 +138,16 @@ def _force_kill_proc(proc, job_handle) -> None:
             pass
 
     if _IS_WINDOWS:
-        # Закрываем Job первым — это гарантированно убьёт все назначенные процессы
         _safe_close_job(job_handle)
-        # На случай, если Job не сработал или есть процессы вне Job — добиваем дерево taskkill'ом
         try:
             _kill_process_tree(proc.pid)
         except Exception:
             pass
-        # Финальная страховка: прибить сам процесс напрямую
         try:
             proc.kill()
         except Exception:
             pass
 
-# Текущий "прерыватель" (обычно stop_event агента), устанавливается на время
-# выполнения инструмента и сбрасывается после. Гонок нет: инструменты агента
-# исполняются одним рабочим потоком.
 _interrupt_event = None
 _interrupt_lock = threading.Lock()
 
@@ -196,26 +189,20 @@ def truncate_middle(
     total_chars = len(text)
     total_lines = len(lines)
 
-    # Ничего обрезать не нужно
     if total_chars <= max_chars and total_lines <= max_lines:
         return text
 
-    # --- Определяем, что является «лимитирующим» фактором ---
-    # Используем тот лимит, который нарушается сильнее.
     chars_ratio = total_chars / max_chars if max_chars else 0
     lines_ratio = total_lines / max_lines if max_lines else 0
 
     if chars_ratio >= lines_ratio:
-        # Лимит по символам
         head_budget = int(max_chars * 0.4)
         tail_budget = int(max_chars * 0.4)
     else:
-        # Лимит по строкам — переводим в «виртуальные» символы
         avg_line_len = total_chars / max(total_lines, 1)
         head_budget = int(max_lines * 0.4 * avg_line_len)
         tail_budget = int(max_lines * 0.4 * avg_line_len)
 
-    # --- Собираем голову ---
     head_lines: list[str] = []
     head_chars = 0
     for line in lines:
@@ -225,7 +212,6 @@ def truncate_middle(
         head_lines.append(line)
         head_chars += cost
 
-    # --- Собираем хвост ---
     tail_lines: list[str] = []
     tail_chars = 0
     for line in reversed(lines):
@@ -236,11 +222,9 @@ def truncate_middle(
         tail_chars += cost
     tail_lines.reverse()
 
-    # Не допускаем, чтобы голова и хвост накладывались
     head_end_idx = len(head_lines)
     tail_start_idx = len(lines) - len(tail_lines)
     if head_end_idx > tail_start_idx:
-        # Перераспределяем поровну
         mid = len(lines) // 2
         head_lines = lines[: mid // 2]
         tail_lines = lines[-(mid // 2):]
@@ -304,13 +288,9 @@ def run_capture(
     stdin_stream = subprocess.PIPE if stdin is not None else subprocess.DEVNULL
     raw_mode = fallback_encoding is not None
 
-    # На Windows: создаём Job Object для гарантированного убийства дерева процессов.
-    # При прерывании/таймауте закрытие хэндла Job убьёт все назначенные процессы,
-    # включая дочерние (Gradle → Java), и reader-потоки получат EOF на pipe'ах.
     job_handle, job_assign = _create_kill_job()
 
     if raw_mode:
-        # Сырые байты: декодируем сами (см. _decode_bytes — UTF-8, при провале fallback).
         proc = subprocess.Popen(
             cmd,
             stdin=stdin_stream,
@@ -331,7 +311,6 @@ def run_capture(
             cwd=cwd,
         )
 
-    # Назначаем процесс в Job Object (все дочерние автоматически попадают тоже)
     if job_assign is not None:
         try:
             job_assign(proc._handle)
