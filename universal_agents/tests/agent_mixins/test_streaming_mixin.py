@@ -51,7 +51,7 @@ class TestStreamInterrupt(unittest.TestCase):
             # (закрывающий стрим) и основной цикл зовут stop_check на разных фазах.
             return "hello world" in "".join(seen)
 
-        with mock.patch("universal_agents.agent.LLMClient.stream", side_effect=stream), \
+        with mock.patch("universal_agents.agent.LLMClient.open_stream", side_effect=stream), \
              mock.patch("universal_agents.llm_client.LLMClient.close_stream"):
             msg, err, usage, _stopped = agent._call_with_streaming([], stop_check=stop_check)
 
@@ -72,7 +72,7 @@ class TestStreamInterrupt(unittest.TestCase):
             raise RuntimeError("connection dropped")
 
         with self.assertRaises(GenerationInterrupted):
-            with mock.patch("universal_agents.agent.LLMClient.stream", side_effect=stream), \
+            with mock.patch("universal_agents.agent.LLMClient.open_stream", side_effect=stream), \
                  mock.patch("universal_agents.llm_client.LLMClient.close_stream"):
                 agent._call_with_streaming([], stop_check=lambda: True)
 
@@ -88,7 +88,7 @@ class TestStreamInterrupt(unittest.TestCase):
             yield stream_chunk(stream_delta(content="k"))
             raise GenerationInterrupted()
 
-        with mock.patch("universal_agents.agent.LLMClient.stream", side_effect=stream):
+        with mock.patch("universal_agents.agent.LLMClient.open_stream", side_effect=stream):
             result = agent.chat("hello", max_iter=3)
 
         self.assertEqual(result, "")
@@ -111,7 +111,7 @@ class TestStreamDivergence(unittest.TestCase):
             yield stream_chunk(stream_delta(content="teXt!"))
 
         followup = SimpleNamespace(content=" calm continuation", reasoning_content="")
-        with mock.patch("universal_agents.agent.LLMClient.stream", side_effect=stream) as s_stream, \
+        with mock.patch("universal_agents.agent.LLMClient.open_stream", side_effect=stream) as s_stream, \
              mock.patch("universal_agents.agent.LLMClient.call") as s_call:
             s_call.return_value = (followup, None, None)
             msg, err, usage, _stopped = agent._call_with_streaming(
@@ -136,7 +136,7 @@ class TestStreamDivergence(unittest.TestCase):
         def stream(*args, **kwargs):
             yield stream_chunk(stream_delta(content="completely different text"))
 
-        with mock.patch("universal_agents.agent.LLMClient.stream", side_effect=stream) as s_stream, \
+        with mock.patch("universal_agents.agent.LLMClient.open_stream", side_effect=stream) as s_stream, \
              mock.patch("universal_agents.agent.LLMClient.call") as s_call:
             msg, err, usage, _stopped = agent._call_with_streaming(
                 [], watch_prefix="previous answer text",
@@ -154,7 +154,7 @@ class TestStreamDivergence(unittest.TestCase):
         def stream(*args, **kwargs):
             yield stream_chunk(stream_delta(content="The expected"))
 
-        with mock.patch("universal_agents.agent.LLMClient.stream", side_effect=stream), \
+        with mock.patch("universal_agents.agent.LLMClient.open_stream", side_effect=stream), \
              mock.patch("universal_agents.agent.LLMClient.call") as called:
             msg, err, usage, _stopped = agent._call_with_streaming(
                 [], watch_prefix="The expected answer", watch_continue_temp=0.1,
@@ -198,7 +198,7 @@ class TestAgentStreamingTurns(unittest.TestCase):
             yield stream_chunk(usage=SimpleNamespace(prompt_tokens=10, completion_tokens=5, total_tokens=15))
 
         with mock.patch(
-            "universal_agents.agent.LLMClient.stream",
+            "universal_agents.agent.LLMClient.open_stream",
             side_effect=[stream1(), stream2()],
         ):
             result = agent.chat("compute", max_iter=5)
@@ -221,7 +221,7 @@ class TestAgentStreamingTurns(unittest.TestCase):
         def stream(*args, **kwargs):
             yield stream_chunk(stream_delta(content="hello back"))
 
-        with mock.patch("universal_agents.agent.LLMClient.stream", return_value=stream()):
+        with mock.patch("universal_agents.agent.LLMClient.open_stream", return_value=stream()):
             result = agent.chat("hello", prefill="<start>")
 
         self.assertTrue(result.startswith("<start>"), f"result should start with prefill: {result!r}")
@@ -244,7 +244,7 @@ class TestAgentStreamingTurns(unittest.TestCase):
             yield stream_chunk(stream_delta(reasoning_content="think..."))
             yield stream_chunk(stream_delta(content="hello back"))
 
-        with mock.patch("universal_agents.agent.LLMClient.stream", return_value=stream()):
+        with mock.patch("universal_agents.agent.LLMClient.open_stream", return_value=stream()):
             result = agent.chat("hello", prefill="<start>")
 
         self.assertTrue(result.startswith("<start>"))
@@ -261,7 +261,7 @@ class TestAgentStreamingTurns(unittest.TestCase):
             yield stream_chunk(stream_delta(content=""))
             yield stream_chunk(usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1, total_tokens=2))
 
-        with mock.patch("universal_agents.agent.LLMClient.stream", return_value=stream()):
+        with mock.patch("universal_agents.agent.LLMClient.open_stream", return_value=stream()):
             result = agent.chat("hello", prefill="X")
 
         self.assertEqual(result, "X")

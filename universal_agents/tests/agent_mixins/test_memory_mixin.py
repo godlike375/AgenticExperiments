@@ -15,6 +15,8 @@ from universal_agents.models import (
     UserMessage,
 )
 from universal_agents.archive import HistoryArchive
+from universal_agents.tools.fs import read as _read_tool
+from universal_agents.tools.fs import search as _search_tool
 
 
 SUMMARY_TEXT = (
@@ -73,7 +75,7 @@ def _seed_dialog(agent: FakeAgent):
     h.add(UserMessage("TASK: write the report about dolphins"))
     a1 = AssistantMessage(content="long reasoning " * 80)
     h.add(a1)
-    h.add(ToolResult.success("t1", "search", "found 3 sources"))
+    h.add(ToolResult.success("t1", _search_tool.__name__, "found 3 sources"))
     h.add(UserMessage("continue please"))
 
 
@@ -238,7 +240,7 @@ class TestPersistenceRoundTrip(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             path = os.path.join(td, "h.json")
             agent.history.save(
-                path, loaded_tools=["read"], file_states={},
+                path, loaded_tools=[_read_tool.__name__], file_states={},
                 extras={"archive": agent.archive.to_list(), "plan_state": plan_state_to_dict(agent)},
             )
             fresh = ChatHistory("sys")
@@ -293,7 +295,7 @@ class TestSummaryHelpers(unittest.TestCase):
         h = ChatHistory("sys")
         h.add(UserMessage("task: create readme"))
         h.add(AssistantMessage(content="a1"))
-        h.add(ToolResult.success("t1", "read", "some file content"))
+        h.add(ToolResult.success("t1", _read_tool.__name__, "some file content"))
         h.add(AssistantMessage(content="a2"))
         h.add(UserMessage("please summarize"))
         msgs = h.get_all()

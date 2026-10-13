@@ -12,17 +12,21 @@ from universal_agents.tool_parsing import (
     args_are_valid,
     normalize_args,
 )
+from universal_agents.tools.fs import line_range_edit as _line_range_edit_tool
+from universal_agents.tools.fs import read as _read_tool
+from universal_agents.tools.fs import search as _search_tool
+from universal_agents.tools.host_shell import run_powershell as _run_powershell_tool
 
 
 class TestNameArgs(unittest.TestCase):
     def test_tc_name_openai_format(self):
-        tc = SimpleNamespace(function=SimpleNamespace(name="read", arguments="{}"))
-        self.assertEqual(tc_name(tc), "read")
+        tc = SimpleNamespace(function=SimpleNamespace(name=_read_tool.__name__, arguments="{}"))
+        self.assertEqual(tc_name(tc), _read_tool.__name__)
         self.assertEqual(tc_args(tc), "{}")
 
     def test_tc_name_responses_format(self):
-        tc = SimpleNamespace(name="search", arguments='{"q": "x"}')
-        self.assertEqual(tc_name(tc), "search")
+        tc = SimpleNamespace(name=_search_tool.__name__, arguments='{"q": "x"}')
+        self.assertEqual(tc_name(tc), _search_tool.__name__)
         self.assertEqual(tc_args(tc), '{"q": "x"}')
 
     def test_tc_name_missing_returns_empty(self):
@@ -43,7 +47,7 @@ class TestIsErrorContent(unittest.TestCase):
 
 class TestDetectBrokenCall(unittest.TestCase):
     def test_strong_tag(self):
-        self.assertTrue(detect_broken_call("Please call <tool_call>read</tool_call>", {"read"}))
+        self.assertTrue(detect_broken_call("Please call <tool_call>read</tool_call>", {_read_tool.__name__}))
         self.assertTrue(detect_broken_call("<tool>read</tool>", set()))
 
     def test_requires_xml_tag(self):
@@ -51,14 +55,14 @@ class TestDetectBrokenCall(unittest.TestCase):
         self.assertFalse(detect_broken_call("", set()))
 
     def test_xml_tag_with_tool_sign(self):
-        self.assertTrue(detect_broken_call("<custom_tag> read({}) </custom_tag>", {"read"}))
-        self.assertFalse(detect_broken_call("<custom_tag> nothing here </custom_tag>", {"read"}))
+        self.assertTrue(detect_broken_call("<custom_tag> read({}) </custom_tag>", {_read_tool.__name__}))
+        self.assertFalse(detect_broken_call("<custom_tag> nothing here </custom_tag>", {_read_tool.__name__}))
 
 
 class TestDetectBrokenCallWithoutGate(unittest.TestCase):
     """require_tag=False: гейт снят, сканируется свободный ответ (тело симуляции reasoning)."""
 
-    NAMES = {"read", "write", "run_powershell"}
+    NAMES = {_read_tool.__name__, _line_range_edit_tool.__name__, _run_powershell_tool.__name__}
 
     def test_prose_mention_is_not_broken_call(self):
         # Регрессия: гейт выполнялся по контенту вместе с тегом секции, и любая проза

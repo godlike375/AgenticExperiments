@@ -1,15 +1,11 @@
 """Тесты контроллеров: XML-парсер, advance(), интеграция с agent.chat()."""
 
 import unittest
-from types import SimpleNamespace
 from unittest import mock
 
 from universal_agents.agent import LLMAgent
 from universal_agents.controllers import (
-    ControllerVerdict,
-    PhaseController,
     XMLStructureController,
-    XNode,
 )
 from universal_agents.generation import StructuredOutputConfig
 from universal_agents.models import AssistantMessage

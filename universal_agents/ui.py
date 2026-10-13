@@ -6,7 +6,7 @@ import threading
 import time
 import collections
 from typing import Optional
-from universal_agents.models import Message, SystemMessage, UserMessage, AssistantMessage, ToolResult
+from universal_agents.models import Message, SystemMessage, UserMessage, AssistantMessage
 from universal_agents.rendering import render_message
 from universal_agents.agent import LLMAgent
 from universal_agents.agent_mixins.response_mixin import sim_schema_text
@@ -528,7 +528,8 @@ class CLI:
         'q' на новой строке + Enter — принудительная остановка. Любой другой текст
         + Enter во время работы LLM останавливает текущую генерацию, вставляет
         сообщение пользователя с системной шапкой в историю и сразу запускает новую
-        генерацию (сценарии А/Б/В)."""
+        генерацию (сценарии А/Б/В). Возврат отсюда НЕ закрывает CLI — управление
+        просто возвращается в цикл run() для следующего ввода."""
         self._monitor_active = True
         try:
             interrupt_next = False
@@ -578,7 +579,17 @@ class CLI:
                                 break
                         time.sleep(0.05)
                 finally:
-                    gen.join()
+                    # Транспортный InProcessStream по stop_check закрывает соединение
+                    # через shutdown на сокете, поэтому после остановки поток завершается
+                    # быстро. Отсоединения нет: джойним поток без ограничения, чтобы не
+                    # оставлять фонового зомби. Зависший в неинтерраптируемом инструменте
+                    # поток придётся переждать (выход из CLI — Ctrl+C).
+                    gen.join(timeout=5)
+                    if gen.is_alive():
+                        ConsoleUI.system_msg("[hang] generation thread did not stop in 5s; "
+                                             "снимаю стек потоков")
+                        import faulthandler
+                        faulthandler.dump_traceback(file=sys.stderr)
                     self._monitor_active = False
                 if redirect is None:
                     redirect = self.agent.take_pending_interrupt()

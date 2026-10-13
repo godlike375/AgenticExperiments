@@ -18,6 +18,7 @@ from universal_agents.constants import (
 from universal_agents.file_states import _content_hash
 from universal_agents.tool import tool
 from universal_agents.tools import builtin as _builtin
+from universal_agents import tool_session
 
 if TYPE_CHECKING:
     from universal_agents.context import AgentContext
@@ -79,13 +80,18 @@ class FS:
 
 @tool(description="Gets or changes current working dir",
       short_description="get/set working dir",
+      group="workspace",
       path=("str", "Optional new working dir. Use '..' to go to the parent dir"))
 def cwd(path: str = None):
+    session = tool_session.get_session()
     if path:
         try:
             path = os.path.abspath(path)
             os.chdir(path)
-            return ok(f"Has set cwd to {path}")
+            # Рабочая папка — состояние группы workspace (docs/TOOL_ISOLATION_SPEC.md §5.3):
+            # воркер без собственной памяти, поэтому cwd хранит хост и передаёт с каждым вызовом.
+            session["cwd"] = os.getcwd()
+            return ok(f"Has set cwd to {os.getcwd()}")
         except Exception as e:
             raise RuntimeError(f"Error changing cwd: {e}")  # Было return, стало raise
     return os.getcwd()
@@ -115,7 +121,7 @@ def _apply_edit_result(
     report_text: Optional[str] = None,
     context_before: str = "",
     context_after: str = "",
-    dry_run: str = "",
+    dry_run: bool = False,
     nothing: str = "",
     replaced: Optional[int] = None,
     added: Optional[int] = None,
@@ -171,12 +177,13 @@ def _apply_edit_result(
     requires_confirmation=True,
     requires_model_confirmation=True,
     safe_in_trusted=True,
+    group="workspace",
     path=("str", "File path. Auto-created if missing"),
     start_line=("int", "1-based inclusive start line of the range to replace with 'new_text'. Default 1"),
     end_line=("int", "1-based inclusive end line of the range to replace with 'new_text'. If omitted: end of file when start_line omitted too, else a single line at start_line"),
     new_text=("str", "New content that replaces the range start_line..end_line. Supports \\n. Do NOT re-include lines that exist outside the range — they are NOT deleted and would duplicate; include only what the range itself should become. Be careful to not break existing indentation."),
 )
-def line_range_edit(path: str, new_text: str, start_line: int = None, end_line: int = None, dry_run: str = ""):
+def line_range_edit(path: str, new_text: str, start_line: int = None, end_line: int = None, dry_run: bool = False):
     """Правка файла по диапазону строк (1-based, инклюзивно). Выделена из прежнего edit_file:
     точный и предсказуемый способ править/создавать файлы, когда номера строк известны."""
     _ensure_file_exists(path)
@@ -227,12 +234,13 @@ def line_range_edit(path: str, new_text: str, start_line: int = None, end_line: 
     requires_confirmation=True,
     requires_model_confirmation=True,
     safe_in_trusted=True,
+    group="workspace",
     path=("str", "File path. Auto-created only in whole-file mode (old='')"),
     old=("str", "Exact text to replace (can include \\n for multiline blocks). If '' — replaces whole file content"),
     new_text=("str", "Replacement text for each occurrence of 'old'. Supports \\n. Keep indentation consistent"),
     mode=("str", "'one' — exactly 1 match required (error otherwise); 'all' — replace every occurrence. Default 'one'"),
 )
-def match_replace_edit(path: str, old: str, new_text: str, mode: str = "one", dry_run: str = ""):
+def match_replace_edit(path: str, old: str, new_text: str, mode: str = "one", dry_run: bool = False):
     """Правка файла по точному совпадению подстроки (одиночному или всем). Компаньон
     line_range_edit для правок «по образцу», когда номера строк неизвестны."""
     old_text = old or ""
@@ -372,6 +380,33 @@ def _read_text(path: str) -> tuple:
             return f.read(), None
     except UnicodeDecodeError:
         return None, err(": Cannot read binary files (failed UTF-8 decode)")
+
+
+@tool(description="internal low-level raw file read (workspace worker)",
+      short_description="raw file read",
+      group="workspace",
+      hidden=True,
+      path=("str", "File path"))
+def _read_file_raw(path: str) -> tuple:
+    """Низкоуровневое чтение файла для read (docs/TOOL_ISOLATION_SPEC.md §4): сам read —
+    внутренний (ведёт учёт и строит представление), а блокирующее чтение файла вынесено в
+    воркер workspace. Скрытый инструмент: модель его не видит, вызов только от хоста."""
+    return _read_text(path)
+
+
+def _raw_read(agent, path: str) -> tuple:
+    """Чтение файла для read: в изолированном режиме — в воркере workspace (можно убить),
+    иначе локально (тесты/прямые вызовы). Возвращает (content, error_msg)."""
+    manager = getattr(agent, "group_manager", None)
+    if manager is not None and getattr(manager, "isolated", False):
+        result = manager.call(
+            "workspace", _read_file_raw.__name__, {"path": path},
+            stop_check=getattr(agent, "_stop_check", None),
+        )
+        if result.status == "error":
+            return None, err(f" {result.value}")
+        return result.value
+    return _read_text(path)
 
 
 def _summarize_file(content: str, agent) -> str:
@@ -611,6 +646,8 @@ def _build_portion_content(
                   "from a large file, pass start_line/end_line (1-based, inclusive) — each call returns "
                   "a limited portion (~1000 chars); if truncated, continue with the suggested start_line.",
       short_description="read file / ls dir",
+      self_truncating=True,
+      group="workspace",
       path=("str", "Optional path to file/dir (default '.'). Use '..' to open parent dir"),
       start_line=("int", "Optional 1-based start line. Omit (with end_line) to get the one-time structural skeleton of a large file instead of raw content"),
       end_line=("int", "Optional 1-based inclusive end line (supports negative values like Python slices)"))
@@ -622,7 +659,7 @@ def read(agent: 'AgentContext', path: str = '.', start_line: int = None, end_lin
         if os.path.isfile(path):
             if start_line is not None or end_line is not None:
                 # Порционное чтение ДИАПАЗОНА с жёстким лимитом объёма (файл не выгружается в контекст за раз).
-                raw, read_err = _read_text(path)
+                raw, read_err = _raw_read(agent, path)
                 if read_err:
                     return read_err
                 lines = raw.splitlines()
@@ -636,7 +673,7 @@ def read(agent: 'AgentContext', path: str = '.', start_line: int = None, end_lin
                 actual_end = start + len(selected) - 1
                 return _build_portion_content(path, mtime, lines, total, start, actual_end, truncated)
             # Без диапазона
-            raw, read_err = _read_text(path)
+            raw, read_err = _raw_read(agent, path)
             if read_err:
                 return read_err
             lines = raw.splitlines()
@@ -722,6 +759,8 @@ def _is_regex(pattern: str) -> bool:
 @tool(
     description="Search for text or regex pattern across files. Use this INSTEAD of manually reading files to find something. Returns matches with context.",
     short_description="search in files",
+    self_truncating=True,
+    group="workspace",
     pattern=("str", "Text to find or regex pattern"),
     path=("str", "Directory or file to search in (default '.')"),
     include=("str", "File filter glob, e.g. '*.py', '*.ts'"),

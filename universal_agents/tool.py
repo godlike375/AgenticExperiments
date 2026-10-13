@@ -22,7 +22,8 @@ class ToolOutput:
 
 
 def tool(description="", short_description="", requires_confirmation=False, requires_model_confirmation=False,
-         path_safety=False, safe_in_trusted=False, **params):
+         path_safety=False, safe_in_trusted=False, self_truncating=False, group="internal", hidden=False,
+         **params):
     def decorator(func):
         func._is_tool = True
         func._tool_name = func.__name__
@@ -30,7 +31,14 @@ def tool(description="", short_description="", requires_confirmation=False, requ
         func._requires_model_confirmation = requires_model_confirmation
         func._path_safety = path_safety
         func._safe_in_trusted = safe_in_trusted
+        func._self_truncating = self_truncating
         func._short_description = short_description
+        # Группа — домен общего состояния (docs/TOOL_ISOLATION_SPEC.md): инструменты одной
+        # группы исполняются в одном воркер-процессе. Метка выводится хостом из метаданных,
+        # сам хост имён групп не знает. hidden=True — низкоуровневый инструмент: исполняется
+        # воркером (группа), но не показывается модели (нет в схемах и в load_tool).
+        func._tool_group = group
+        func._tool_hidden = hidden
 
         signature_params = list(inspect.signature(func).parameters)
         func._has_agent_param = bool(signature_params) and signature_params[0] == 'agent'

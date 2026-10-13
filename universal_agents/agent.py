@@ -14,7 +14,6 @@ from universal_agents.models import UserMessage, AssistantMessage, ToolResult
 from universal_agents.llm_client import LLMClient, TokenUsageTracker, LoopDetector, jaccard_similarity, text_hash
 from universal_agents.history import ChatHistory
 from universal_agents.generation import GenerationParams, StructuredOutputConfig, apply_stop_markers
-from universal_agents.controllers import PhaseController, ControllerVerdict
 from universal_agents.tool_manager import ToolManager
 from universal_agents.sub_agent import SubAgent
 from universal_agents.context_builder import prepare_messages_for_api, get_effective_prefill
@@ -40,6 +39,11 @@ MAX_CONSECUTIVE_ERRORS = 10
 
 # Стабильная категория ошибок без инструмента (пустой ответ и т.п.).
 _NO_TOOL_ERROR_SIGNATURE = "<no_tool_call>"
+
+# Вердикт детектора дублей «повтор при живой pending-операции»: текст модели — не дубль
+# качества, а невыполненный протокол подтверждения. Ответ не трогает лестница дублей:
+# его обрабатывает guard в _run_turn_loop (стирание, лимит срабатываний, наг, §1.11).
+_CONFIRMATION_GUARD_VERDICT = "confirmation_guard"
 
 # Наг за повторённый ответ: вшивается в конец последнего сообщения при детекции повтора
 # ответа или reasoning-блока (тот же механизм устранения повтора из §1).
@@ -147,6 +151,11 @@ class TurnState:
         return False
 
     @property
+    def guard_retries_spent(self) -> int:
+        """Сколько попыток guard'а уже потрачено в этом ходу."""
+        return Config.ANSWER_GUARD_MAX_RETRIES - self.guard_retries_left
+
+    @property
     def max_errors_reached(self) -> bool:
         """Любая сигнатура набрала MAX_CONSECUTIVE_ERRORS за ход."""
         return any(count >= MAX_CONSECUTIVE_ERRORS for count in self.error_counts.values())
@@ -195,6 +204,7 @@ class LLMAgent(
         autosave_dir: str = None,
         autosave_keep: int = None,
         on_interrupt_check: Callable[[], bool] = None,
+        group_manager=None,
     ):
         self.history = ChatHistory(system_prompt)
         self.file_states = FileStateTracker(self.history)
@@ -230,6 +240,20 @@ class LLMAgent(
         self.tools_manager = ToolManager(tools_config, external_plugins)
         if denied_tools:
             self.tools_manager.deny(denied_tools)
+        # Изоляция инструментов (docs/TOOL_ISOLATION_SPEC.md): внешние инструменты уходят
+        # в воркеры групп; состояние групп хранит хост. В тестах isolated=False.
+        # Суб-агент переиспользует менеджер родителя (общие воркеры, сессии, прокси).
+        from universal_agents.group_worker import GroupManager
+        from universal_agents.project_root import get_project_root_override
+        if group_manager is not None:
+            self.group_manager = group_manager
+        else:
+            self.group_manager = GroupManager(
+                isolated=Config.TOOL_ISOLATION_ENABLED,
+                project_root=get_project_root_override(),
+                handler_resolver=lambda n: self._all_tools.get(n, {}).get("handler"),
+            )
+            self.group_manager.proxy_handler = self._plugin_proxy_call
         self._auto_trust_git_root()
         self.loop_detector = LoopDetector()
         self._temp_override: Optional[float] = None
@@ -352,6 +376,7 @@ class LLMAgent(
             on_log=on_log if on_log is not None else (lambda x: None),
             depth=depth,
             disable_per_msg_summarization=disable_per_msg_summarization,
+            group_manager=self.group_manager,
         )
 
     def _resolve_denied_tools(self, denied_tools) -> set[str]:
@@ -389,10 +414,11 @@ class LLMAgent(
 
     def _ensure_guard_nag(self) -> None:
         """Гарантирует наличие нага guard'а в истории. Один объект на цикл (байт-стабильный
-        KV-префикс, прав. §1.11): при повторных срабатываниях не удаляется и не пересоздаётся."""
+        KV-префикс, прав. §1.11): при повторных срабатываниях не удаляется и не пересоздаётся,
+        шапка не пересобирается — собственные байта сообщения не менялись (§1.2)."""
         nag = self._guard_nag_message
         if nag is not None and any(m is nag for m in self.history.get_all()):
-            return  # уже в истории — не трогаем (иначе remove_at сменит «последность»)
+            return  # уже в истории — не трогаем
         if nag is None:
             nag = UserMessage(
                 f"{ENVIRONMENT_PREFIX} {_GUARD_NAG_PREFIX} unless you answer to the system question using '{respond_to_system.__name__}' tool. "
@@ -401,9 +427,6 @@ class LLMAgent(
             )
             nag._is_guard_nag = True
             self._guard_nag_message = nag
-        else:
-            # Переиспользование после вычистки: заголовок устарел — пересобираем заново.
-            nag.reset_header_cache()
         self.history.add(nag)
         self.on_render(self.history.get_all()[-1])
 
@@ -499,6 +522,31 @@ class LLMAgent(
         """Точка вызова авто-сохранения из цикла чата."""
         self.autosave()
 
+    def close_tool_workers(self) -> None:
+        """Останавливает воркеры групп изоляции (при завершении работы агента)."""
+        try:
+            self.group_manager.close_all()
+        except Exception:
+            pass
+
+    def _plugin_proxy_call(self, method: str, args=(), kwargs=None):
+        """Ограниченный API агента, доступный изолированным плагинам через прокси
+        (docs/TOOL_ISOLATION_SPEC.md §9). Плагин — произвольный код, поэтому доступен только
+        явный allow-list методов, а не сам объект агента."""
+        from universal_agents.project_root import find_project_root
+
+        allowed = {
+            "on_system_msg": lambda self, text: self.on_system_msg(str(text)),
+            "load_tool": lambda self, name: self.load_tool(str(name)),
+            "unload_tool": lambda self, name: self.unload_tool(str(name)),
+            "history_len": lambda self: len(self.history.get_all()),
+            "project_root": lambda self: find_project_root(),
+        }
+        handler = allowed.get(method)
+        if handler is None:
+            raise ValueError(f"method '{method}' is not allowed via plugin proxy")
+        return handler(self, *args, **(kwargs or {}))
+
     # --------------------------------------------------------
     # Прерывание генерации (передача управления пользователю)
     # --------------------------------------------------------
@@ -563,10 +611,11 @@ class LLMAgent(
             reasoning_effort=reasoning_effort,
             stop_markers=stop_markers,
         )
-        # Обрезка и определение флага: LLMClient.call уже обрезал при реальном вызове,
-        # но при мокировании (тесты) вызов проходит мимо. Повторная обрезка безопасна —
-        # если маркер уже удалён, apply_stop_markers вернёт (контент, False).
-        stopped_at_marker = False
+        # Обрезка и определение флага: LLMClient.call уже обрезал при реальном вызове
+        # и вернул flag на message_obj.stopped_at_marker; при мокировании (тесты) вызов
+        # проходит мимо и флаг теряется. Повторная обрезка безопасна — если маркер уже
+        # удалён, apply_stop_markers вернёт (контент, False).
+        stopped_at_marker = bool(getattr(message_obj, "stopped_at_marker", False))
         if stop_markers and message_obj is not None and getattr(message_obj, "content", None):
             content, marker_hit = apply_stop_markers(message_obj.content, stop_markers)
             if marker_hit:
@@ -646,12 +695,6 @@ class LLMAgent(
         keep = Config.SERVICE_TURN_KEEP_IN_HISTORY if keep_in_history is None else keep_in_history
         max_iter = max_iter if max_iter is not None else Config.SERVICE_TURN_MAX_ITER
         start_len = len(self.history.get_all())
-        # Снапшот кэш-заголовка «последнего» user-сообщения ДО хода: откат через
-        # history.remove_at сбросил бы его (_resync_last_user_header), а на деле
-        # «последность» не менялась — история вернулась к байт-идентичному состоянию,
-        # и KV-префикс обязан остаться стабильным (§1.2).
-        prev_last_user = self.history.get_last_user_message()
-        prev_last_user_header = prev_last_user._cached_header if prev_last_user is not None else None
         # Отдельный служебный стрим-канал: сервисный контент не должен течь в основной поток.
         stream_swap = None
         if self.streaming_enabled and self.on_service_stream_chunk:
@@ -687,20 +730,11 @@ class LLMAgent(
             if not keep:
                 end = len(self.history.get_all())
                 if end > start_len:
+                    # Откат не трогает шапки уцелевших сообщений: их байта не менялись,
+                    # поэтому префикс остаётся байт-идентичным (§1.2).
                     self.history.remove_at(range(start_len, end))
                     self.history.normalize()
                     self._on_history_changed()
-                # Вернуть сохранённую шапку прежнего «последнего» user-сообщения:
-                # remove_at сбросил её как «сменившегося последнего», но реально
-                # последность не менялась — без восстановления следующий
-                # prepare_messages_for_api пересоберёт шапку с новым токен-бюджетом
-                # и сломает байт-идентичный KV-префикс ([PREFIX-HASH]).
-                if (
-                    prev_last_user is not None
-                    and prev_last_user_header is not None
-                    and self.history.get_last_user_message() is prev_last_user
-                ):
-                    prev_last_user._cached_header = prev_last_user_header
             self._gen_params = prev_params
             self._auto_summarize_suppressed = prev_suppressed
             self._in_service_turn = False
@@ -748,9 +782,23 @@ class LLMAgent(
         """Дефолтный детектор дубликатов (§1): повтор текста или reasoning-блока где угодно
         в истории (не только у предыдущего ответа — но то же устранение повтора), повторный
         вызов инструмента, повтор предыдущего текстового ответа; возвращает None или
-        ('tool_call', (name, args))/('answer', text)/('reasoning', text)."""
+        ('tool_call', (name, args))/('answer', text)/('reasoning', text). При живой
+        pending-операции подтверждения повтор текста решает не лестница дублей, а guard:
+        возвращается (_CONFIRMATION_GUARD_VERDICT, text) (текст без вызова ответа
+        подтверждения) или None (ответ уже содержит правильный вызов respond_to_system —
+        «пластинка»-шапка это выполнение протокола, а не зацикливание, §1.11)."""
         content = (message_obj.content or "").strip()
         reasoning = (getattr(message_obj, 'reasoning_content', '') or '').strip()
+        pending = self._pending_operation is not None
+
+        # Правильный вызов подтверждения с повторённой шапкой при висящей операции:
+        # текст проверяется детектором дублей ПЕРВЫМ (в т.ч. для сообщений с вызовами),
+        # и без этого ответ выбрасывался бы вместе с вызовом — подтверждение не наступило
+        # бы никогда. Выполнение протокола важнее лестницы дублей.
+        if pending and message_obj.tool_calls and any(
+            tc_name(tc) == respond_to_system.__name__ for tc in message_obj.tool_calls
+        ):
+            return None
 
         # Точный повтор текста или reasoning где угодно в истории, включая сообщения с
         # вызовами инструментов: модель, вызывающая разные инструменты, обязана менять и
@@ -763,12 +811,16 @@ class LLMAgent(
                 and (min_chars <= 0 or len(content) >= min_chars)
                 and text_hash(content) in prior_text
             ):
+                if pending and not message_obj.tool_calls:
+                    return _CONFIRMATION_GUARD_VERDICT, content
                 return 'answer', content
             if (
                 reasoning
                 and (min_chars <= 0 or len(reasoning) >= min_chars)
                 and text_hash(reasoning) in prior_reasoning
             ):
+                if pending and not message_obj.tool_calls:
+                    return _CONFIRMATION_GUARD_VERDICT, reasoning
                 return 'reasoning', reasoning
 
         if message_obj.tool_calls:
@@ -794,6 +846,8 @@ class LLMAgent(
             and jaccard_similarity(answer_text, prev_answer)
             >= Config.DUPLICATE_SIMILARITY_THRESHOLD
         ):
+            if pending:
+                return _CONFIRMATION_GUARD_VERDICT, prev_answer
             return 'answer', prev_answer
         return None
 
@@ -863,6 +917,15 @@ class LLMAgent(
                 break
 
             duplicate = is_duplicate_fn(message_obj)
+            if duplicate is not None and duplicate[0] == _CONFIRMATION_GUARD_VERDICT:
+                # Повтор при висящей pending-операции — это не дубль качества текста,
+                # а невыполненный протокол подтверждения (§1.11). Лестница дублей молча
+                # сожгла бы все попытки и сдала ход, а модель так и не увидела бы, чего
+                # от неё ждут. Вердикт отдаётся guard'у в _run_turn_loop (наг + лестница
+                # ANSWER_GUARD_MAX_RETRIES). Тот же приоритет у ответа, который протокол
+                # уже выполняет: «пластинка»-шапка не должна съесть вызов respond_to_system
+                # (для него _detect_duplicate вердиктов не выдаёт вовсе).
+                duplicate = None
             if duplicate is not None:
                 dup_count += 1
                 kind, payload = duplicate
@@ -1035,336 +1098,274 @@ class LLMAgent(
                 current_prefill = controller_prefill
         # Разовый thinking-тоггл (_thinking_once) фиксируется ОДИН раз за ход: и API
         # (call_with_retries), и обработчик ответа (_process_llm_response) должны видеть
-        # одинаковый reasoning_effort. Раньше геттер _reasoning_effort сбрасывал
-        # _thinking_once при первом чтении (сайд-эффект в property), из-за чего второе
-        # чтение — в NO COMMENT-ветке обработчика — расходилось с отправленным в API.
+        # одинаковый reasoning_effort.
         turn_reasoning = self._reasoning_effort
         self._thinking_once = False
-        # Состояние хода: prefill для следующего шага ('Assistant:' после [NO COMMENT]
-        # или стартовый current_prefill) + счётчики ретраев/ошибок + структурированный
-        # вывод (стоп-маркеры и цепочка фаз).
         state = TurnState(prefill=current_prefill, structured_output=structured_output)
 
         # ── Симуляция reasoning (Config.SIMULATED_REASONING_*) ──
-        # При выключенном thinking ответ начинается с секции рассуждения
-        # <short_think>…</short_think>, а всё, что после её закрытия, — свободный
-        # ответ без тегов. Форс ОДНИМ вызовом: prefill открывает секцию, стоп-маркеров
-        # нет (модель закрывает секцию и дописывает ответ сама — резать написанное нечем),
-        # незакрытую секцию закрываем мы. Второй вызов бывает только когда ответ пуст и
-        # вызова инструмента нет: тогда к концу секции подставляется _NO_COMMENT_PREFILL
-        # (SimReasoningGroup, бюджет ограничен). Новая группа — после инструмента/ошибки.
-        # Отключается при включённом thinking (нативный reasoning), в служебных ходах
-        # (свои промпты/контроллеры), при чужом structured_output, пользовательском
-        # prefill и у субагентов (их ответы возвращаются родителю как есть).
         sim_group = SimReasoningGroup(Config.SIMULATED_REASONING_REPAIRS) if (
-            Config.SIMULATED_REASONING_ENABLED
-            and turn_reasoning == "none"
-            and not service_mode
-            and structured_output is None
-            and not current_prefill
-            and not getattr(self, "_is_subagent", False)
+                Config.SIMULATED_REASONING_ENABLED
+                and turn_reasoning == "none"
+                and not service_mode
+                and structured_output is None
+                and not current_prefill
+                and not getattr(self, "_is_subagent", False)
         ) else None
-        sim_open = False                          # True, пока ответ не собран
-        sim_stream_started = False                # блок вывода уже открыт (prefill показан)
+        sim_open = False
+        sim_stream_started = False
 
         def _close_sim_stream():
-            """Закрыть блок живого вывода, если его открыла секция рассуждения.
-
-            Блок держится на все вызова одного сообщения (в т.ч. продолжение пустого
-            ответа), поэтому on_stream_end вызывает тот, кто знает, что ответ собран —
-            агент, а не транспорт отдельного вызова.
-            """
+            """Закрыть блок живого вывода, если его открыла секция рассуждения."""
             nonlocal sim_stream_started
             if sim_stream_started and self.on_stream_end:
                 self.on_stream_end()
             sim_stream_started = False
 
-        for _ in range(max_iter):
-            # Пользователь ввёл новый текст, пока выполнялся инструмент (сценарий В):
-            # завершаем ход на чистой границе истории, чтобы вставка сообщения и новая
-            # генерация произошли сразу после результата инструмента.
-            if self.pending_interrupt is not None:
-                if not service_mode:
-                    self._autosave()
-                return ""
-
-            if self.stop_event.is_set():
-                self.on_system_msg("⏹ Generation stopped by user — control returned to you.")
-                self.clear_stop()
-                if not service_mode:
-                    self._autosave()
-                return ""
-            step_prefill = state.step_prefill()
-            think_params = None
-            if sim_group is not None:
-                if not sim_open:
-                    # Новое assistant-сообщение (после инструмента/ошибки): всё с нуля,
-                    # бюджет продолжений пустого ответа восстановлен.
-                    sim_group.reset(Config.SIMULATED_REASONING_REPAIRS)
-                    sim_open = True
-                    sim_stream_started = False
-                step_prefill = sim_group.prefill()
-                if sim_group.is_think_phase():
-                    # Фаза размышлений: свои параметры сэмплирования, стоп-маркер
-                    # закрывает секцию — дальше фаза ответа с обычными параметрами.
-                    think_params = sim_group.think_params(self._gen_params)
-            # Стоп-маркеры: для активного структурированного вывода — его маркеры;
-            # у однофазной симуляции рассуждения их нет (модель дописывает ответ сама).
-            if structured_output is not None:
-                effective_markers = structured_output.effective_markers(step_prefill)
-            elif sim_group is not None and sim_group.is_think_phase():
-                effective_markers = (f"</{sim_group.tag}>",)
-            else:
-                effective_markers = ()
-            all_messages = prepare_messages_for_api(
-                self, debug_hash_check=Config.DEBUG_PREFIX_HASH_CHECK
-            )
-
-            try:
-                message_obj, api_error_occurred, stopped_at_marker = self.call_with_retries(
-                    all_messages,
-                    step_prefill=step_prefill,
-                    reasoning_effort=turn_reasoning,
-                    stop_markers=effective_markers,
-                    # Prefill печатается как часть сообщения модели: у продолжения
-                    # пустого ответа показывается только ещё не выведенный хвост
-                    # (приставка NO COMMENT), накопленные мысли не дублируются.
-                    prefill_shown=sim_group.prefill_shown() if sim_group else 0,
-                    # Блок вывода держится на все вызовы сообщения: закрывает его агент.
-                    defer_stream_end=sim_group is not None,
-                    # Фаза размышлений идёт со своими параметрами сэмплирования.
-                    gen_params=think_params,
-                )
-            except GenerationInterrupted:
-                _close_sim_stream()
-                self.on_system_msg("⏹ Generation stopped by user — control returned to you.")
-                self.clear_stop()
-                if not service_mode:
-                    self._autosave()
-                return ""
-
-            if api_error_occurred or not message_obj:
-                _close_sim_stream()
-                self._recover('api_error' if api_error_occurred else 'duplicate_loop')
-                return ""
-
-            # ── Активный контроллер: анализируем контент фазы ДО _process_llm_response ──
-            # Ошибочный (не вовремя закрытый) тег стирается из контента, чтобы не попасть
-            # в историю как часть валидного ответа. Продолжение решается по вердикту ниже.
-            controller_verdict = None
-            if (structured_output is not None
-                    and structured_output.controller is not None
-                    and message_obj is not None):
-                controller_verdict = structured_output.controller.advance(message_obj.content or "")
-                if controller_verdict.corrected_content != (message_obj.content or ""):
-                    message_obj.content = controller_verdict.corrected_content
-
-            if (controller_verdict is not None
-                    and not controller_verdict.complete
-                    and not controller_verdict.corrected_content
-                    and controller_verdict.next_prefill is not None):
-                # Модель написала только неверный/не вовремя тег — всё стёрто до нуля.
-                # В историю добавить нечего; _process_llm_response на пустом контенте ушёл
-                # бы в tool-error путь. Просто повторяем ход с правильным prefill.
-                if state.structured_output_phase + 1 >= structured_output.max_phases:
-                    return structured_output.controller.document()
-                state.set_prefill(controller_verdict.next_prefill)
-                state.structured_output_phase += 1
-                continue
-
-            # ── Симуляция reasoning: вызов проверяется ДО _process_llm_response ──
-            # Текст/tool_calls уходят в группу (накопление + prefill следующего вызова),
-            # она решает: нужен ли ещё вызов (фаза ответа, пустой ответ) или сообщение
-            # готово. Нарушение формата в историю не попадает и инструменты не исполняются.
-            sim_broken_scan = None
-            if sim_group is not None and message_obj is not None:
-                sim_group.absorb(message_obj, step_prefill)
-                sim_stream_started = True
-                if sim_group.is_think_phase():
-                    # Фаза размышлений завершена: закрываем секцию, показываем хвост
-                    # в живой вывод и переходим к фазе ответа с обычными параметрами.
-                    # Если модель уже дописала ответ (или вызвала инструмент) в этом же
-                    # вызове — принимаем как есть, лишний вызов не нужен.
-                    sim_group.close_section()
-                    appended = sim_group.take_appended()
-                    if appended and self.on_stream_chunk:
-                        self.on_stream_chunk(appended)
-                    if sim_group.tool_calls or sim_group.answer_text().strip():
-                        sim_msg = self._sim_message(sim_group)
-                    else:
-                        sim_group.advance_to_answer()
-                        continue
-                else:
-                    sim_msg = self._sim_verify_phase(sim_group)
-                    if sim_msg is None:
-                        continue
-                # Сломанный вызов ищем только по СВОБОДНОМУ ответу (хвосту после
-                # </short_think>), а не по всему контенту: теги секции рассуждения
-                # открывали бы гейт «есть XML-тег» на каждом ответе, а проза вида
-                # «read() выполнен» — ложные срабатывания. Пустой ответ = чисто:
-                # '' вместо None, иначе скан падал бы на весь контент с тегами.
-                sim_broken_scan = sim_group.answer_text()
-                message_obj = sim_msg
-                # Структура собрана: группа фаз закрыта, инструменты можно исполнять,
-                # а следующая генерация (после инструмента) начнёт структуру заново.
-                sim_open = False
-                _close_sim_stream()
-
-            try:
-                result_text, tool_error_occurred, broken_call, rerun_prefill = self._process_llm_response(
-                    message_obj,
-                    no_comment_retry_left=state.no_comment_retries_left,
-                    reasoning_effort=turn_reasoning,
-                    skip_broken_detection=bool(
-                        structured_output is not None
-                        and (stopped_at_marker or structured_output.controller is not None)
-                    ),
-                    allow_tools=not service_mode,
-                    broken_scan_text=sim_broken_scan,
-                )
-            except GenerationInterrupted:
-                # Пользователь прервал выполнение инструмента: убираем висящий вызов
-                # ассистента без результата, чтобы история осталась валидной для API.
-                self.history.pop_pending_tool_calls()
-                self.history.normalize()
-                self._on_history_changed()
-                self.on_system_msg("⏹ Generation stopped by user.")
-                if not service_mode:
-                    self._autosave()
-                raise
-
-            if rerun_prefill:
-                # [NO COMMENT]: модель вызвала инструмент без текста. Перегенерируем
-                # следующий ход с prefill, не добавляя пустой ответ в историю (лимит —
-                # NO_COMMENT_RETRIES, задаётся в TurnState). Блок стоит ДО guard'а: иначе
-                # guard съел бы prefill. Когда попытки исчерпаны — вызов исполняется как есть.
-                # Декремент безопасен: rerun_prefill приходит только из NO COMMENT-веток
-                # (структурированный вывод выставляет prefill своей веткой выше).
-                state.no_comment_retries_left -= 1
-                state.set_prefill(rerun_prefill)
-                continue
-
-            if (self._pending_operation is not None
-                    and not service_mode
-                    and not message_obj.tool_calls
-                    and not tool_error_occurred):
-                # Текст вместо вызова respond_to_system — стираем; наг НЕ удаляется и НЕ пересоздаётся
-                # (тот же объект — байт-стабильный KV-префикс). Лимит срабатываний →
-                # сдача хода пользователю (защита от бесконечного цикла).
-                self._erase_last_assistant()
-                if not state.can_retry_answer_guard():
-                    self._recover('answer_guard')
-                    return ""
-                self._ensure_guard_nag()
-                self._temp_override = Config.ERROR_RECOVERY_TEMP
-                self._on_history_changed()
-                continue
-
-            state.clear_prefill()
-
-            if broken_call:
-                if state.can_retry_broken_regen():
-                    self._erase_last_assistant()
-                    self._recover('broken_call', retries_left=state.broken_regen_left)
-                    continue
-                if state.can_retry_broken_fix():
-                    self.history.add(UserMessage(self._build_broken_call_fix()))
-                    self.on_render(self.history.get_all()[-1])
-                    self._recover('broken_fix', retries_left=state.broken_fix_left)
-                    continue
-                self._recover('broken_giveup')
-                return ""
-
-            if tool_error_occurred and state.can_retry_tool_error():
-                erased = self._erase_last_failed_tool_call()
-                self._recover('tool_error', retries_left=state.tool_error_retries_left, erased_count=erased)
-                continue
-
-            compacted = False
-            if not service_mode:
-                # Сжатие истории убирает старые ошибки из контекста — счётчики заново.
-                compacted = self._compact_completed_tasks() > 0
-            if (
-                not service_mode
-                and not getattr(self, '_auto_summarize_suppressed', False)
-                and self._get_context_usage_percent() >= self._current_summary_threshold()
-            ):
-                if getattr(self, '_is_subagent', False):
-                    # Суб-агент: авто-суммаризация бессмысленна (история — клон родителя,
-                    # сжатие ломает извлечение ответа и тратит лишние вызовы LLM). При
-                    # превышении порога просто завершаемся, возвращая последнее сообщение.
-                    return result_text
-                if self._auto_summarize_dialogue():
-                    compacted = True
-                    # Одна компакция за ход: повторный авто-запуск в том же ходу —
-                    # бессмысленная перезапись только что написанного саммари (лишние
-                    # генерации с reasoning на глазах у пользователя). Кулдаун снимает chat().
-                    self._auto_summarize_suppressed = True
-
-            if compacted:
-                state.reset_error_counts()
-
-            if tool_error_occurred:
-                state.record_tool_error(self._last_failed_tool_signature())
-            else:
-                state.record_tool_success()
-
-            if state.max_errors_reached:
-                self._recover('error_limit', retries_left=MAX_CONSECUTIVE_ERRORS)
-                return ""
-
+        def _finish_turn(result: str) -> str:
+            """Единая точка выхода из хода: закрываем live-блок и (вне service_mode)
+            сохраняем историю, если не были прерваны. Гарантирует, что on_stream_end
+            не останется невызванным — даже если мы уходим по stop/pending/api_error."""
+            _close_sim_stream()
             if not service_mode:
                 self._autosave()
+            return result
 
-            if self.stop_event.is_set():
-                self.on_system_msg("⏹ Generation stopped by user — control returned to you.")
-                self.clear_stop()
-                if not service_mode:
-                    self._autosave()
-                return result_text
+        try:
+            for _ in range(max_iter):
+                # Пользователь ввёл новый текст, пока выполнялся инструмент (сценарий В):
+                # завершаем ход на чистой границе истории.
+                if self.pending_interrupt is not None:
+                    return _finish_turn("")
 
-            if (
-                structured_output is not None
-                and structured_output.controller is not None
-                and controller_verdict is not None
-            ):
-                # ── Контроллерный режим: решение по вердикту обработки фазы ──
-                if controller_verdict.complete:
-                    # Корень закрыт корректно: возвращаем собранный документ.
-                    return structured_output.controller.document()
-                if controller_verdict.next_prefill is not None:
-                    # Модель ошиблась в теге: контент исправлен (стёрт), продолжаем с
-                    # подсказкой ожидаемого токена через prefill. Счётчик фаз страхует
-                    # от бесконечного ремонта: после max_phases возвращаем, что собрали.
+                if self.stop_event.is_set():
+                    self.on_system_msg("⏹ Generation stopped by user — control returned to you.")
+                    self.clear_stop()
+                    return _finish_turn("")
+
+                step_prefill = state.step_prefill()
+                think_params = None
+                if sim_group is not None:
+                    if not sim_open:
+                        sim_group.reset(Config.SIMULATED_REASONING_REPAIRS)
+                        sim_open = True
+                        sim_stream_started = False
+                    step_prefill = sim_group.prefill()
+                    if sim_group.is_think_phase():
+                        think_params = sim_group.think_params(self._gen_params)
+
+                if structured_output is not None:
+                    effective_markers = structured_output.effective_markers(step_prefill)
+                elif sim_group is not None and sim_group.is_think_phase():
+                    effective_markers = (f"</{sim_group.tag}>",)
+                else:
+                    effective_markers = ()
+
+                all_messages = prepare_messages_for_api(
+                    self, debug_hash_check=Config.DEBUG_PREFIX_HASH_CHECK
+                )
+
+                try:
+                    message_obj, api_error_occurred, stopped_at_marker = self.call_with_retries(
+                        all_messages,
+                        step_prefill=step_prefill,
+                        reasoning_effort=turn_reasoning,
+                        stop_markers=effective_markers,
+                        prefill_shown=sim_group.prefill_shown() if sim_group else 0,
+                        defer_stream_end=sim_group is not None,
+                        gen_params=think_params,
+                    )
+                except GenerationInterrupted:
+                    _close_sim_stream()
+                    self.on_system_msg("⏹ Generation stopped by user — control returned to you.")
+                    self.clear_stop()
+                    return _finish_turn("")
+
+                if api_error_occurred or not message_obj:
+                    _close_sim_stream()
+                    self._recover('api_error' if api_error_occurred else 'duplicate_loop')
+                    return _finish_turn("")
+
+                # ── Активный контроллер ──
+                controller_verdict = None
+                if (structured_output is not None
+                        and structured_output.controller is not None
+                        and message_obj is not None):
+                    controller_verdict = structured_output.controller.advance(message_obj.content or "")
+                    if controller_verdict.corrected_content != (message_obj.content or ""):
+                        message_obj.content = controller_verdict.corrected_content
+
+                if (controller_verdict is not None
+                        and not controller_verdict.complete
+                        and not controller_verdict.corrected_content
+                        and controller_verdict.next_prefill is not None):
                     if state.structured_output_phase + 1 >= structured_output.max_phases:
-                        return structured_output.controller.document()
+                        return _finish_turn(structured_output.controller.document())
                     state.set_prefill(controller_verdict.next_prefill)
                     state.structured_output_phase += 1
                     continue
-                if stopped_at_marker and not message_obj.tool_calls and not tool_error_occurred:
-                    # Метка сработала (модель закрыла валидный тег), но дерево не завершено:
-                    # следующая фаза продолжается сама, без предзаполнения.
+
+                # ── Симуляция reasoning ──
+                sim_broken_scan = None
+                if sim_group is not None and message_obj is not None:
+                    sim_group.absorb(message_obj, step_prefill)
+                    sim_stream_started = True
+                    if sim_group.is_think_phase():
+                        sim_group.close_section()
+                        appended = sim_group.take_appended()
+                        if appended and self.on_stream_chunk:
+                            self.on_stream_chunk(appended)
+                        if sim_group.tool_calls or sim_group.answer_text().strip():
+                            sim_msg = self._sim_message(sim_group)
+                        else:
+                            sim_group.advance_to_answer()
+                            continue
+                    else:
+                        sim_msg = self._sim_verify_phase(sim_group)
+                        if sim_msg is None:
+                            continue
+                    sim_broken_scan = sim_group.answer_text()
+                    message_obj = sim_msg
+                    sim_open = False
+                    _close_sim_stream()
+
+                try:
+                    result_text, tool_error_occurred, broken_call, rerun_prefill = self._process_llm_response(
+                        message_obj,
+                        no_comment_retry_left=state.no_comment_retries_left,
+                        reasoning_effort=turn_reasoning,
+                        skip_broken_detection=bool(
+                            structured_output is not None
+                            and (stopped_at_marker or structured_output.controller is not None)
+                        ),
+                        allow_tools=not service_mode,
+                        broken_scan_text=sim_broken_scan,
+                    )
+                except GenerationInterrupted:
+                    self.history.pop_pending_tool_calls()
+                    self.history.normalize()
+                    self._on_history_changed()
+                    self.on_system_msg("⏹ Generation stopped by user.")
+                    _close_sim_stream()
+                    if not service_mode:
+                        self._autosave()
+                    raise
+
+                if rerun_prefill:
+                    state.no_comment_retries_left -= 1
+                    state.set_prefill(rerun_prefill)
+                    continue
+
+                if (self._pending_operation is not None
+                        and not service_mode
+                        and not message_obj.tool_calls
+                        and not tool_error_occurred):
+                    self._erase_last_assistant()
+                    if not state.can_retry_answer_guard():
+                        self._recover('answer_guard')
+                        return _finish_turn("")
+                    self.on_system_msg(
+                        f"⏳ [CONFIRMATION PENDING] The model replied with text instead of "
+                        f"calling {respond_to_system.__name__} — waiting for the tool call "
+                        f"(attempt {state.guard_retries_spent}/{Config.ANSWER_GUARD_MAX_RETRIES})."
+                    )
+                    self._ensure_guard_nag()
+                    self._temp_override = Config.ERROR_RECOVERY_TEMP
+                    self._on_history_changed()
+                    continue
+
+                state.clear_prefill()
+
+                if broken_call:
+                    if state.can_retry_broken_regen():
+                        self._erase_last_assistant()
+                        self._recover('broken_call', retries_left=state.broken_regen_left)
+                        continue
+                    if state.can_retry_broken_fix():
+                        self.history.add(UserMessage(self._build_broken_call_fix()))
+                        self.on_render(self.history.get_all()[-1])
+                        self._recover('broken_fix', retries_left=state.broken_fix_left)
+                        continue
+                    self._recover('broken_giveup')
+                    return _finish_turn("")
+
+                if tool_error_occurred and state.can_retry_tool_error():
+                    erased = self._erase_last_failed_tool_call()
+                    self._recover('tool_error', retries_left=state.tool_error_retries_left,
+                                  erased_count=erased)
+                    continue
+
+                compacted = False
+                if not service_mode:
+                    compacted = self._compact_completed_tasks() > 0
+                if (
+                        not service_mode
+                        and not getattr(self, '_auto_summarize_suppressed', False)
+                        and self._get_context_usage_percent() >= self._current_summary_threshold()
+                ):
+                    if getattr(self, '_is_subagent', False):
+                        return _finish_turn(result_text)
+                    if self._auto_summarize_dialogue():
+                        compacted = True
+                        self._auto_summarize_suppressed = True
+
+                if compacted:
+                    state.reset_error_counts()
+
+                if tool_error_occurred:
+                    state.record_tool_error(self._last_failed_tool_signature())
+                else:
+                    state.record_tool_success()
+
+                if state.max_errors_reached:
+                    self._recover('error_limit', retries_left=MAX_CONSECUTIVE_ERRORS)
+                    return _finish_turn("")
+
+                if not service_mode:
+                    self._autosave()
+
+                if self.stop_event.is_set():
+                    self.on_system_msg("⏹ Generation stopped by user — control returned to you.")
+                    self.clear_stop()
+                    return _finish_turn(result_text)
+
+                if (
+                        structured_output is not None
+                        and structured_output.controller is not None
+                        and controller_verdict is not None
+                ):
+                    if controller_verdict.complete:
+                        return _finish_turn(structured_output.controller.document())
+                    if controller_verdict.next_prefill is not None:
+                        if state.structured_output_phase + 1 >= structured_output.max_phases:
+                            return _finish_turn(structured_output.controller.document())
+                        state.set_prefill(controller_verdict.next_prefill)
+                        state.structured_output_phase += 1
+                        continue
+                    if stopped_at_marker and not message_obj.tool_calls and not tool_error_occurred:
+                        state.structured_output_phase += 1
+                        continue
+                    if not message_obj.tool_calls and not tool_error_occurred:
+                        return _finish_turn(structured_output.controller.document())
+
+                if (
+                        structured_output is not None
+                        and stopped_at_marker
+                        and not message_obj.tool_calls
+                        and not tool_error_occurred
+                        and state.structured_output_phase < len(structured_output.next_prefills)
+                        and state.structured_output_phase + 1 < structured_output.max_phases
+                ):
+                    state.set_prefill(structured_output.next_prefills[state.structured_output_phase])
                     state.structured_output_phase += 1
                     continue
-                # Маркер не сработал, дерево не завершено — генерируем следующий шаг.
+
                 if not message_obj.tool_calls and not tool_error_occurred:
-                    return structured_output.controller.document()
+                    return _finish_turn(result_text)
 
-            if (
-                structured_output is not None
-                and stopped_at_marker
-                and not message_obj.tool_calls
-                and not tool_error_occurred
-                and state.structured_output_phase < len(structured_output.next_prefills)
-                and state.structured_output_phase + 1 < structured_output.max_phases
-            ):
-                # Структурированный вывод: маркер сработал — фаза закрыта. Запускаем
-                # следующую фазу с новым prefill (модель заполняет следующую структуру).
-                # Мелкие фазы уже добавлены в историю через _append_assistant, каждая в
-                # своём сообщении — KV-cache стабилен.
-                state.set_prefill(structured_output.next_prefills[state.structured_output_phase])
-                state.structured_output_phase += 1
-                continue
-
-            if not message_obj.tool_calls and not tool_error_occurred:
-                return result_text
+            # max_iter исчерпан без выхода: не оставляем открытый live-блок.
+            return _finish_turn("")
+        finally:
+            # Страховка: даже если что-то улетело исключением мимо всех обработчиков
+            # (например, ошибка в on_system_msg/on_render), блок вывода закрывается.
+            _close_sim_stream()

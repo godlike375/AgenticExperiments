@@ -119,7 +119,7 @@ most top-level identifiers and their exact line ranges.»
 ## Требования
 
 - Python 3.11+
-- Python SDK `openai`
+- `httpx` (транспорт стриминга, `llm_client.InProcessStream`)
 - Docker (нужен только для инструментов песочницы в `tools/sandbox.py`)
 - Локальный OpenAI-совместимый сервер, например LM Studio, доступный по
   `http://localhost:1234/v1` (настраивается в `config.py`)
@@ -127,7 +127,7 @@ most top-level identifiers and their exact line ranges.»
 Установка зависимостей:
 
 ```bash
-pip install openai
+pip install httpx
 ```
 
 ## Запуск

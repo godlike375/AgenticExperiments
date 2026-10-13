@@ -1,4 +1,4 @@
-ef """Тесты PC-инструментов (tools/pc_control.py): координаты, схемы, allow-list.
+"""Тесты PC-инструментов (tools/pc_control.py): координаты, схемы, allow-list.
 
 GUI замокан (ImageGrab / pyautogui / pyperclip) — тесты не трогают реальный экран.
 """

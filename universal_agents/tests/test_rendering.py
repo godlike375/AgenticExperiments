@@ -2,7 +2,7 @@ import unittest
 
 from universal_agents.models import UserMessage, AssistantMessage, ToolCall, ToolResult
 from universal_agents.rendering import render_message
-from universal_agents.constants import ENVIRONMENT_PREFIX
+from universal_agents.tools.fs import read as _read_tool
 
 B64 = "aGVsbG8taW1hZ2U="
 
@@ -24,14 +24,14 @@ class TestRendering(unittest.TestCase):
         self.assertNotIn("thinking", rendered)
 
     def test_assistant_with_tool_call(self):
-        msg = AssistantMessage(content="", tool_calls=[ToolCall(id="t1", name="read", arguments="{}")])
+        msg = AssistantMessage(content="", tool_calls=[ToolCall(id="t1", name=_read_tool.__name__, arguments="{}")])
         rendered = render_message(msg)
-        self.assertIn("read", rendered)
+        self.assertIn(_read_tool.__name__, rendered)
 
     def test_tool_result(self):
-        ok = render_message(ToolResult.success("t1", "read", "data"))
+        ok = render_message(ToolResult.success("t1", _read_tool.__name__, "data"))
         self.assertIn("✅", ok)
-        err = render_message(ToolResult.error("t1", "read", "boom"))
+        err = render_message(ToolResult.error("t1", _read_tool.__name__, "boom"))
         self.assertIn("❌", err)
 
     def test_system_message_empty(self):

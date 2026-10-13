@@ -12,20 +12,18 @@ from universal_agents.config import Config
 from universal_agents.tools.builtin import respond_to_system, load_tool
 from universal_agents.tools.fs import cwd, line_range_edit, match_replace_edit, read, search
 from universal_agents.tools.host_shell import run_bash_host, run_powershell
-from universal_agents.tools.pc_control import (
-    mouse_click, mouse_move, press_key, screenshot, scroll, type_text_on_keyboard,
-)
+try:
+    from universal_agents.tools.pc_control import (
+        mouse_click, mouse_move, press_key, screenshot, scroll, type_text_on_keyboard,
+    )
+    _PC_TOOLS = (screenshot, mouse_move, mouse_click, scroll, press_key)
+except ImportError:
+    # pyautogui не установлен — PC-инструменты просто недоступны, агент работает без них
+    _PC_TOOLS = ()
 
 # Инструменты, которые модель подключает сама через load_tool (allow-list: без
 # строки здесь load_tool вернёт «not allowed», и инструмент не покажется в промпте).
-LOADABLE_TOOLS = [
-    run_bash_host.__name__,
-    screenshot.__name__,
-    mouse_move.__name__,
-    mouse_click.__name__,
-    scroll.__name__,
-    press_key.__name__,
-]
+LOADABLE_TOOLS = [run_bash_host.__name__] + [t.__name__ for t in _PC_TOOLS]
 
 
 PRELOADED_TOOLS = (load_tool.__name__, read.__name__, line_range_edit.__name__,
@@ -40,6 +38,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Universal tool-calling LLM assistant."
     )
+
+
     parser.add_argument(
         "--project-root", "-r",
         default=None,
@@ -123,4 +123,8 @@ if __name__ == "__main__":
     )
 
     cli = CLI(agent)
-    cli.run()
+    try:
+        cli.run()
+    finally:
+        # Останавливаем воркеры групп изоляции (иначе осядут фоновые процессы).
+        agent.close_tool_workers()

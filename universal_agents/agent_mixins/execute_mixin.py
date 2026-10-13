@@ -15,11 +15,8 @@ from universal_agents.tool_parsing import parse_tool_args, is_error_content
 from universal_agents.tool import ToolOutput
 from universal_agents.subprocess_utils import set_interrupt_event, clear_interrupt_event
 from universal_agents.exceptions import GenerationInterrupted
-from universal_agents.tools.fs import read as _read_tool, search as _search_tool
-from universal_agents.tools.host_shell import (
-    run_bash_host as _run_bash_host_tool,
-    run_powershell as _run_powershell_tool,
-)
+from universal_agents.group_worker import make_worker_resolve
+from universal_agents.tools.fs import read as _read_tool
 
 
 class ExecuteMixin:
@@ -124,8 +121,39 @@ class ExecuteMixin:
 
                 # Многофазное взаимодействие: dry_run → превью → respond_to_system() → реальное выполнение.
                 if tool_info.get('requires_model_confirmation', False):
+                    # Изолированный обёрнутый инструмент (docs/TOOL_ISOLATION_SPEC.md §4, §6.3):
+                    # тело (расчёт превью и применение правки) — в воркере группы; протокол
+                    # подтверждения (превью → respond_to_system → применение) остаётся в хосте.
+                    if tool_info.get('is_external') and self.group_manager.isolated:
+                        group = tool_info.get('group', 'internal')
+                        wr = self.group_manager.call(
+                            group, name, args_dict, dry_run=True, stop_check=self._stop_check
+                        )
+                        if wr.status == "error":
+                            self.on_system_msg(f"⚠️ [ERROR] Tool '{name}' dry_run failed: {wr.value}")
+                            results.append(ToolResult.error(tc.id, name, wr.value))
+                            continue
+                        if wr.status == "ok":
+                            text = wr.value
+                            if isinstance(text, str) and is_error_content(text):
+                                results.append(ToolResult(tc.id, name, text, is_error=True))
+                            else:
+                                results.append(ToolResult.success(tc.id, name, str(text)))
+                            continue
+                        preview, ask = wr.value
+                        self.set_pending_operation({
+                            "resolve": make_worker_resolve(
+                                self.group_manager, group, name, args_dict, self._stop_check
+                            ),
+                            "tool_name": name,
+                        })
+                        confirm_msg = f"{preview}\n\n{ask}"
+                        self.on_system_msg(f"[CONFIRM] Tool '{name}' awaits LLM confirmation.")
+                        results.append(ToolResult(tc.id, name, confirm_msg))
+                        continue
+
                     handler = tool_info['handler']
-                    dry_run_args = {**args_dict, "dry_run": "true"}
+                    dry_run_args = {**args_dict, "dry_run": True}
                     try:
                         if tool_info.get('has_agent_param') or tool_info.get('is_instance_method'):
                             result = handler(self, **dry_run_args)
@@ -169,6 +197,13 @@ class ExecuteMixin:
                     handler = tool_info['handler']
                     if tool_info.get('has_agent_param') or tool_info.get('is_instance_method'):
                         full_result = handler(self, **args_dict)
+                    elif tool_info.get('is_external'):
+                        # Внешний инструмент: тело в воркере группы (или in-process без изоляции).
+                        group = tool_info.get('group', 'internal')
+                        wr = self.group_manager.call(group, name, args_dict, stop_check=self._stop_check)
+                        if wr.status == "error":
+                            raise RuntimeError(wr.value)
+                        full_result = wr.value
                     else:
                         full_result = handler(**args_dict)
                     # Инструмент вернул ToolOutput: текст идёт как обычно (усечение/
@@ -182,15 +217,12 @@ class ExecuteMixin:
                         tr = ToolResult(tc.id, name, content, is_error=True)
                     else:
                         # Жёсткий лимит вывода любого инструмента — держим контекст в рамках.
-                        # `read`, `search`, `run_powershell`, `run_bash_host` уже сами режут вывод
-                        # (с подсказками по продолжению), поэтому их не трогаем.
-                        _self_truncating = (
-                            _read_tool.__name__,
-                            _search_tool.__name__,
-                            _run_powershell_tool.__name__,
-                            _run_bash_host_tool.__name__,
+                        # Инструменты с флагом self_truncating (@tool) уже сами режут вывод
+                        # (с подсказками по продолжению) — их не трогаем.
+                        self_truncating = bool(
+                            self.tools_manager.tools_map.get(name, {}).get("self_truncating")
                         )
-                        if name not in _self_truncating and len(content) > Config.MAX_READ_CHARS_PER_CALL:
+                        if not self_truncating and len(content) > Config.MAX_READ_CHARS_PER_CALL:
                             content = (
                                 content[:Config.MAX_READ_CHARS_PER_CALL]
                                 + f"\n{ENVIRONMENT_PREFIX} Output truncated to {Config.MAX_READ_CHARS_PER_CALL} "

@@ -11,21 +11,22 @@ from universal_agents.models import (
     ToolResult,
 )
 from universal_agents.config import Config
+from universal_agents.tools.fs import read as _read_tool
 
 B64 = "aGVsbG8taW1hZ2U="
 
 
 class TestMessages(unittest.TestCase):
     def test_tool_call_api_dict(self):
-        tc = ToolCall(id="t1", name="read", arguments='{"path": "a.py"}')
+        tc = ToolCall(id="t1", name=_read_tool.__name__, arguments='{"path": "a.py"}')
         self.assertEqual(tc.to_api_dict(), {
             "id": "t1",
             "type": "function",
-            "function": {"name": "read", "arguments": '{"path": "a.py"}'},
+            "function": {"name": _read_tool.__name__, "arguments": '{"path": "a.py"}'},
         })
 
     def test_assistant_message_api_dict(self):
-        tc = ToolCall(id="t1", name="read", arguments="{}")
+        tc = ToolCall(id="t1", name=_read_tool.__name__, arguments="{}")
         msg = AssistantMessage(content="hi", tool_calls=[tc], reasoning_content="thinking")
         original = Config.KEEP_REASONING_CONTENT_IN_HISTORY
         try:
@@ -41,7 +42,7 @@ class TestMessages(unittest.TestCase):
             Config.KEEP_REASONING_CONTENT_IN_HISTORY = original
 
     def test_assistant_message_reasoning_toggle(self):
-        tc = ToolCall(id="t1", name="read", arguments="{}")
+        tc = ToolCall(id="t1", name=_read_tool.__name__, arguments="{}")
         msg = AssistantMessage(content="hi", tool_calls=[tc], reasoning_content="thinking")
         original = Config.KEEP_REASONING_CONTENT_IN_HISTORY
         try:
@@ -59,25 +60,25 @@ class TestMessages(unittest.TestCase):
         self.assertFalse(msg2.streamed)
 
     def test_tool_result_factories(self):
-        ok = ToolResult.success("t1", "read", "content")
+        ok = ToolResult.success("t1", _read_tool.__name__, "content")
         self.assertFalse(ok.is_error)
         self.assertFalse(ok.is_user_denied)
         self.assertEqual(ok.content, "content")
 
-        err = ToolResult.error("t1", "read", "boom")
+        err = ToolResult.error("t1", _read_tool.__name__, "boom")
         self.assertTrue(err.is_error)
         self.assertTrue(err.content.startswith("Error:"))
 
-        denied = ToolResult.user_denied("t1", "read")
+        denied = ToolResult.user_denied("t1", _read_tool.__name__)
         self.assertTrue(denied.is_user_denied)
         self.assertFalse(denied.is_error)
 
     def test_tool_result_api_dict(self):
-        tr = ToolResult.success("t1", "read", "data")
+        tr = ToolResult.success("t1", _read_tool.__name__, "data")
         self.assertEqual(tr.to_api_dict(), {
             "role": "tool",
             "tool_call_id": "t1",
-            "name": "read",
+            "name": _read_tool.__name__,
             "content": "data",
         })
 
@@ -90,7 +91,7 @@ class TestImageSerialization(unittest.TestCase):
     """to_api_dict: строка без картинок, список частей с картинками."""
 
     def test_tool_result_without_images_is_plain_str(self):
-        tr = ToolResult.success("t1", "read", "ok")
+        tr = ToolResult.success("t1", _read_tool.__name__, "ok")
         d = tr.to_api_dict()
         self.assertIsInstance(d["content"], str)
         self.assertEqual(d["content"], "ok")

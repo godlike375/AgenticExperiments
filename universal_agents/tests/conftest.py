@@ -13,6 +13,7 @@ from types import SimpleNamespace
 
 from universal_agents.agent import LLMAgent
 from universal_agents.config import Config
+from universal_agents.llm_client import LLMClient
 from universal_agents.tool import tool
 
 
@@ -47,6 +48,35 @@ def sim_reasoning_off(monkeypatch):
     LLM. Тесты, которым формат нужен (tests/test_simulated_reasoning.py), включают его
     обратно через monkeypatch.setattr — он перебивает эту фикстуру."""
     monkeypatch.setattr(Config, "SIMULATED_REASONING_ENABLED", False)
+
+
+@pytest.fixture(autouse=True)
+def no_real_llm_transport(monkeypatch, request):
+    """Транспорт LLM в тестах всегда подменяется — реальный HTTP к LM Studio не идём.
+
+    Шов — `LLMClient.open_stream`: тест сам подменяет его фейковой генерацией чанков.
+    Здесь только страховка: если тест забыл подменить транспорт, падаем понятной
+    ошибкой, а не висим на сетевом таймауте. Тесты реального InProcessStream
+    (tests/test_in_process_stream.py) подменяют httpx.Client сами — им не мешаем."""
+    if "test_in_process_stream" in str(request.node.fspath):
+        return
+
+    def _no_transport(*args, **kwargs):
+        raise RuntimeError("LLM transport not patched in test (patch LLMClient.open_stream)")
+
+    monkeypatch.setattr(LLMClient, "open_stream", staticmethod(_no_transport))
+
+
+@pytest.fixture(autouse=True)
+def in_process_tool_isolation(monkeypatch):
+    """Инструменты в тестах исполняются в процессе хоста, а не в воркер-процессе.
+
+    Production по умолчанию включает изоляцию (Config.TOOL_ISOLATION_ENABLED=True):
+    внешние инструменты уходят в отдельный убиваемый воркер группы. Подпроцесс (spawn)
+    не наследует monkeypatch'и/моки тестов и не видит фейковые инструменты, поэтому
+    поведенческие тесты агента работают в in-process режиме. Тесты самой изоляции
+    (tests/test_tool_isolation.py) перебивают фикстуру, возвращая изоляцию обратно."""
+    monkeypatch.setattr(Config, "TOOL_ISOLATION_ENABLED", False)
 
 
 def make_agent(

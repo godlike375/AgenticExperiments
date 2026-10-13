@@ -66,34 +66,34 @@ class TestToolManagerAllowed(unittest.TestCase):
 
 class TestToolManagerLoadUnload(unittest.TestCase):
     def test_unload_core_tool_protected(self):
-        tm = ToolManager(None, external_plugins={"alpha": alpha, "unload_tool": unload_tool})
-        self.assertIn("unload_tool", tm.tools_map)
-        res = tm.unload("unload_tool")
+        tm = ToolManager(None, external_plugins={"alpha": alpha, real_unload_tool.__name__: unload_tool})
+        self.assertIn(real_unload_tool.__name__, tm.tools_map)
+        res = tm.unload(real_unload_tool.__name__)
         self.assertIn("Cannot disable", res)
-        self.assertIn("unload_tool", tm.tools_map)
+        self.assertIn(real_unload_tool.__name__, tm.tools_map)
 
     def test_unload_non_core_defers_removal(self):
         tm = ToolManager(
-            ["alpha", "unload_tool"],
-            external_plugins={"alpha": alpha, "beta": beta, "unload_tool": unload_tool},
+            ["alpha", real_unload_tool.__name__],
+            external_plugins={"alpha": alpha, "beta": beta, real_unload_tool.__name__: unload_tool},
         )
-        self.assertIn("unload_tool", tm.tools_map)
+        self.assertIn(real_unload_tool.__name__, tm.tools_map)
         res = tm.unload("alpha")
         self.assertIn("will be unloaded", res)
         # ещё не удалён — остаётся в префиксе ради KV-кэша
         self.assertIn("alpha", tm.tools_map)
-        self.assertIn("unload_tool", tm.tools_map)
+        self.assertIn(real_unload_tool.__name__, tm.tools_map)
         self.assertTrue(tm.is_pending_unload("alpha"))
         # реальная выгрузка только при изменении истории
         flushed = tm.flush_pending_unloads()
         self.assertEqual(flushed, ["alpha"])
         self.assertNotIn("alpha", tm.tools_map)
-        self.assertNotIn("unload_tool", tm.tools_map)
+        self.assertNotIn(real_unload_tool.__name__, tm.tools_map)
 
     def test_load_cancels_pending_unload(self):
         tm = ToolManager(
-            ["alpha", "unload_tool"],
-            external_plugins={"alpha": alpha, "beta": beta, "unload_tool": unload_tool},
+            ["alpha", real_unload_tool.__name__],
+            external_plugins={"alpha": alpha, "beta": beta, real_unload_tool.__name__: unload_tool},
         )
         tm.unload("alpha")
         self.assertTrue(tm.is_pending_unload("alpha"))
@@ -121,12 +121,12 @@ class TestToolManagerLoadUnload(unittest.TestCase):
         tm = ToolManager(None, external_plugins={"alpha": alpha})
         with mock.patch(
             "universal_agents.tool_manager.load_external_plugins",
-            return_value={"alpha": alpha, "beta": beta, "unload_tool": unload_tool},
+            return_value={"alpha": alpha, "beta": beta, real_unload_tool.__name__: unload_tool},
         ):
             res = tm.load("beta")
         self.assertIn("loaded", res)
         self.assertIn("beta", tm.tools_map)
-        self.assertIn("unload_tool", tm.tools_map)
+        self.assertIn(real_unload_tool.__name__, tm.tools_map)
 
 
 class TestToolManagerTrust(unittest.TestCase):

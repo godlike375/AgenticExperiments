@@ -13,7 +13,7 @@ from typing import Optional
 
 @dataclass
 class Config:
-    API_URL: str = "http://localhost:1234/v1"
+    API_URL: str = "http://192.168.50.196:1234/v1"
     MODEL_NAME: str = ""
     AFTER_SYSTEM_PROMPT: int = 1  # Index after which dialog starts (0 = system)
     BOOST_TEMP: float = 1.4
@@ -39,11 +39,11 @@ class Config:
     SUMMARY_DUPLICATE_TEMP: float = round(BOOST_TEMP / 2, 2)  # буст при тождественном повторе саммари (мягче полного BOOST_TEMP)
 
     # Параметры генерации
-    MAX_CONTEXT_TOKENS: int = 66000
-    TEMP: float = 0.4
+    MAX_CONTEXT_TOKENS: int = 110000
+    TEMP: float = 0.5
     TOP_P: float = 0.925
-    FREQUENCY_PENALTY: float = 0.02
-    PRESENCE_PENALTY: float = 0.02
+    FREQUENCY_PENALTY: float = 0.0
+    PRESENCE_PENALTY: float = 0.0
     # min_p (минимальная вероятность токена относительно топ-1): None — не отправлять
     # вообще (сервер решит сам). Поддерживается llama.cpp и LM Studio.
     MIN_P: Optional[float] = 0.07
@@ -74,7 +74,7 @@ class Config:
     SIMULATED_REASONING_ENABLED: bool = True
     # Тегированные секции ответа по порядку: ответ начинается с первой, а после её
     # закрытия идёт свободный текст. Меняешь здесь — меняется формат.
-    SIMULATED_REASONING_TAGS: tuple[str, ...] = ("least_thinking",)
+    SIMULATED_REASONING_TAGS: tuple[str, ...] = ("thinking",)
     # Продолжений пустого ответа на одну генерацию (одна генерация = между вызовами
     # инструментов): после </short_think> подставляется _NO_COMMENT_PREFILL.
     # По исчерпании ответ принимается как есть (громкий system msg), чтобы цикл не зациклился.
@@ -93,6 +93,9 @@ class Config:
     # Отладка KV-кэша: хэшировать каждое сообщение префикса и сравнивать с
     # предыдущей итерацией подготовки.
     DEBUG_PREFIX_HASH_CHECK: bool = True
+
+    # Печатать в консоль вход/выход не-стримингового вызова LLM (отладка транспорта).
+    DEBUG_LLM_CALLS: bool = False
 
     # Автоматическая суммаризация диалога
     AUTO_SUMMARY_THRESHOLD: int = 80  # процент занятого контекста для начала авто-суммаризации
@@ -147,6 +150,22 @@ class Config:
 
     # Отключает авто-суммаризацию большого вывода любых инструментов.
     DISABLE_TOOL_AUTO_SUMMARIZATION: bool = True
+
+    # ------------------------------------------------------------------
+    # Изоляция инструментов (docs/TOOL_ISOLATION_SPEC.md): внешние инструменты
+    # исполняются в отдельном воркер-процессе на группу, который можно убить.
+    # ------------------------------------------------------------------
+    # True — внешние инструменты идут через воркеры групп; False — исполняются в
+    # процессе хоста (тесты и отладка; поведение как раньше, без изоляции).
+    TOOL_ISOLATION_ENABLED: bool = True
+    # Период опроса очереди воркера (сек): как часто хост проверяет результат и стоп.
+    TOOL_WORKER_POLL_INTERVAL: float = 0.05
+    # Крайний срок одного вызова инструмента в воркере (сек); по истечении воркер убивается.
+    TOOL_WORKER_TIMEOUT: int = 3600
+    # Сколько ждать завершения воркера после terminate, прежде чем идти дальше.
+    TOOL_WORKER_KILL_GRACE: float = 1.0
+    # Имя канала обмена секциями прокси-агента для группы плагинов (docs §9).
+    TOOL_PLUGIN_GROUP: str = "plugin"
 
     # Bash на Windows (run_bash_host): "wsl" — через WSL, "gitbash" — Git Bash, "auto" — gitbash при наличии иначе WSL, "system" — shutil.which("bash").
     BASH_BACKEND: str = "auto"

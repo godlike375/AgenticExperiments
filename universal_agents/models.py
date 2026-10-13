@@ -23,7 +23,7 @@ def multimodal_content(text: str, images: list[str]) -> str | list[dict]:
     return parts
 
 
-@dataclass
+@dataclass(eq=False)
 class Message(ABC):
     timestamp: datetime = field(init=False)
     # Стабильный монотонный id сессии; назначается ChatHistory, переживает /save+/load, в API не уходит.
@@ -44,14 +44,14 @@ class Message(ABC):
             d["_seq"] = self.seq
         return d
 
-@dataclass
+@dataclass(eq=False)
 class SystemMessage(Message):
     content: str
 
     def to_api_dict(self) -> dict[str, Any]:
         return {"role": "system", "content": self.content}
 
-@dataclass
+@dataclass(eq=False)
 class UserMessage(Message):
     content: str
     is_summary: bool = False
@@ -65,9 +65,16 @@ class UserMessage(Message):
 
     def reset_header_cache(self) -> None:
         """Сбрасывает кэш заголовка user-сообщения: следующая prepare_messages_for_api
-        соберёт header заново (актуальный токен-бюджет и т.п.). Единая точка
-        инвалидации кэша."""
+        соберёт header заново. Пересборка оправдана только тогда, когда KV и так мёртв:
+        правка собственных байт сообщения (edit_message, склейка в normalize) или мутация
+        состава истории, после которой устарел токен-бюджет (delete/компакция), — §1.2."""
         self._cached_header = None
+
+    def is_auxiliary(self) -> bool:
+        """True для служебных user-сообщений (session summary, наг guard'а): они не
+        являются «текущим вопросом» — не получают строку токен-бюджета и не выбираются
+        как последний user при пересчёте шапки."""
+        return self.is_summary or self._is_guard_nag
 
     def to_api_dict(self) -> dict[str, Any]:
         return {"role": "user", "content": multimodal_content(self.content, self.images)}
@@ -99,7 +106,7 @@ class ToolCall:
             }
         }
 
-@dataclass
+@dataclass(eq=False)
 class AssistantMessage(Message):
     content: str = ""
     tool_calls: list[ToolCall] = field(default_factory=list)
@@ -117,7 +124,7 @@ class AssistantMessage(Message):
             d["tool_calls"] = [tc.to_api_dict() for tc in self.tool_calls]
         return d
 
-@dataclass
+@dataclass(eq=False)
 class ToolResult(Message):
     tool_call_id: str
     name: str

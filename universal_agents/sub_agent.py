@@ -73,10 +73,12 @@ class SubAgent:
             on_reasoning_start: Optional[Callable[[], None]] = None,
             on_reasoning_end: Optional[Callable[[], None]] = None,
             disable_per_msg_summarization: bool = False,
+            group_manager=None,
     ):
         self._max_iter = max_iter if max_iter is not None else Config.MAX_ITER
         self._on_log = on_log
         self._depth = depth
+        self._group_manager = group_manager
 
         # Если указан системный промпт родителя — используем его для разделения KV-кеша
         effective_system_prompt = parent_system_prompt if parent_system_prompt is not None else system_prompt
@@ -188,6 +190,7 @@ class SubAgent:
             on_reasoning_start=on_reasoning_start,
             on_reasoning_end=on_reasoning_end,
             disable_per_msg_summarization=disable_per_msg_summarization,
+            group_manager=self._group_manager,
         )
         agent._depth = self._depth
         agent._is_subagent = True

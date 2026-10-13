@@ -9,6 +9,8 @@ from universal_agents.models import (
     ToolCall,
     ToolResult,
 )
+from universal_agents.tools.fs import line_range_edit as _line_range_edit_tool
+from universal_agents.tools.fs import read as _read_tool
 
 B64 = "aGVsbG8taW1hZ2U="
 
@@ -16,8 +18,8 @@ B64 = "aGVsbG8taW1hZ2U="
 def history_with_dialog():
     h = ChatHistory("sys")
     h.add(UserMessage("u1"))
-    h.add(AssistantMessage(content="a1", tool_calls=[ToolCall(id="t1", name="read", arguments="{}")]))
-    h.add(ToolResult.success("t1", "read", "data"))
+    h.add(AssistantMessage(content="a1", tool_calls=[ToolCall(id="t1", name=_read_tool.__name__, arguments="{}")]))
+    h.add(ToolResult.success("t1", _read_tool.__name__, "data"))
     h.add(AssistantMessage(content="a2"))
     h.add(UserMessage("u2"))
     h.add(AssistantMessage(content="a3"))
@@ -71,59 +73,84 @@ class TestChatHistory(unittest.TestCase):
     def test_normalize_drops_orphan_tool_result(self):
         h = ChatHistory("sys")
         h.add(UserMessage("u1"))
-        h.add(ToolResult.success("t1", "read", "data"))
+        h.add(ToolResult.success("t1", _read_tool.__name__, "data"))
         h.normalize()
         roles = [m.to_api_dict()["role"] for m in h]
         self.assertEqual(roles, ["system", "user"])
 
     def test_delete_range_resyncs_new_last_user_header(self):
-        """Удаление, устраняющее «последнее» user-сообщение, сбрасывает кэш заголовка
-        нового последнего user: оно раньше не было последним (заголовок без токен-бюджета)
-        и после удаления должно собраться заново."""
+        """Удаление последнего вопроса возвращает «последность» к предыдущему — его шапку
+        пересобираем, чтобы бюджет был актуален (прежняя цифра устарела/отсутствует).
+        Пересборка бесплатна: удаление инвалидирует префикс от своей точки."""
         h = history_with_dialog()  # 0 sys, 1 u1, 2 a1, 3 tool, 4 a2, 5 u2, 6 a3
-        h[1]._cached_header = "cached-as-non-last"
+        h[1]._cached_header = "cached-u1"
         h.delete_range(5, 6)  # удаляем u2 и a3 → последним остаётся u1
         self.assertIsNone(h[1]._cached_header)
 
-    def test_delete_range_keeps_header_when_last_user_unchanged(self):
-        """KV-стабильность: удаление из середины, не меняющее «последнее» user-сообщение,
-        НЕ должно сбрасывать его кэш-заголовок (байт-идентичный префикс сохраняется)."""
+    def test_delete_range_before_last_user_resyncs_header(self):
+        """Удаление сообщений ПЕРЕД вопросом меняет его префикс и токен-бюджет — шапку
+        пересобираем (KV от точки удаления и так мёртв)."""
         h = history_with_dialog()
-        h[5]._cached_header = "cached-last"  # u2 — по-прежнему последний user
-        h.delete_range(2, 4)  # удаляем a1+tool+a2
-        self.assertEqual(h[2]._cached_header, "cached-last")
+        h[2]._cached_header = "cached-u2"  # u2 после удаления станет индексом 2
+        h.delete_range(2, 4)  # удаляем a1+tool+a2 (перед u2)
+        self.assertIsNone(h[2]._cached_header)
+
+    def test_remove_at_after_last_user_keeps_its_header(self):
+        """Удаление строго ПОСЛЕ вопроса (напр. хвостовая заглушка или наг guard'а) шапку
+        вопроса не трогает: его префикс цел, сдвиг волатильной цифры сбросил бы KV всего
+        хода (§1.2)."""
+        h = history_with_dialog()
+        h[5]._cached_header = "cached-u2"
+        h.remove_at({6})  # a3 — после u2
+        self.assertEqual(h[5]._cached_header, "cached-u2")
 
     def test_add_preserves_previous_last_user_header(self):
-        """Добавление нового user-сообщения не трогает кэш старого последнего:
-        старый заголовок с устаревшим токен-бюджетом — осознанный платёж за KV-стабильность."""
+        """Добавление нового user-сообщения не трогает кэш старого последнего: собственные
+        байта старого не менялись, а остаток бюджета в его шапке — снимок на момент
+        постановки вопроса (осознанный платёж за KV-стабильность)."""
         h = history_with_dialog()
-        h[5]._cached_header = "cached-last"
+        h[5]._cached_header = "cached-u2"
         h.add(UserMessage("u3"))
-        self.assertEqual(h[5]._cached_header, "cached-last")
+        self.assertEqual(h[5]._cached_header, "cached-u2")
 
-    def test_remove_at_resyncs_new_last_user_header(self):
+    def test_remove_at_resyncs_surviving_user_header(self):
         h = history_with_dialog()
-        h[1]._cached_header = "cached-as-non-last"
-        h.remove_at({5, 6})  # последнее user u2 и его ответ удалены
+        h[1]._cached_header = "cached-u1"
+        h.remove_at({5, 6})  # последнее user u2 и его ответ удалены → u1 снова текущий
         self.assertIsNone(h[1]._cached_header)
+
+    def test_edit_message_resets_modified_user_header(self):
+        """Обратная сторона правила: у сообщения, которое МЫ ИЗМЕНИЛИ, кэш сбрасывается —
+        его KV и так мёртв, пересборка шапки ничего не стоит (§1.2)."""
+        h = history_with_dialog()
+        h[1]._cached_header = "cached-u1"
+        h[5]._cached_header = "cached-u2"
+        h.edit_message(5, "u2-исправлено", old_text="u2")
+        self.assertIsNone(h[5]._cached_header)
+        # Соседние сообщения не тронуты.
+        self.assertEqual(h[1]._cached_header, "cached-u1")
 
     def test_compress_old_messages(self):
         h = history_with_dialog()
+        h[5]._cached_header = "cached-u2"
         h.compress_old_messages("long summary", preserve_last=2)
         self.assertEqual(h[0].to_api_dict()["role"], "system")
         self.assertTrue("summary" in h[1].content)
         # preserve_last = 2 последних сообщения сохраняются
         self.assertEqual(h[-1].content, "a3")
+        # Компакция освободила место — бюджет текущего вопроса пересобираем (иначе цифра
+        # осталась бы заниженной).
+        self.assertIsNone(h[-2]._cached_header)
 
     def test_save_load_roundtrip(self, tmpdir=None):
         import tempfile, os
         h = history_with_dialog()
         with tempfile.TemporaryDirectory() as td:
             path = os.path.join(td, "hist.json")
-            h.save(path, loaded_tools=["read", "edit_file"], file_states={"a.py": {"disk_hash": "x", "content_hash": "y", "tool_call_id": "t1"}})
+            h.save(path, loaded_tools=[_read_tool.__name__, _line_range_edit_tool.__name__], file_states={"a.py": {"disk_hash": "x", "content_hash": "y", "tool_call_id": "t1"}})
             h2 = ChatHistory("sys")
             tools, file_states, summaries = h2.load(path)
-            self.assertEqual(tools, ["read", "edit_file"])
+            self.assertEqual(tools, [_read_tool.__name__, _line_range_edit_tool.__name__])
             self.assertEqual(file_states["a.py"]["disk_hash"], "x")
             self.assertEqual(summaries, [])
             self.assertEqual(len(h2), len(h))
@@ -163,9 +190,9 @@ def _archive_dialog() -> list:
     h.add(UserMessage("please fix the login bug in src/auth.py"))
     h.add(AssistantMessage(
         content="Investigating the auth flow.",
-        tool_calls=[ToolCall(id="t1", name="read", arguments='{"path": "src/auth.py"}')],
+        tool_calls=[ToolCall(id="t1", name=_read_tool.__name__, arguments='{"path": "src/auth.py"}')],
     ))
-    h.add(ToolResult.success("t1", "read", "def login(): raise ValueError('bad token')"))
+    h.add(ToolResult.success("t1", _read_tool.__name__, "def login(): raise ValueError('bad token')"))
     h.add(AssistantMessage(content="Found it: token expiry check inverted. Fixed and added test."))
     h.add(UserMessage("why did you touch the middleware?"))
     return h.get_all()[1:]

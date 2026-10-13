@@ -12,6 +12,7 @@ from universal_agents.models import AssistantMessage, ToolCall, ToolResult, User
 from universal_agents.tool import tool, ToolOutput
 from universal_agents.tools.fs import line_range_edit
 from universal_agents.tools.builtin import respond_to_system
+from universal_agents.tools.fs import read as _read_tool
 
 from tests.conftest import make_agent as make_test_agent
 
@@ -44,6 +45,66 @@ class TestAnswerRequiredGuard(unittest.TestCase):
         )
         agent.trust_dir(self._tmp)
         return agent
+
+    def test_repeated_text_answer_is_guard_violation_not_duplicate(self):
+        """Пока висит операция, повторная реплика — не «дубль качества текста», а
+        невыполненный протокол подтверждения. Приоритет у guard'а (§1.11): он даёт наг и
+        лестницу ANSWER_GUARD_MAX_RETRIES. Прежний приоритет детектора дублей сжигал все
+        MAX_LOOP_RETRIES попытки молча и заканчивался сдачей хода — модель так и не видела,
+        чего от неё ждут, а пользователь — почему всё молчит.
+
+        Сценарий из живой сессии: в истории уже есть текстовый ответ «Подтверждаю.» из
+        предыдущего хода, затем line_range_edit ставит pending, и модель повторяет ту же
+        фразу — сначала просто текстом, потом уже с правильным вызовом respond_to_system.
+        Второй случай и был затыком: текст проверяется детектором дублей ПЕРВЫМ (в т.ч. для
+        сообщений с вызовами), поэтому правильный вызов подтверждения выбрасывался вместе
+        с «пластинкой»-шапкой, и подтверждение не наступало никогда."""
+        path = os.path.join(self._tmp, "hello.txt")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("hello\n")
+
+        prior_answer = AssistantMessage(content="Подтверждаю.")
+        edit_call = AssistantMessage(
+            content="Отредактирую файл.",
+            tool_calls=[ToolCall(id="c1", name=line_range_edit_tool_name, arguments=json.dumps({
+                "path": path, "new_text": "world\n", "start_line": 1, "end_line": 1,
+            }))],
+        )
+        answer_call = AssistantMessage(
+            content="Подтверждаю.",
+            tool_calls=[ToolCall(id="c2", name=answer_tool_name, arguments='{"text": "yes"}')],
+        )
+        final_reply = AssistantMessage(content="Операция завершена.")
+
+        sysmsgs = []
+        responses = [
+            (prior_answer, None, None),      # ход 1: обычный текст, в историю
+            (edit_call, None, None),         # ход 2: edit → превью, pending + наг
+            (prior_answer, None, None),      # та же фраза: раньше это был DUPLICATE
+            (answer_call, None, None),       # модель вспомнила протокол
+            (final_reply, None, None),
+        ]
+
+        def fake_call(messages, prefill=None, **kwargs):
+            return responses.pop(0)
+
+        with mock.patch("universal_agents.agent.LLMClient.call", side_effect=fake_call):
+            agent = self.make_agent()
+            agent.on_system_msg = sysmsgs.append
+            # Первый ход: обычный текстовый ответ уходит в историю (pending ещё нет).
+            agent.chat("Привет", max_iter=5)
+            # Второй ход: pending + повтор той же фразы.
+            result = agent.chat("Отрезай hello", max_iter=10)
+
+        self.assertIn("Операция завершена", result)
+        self.assertEqual([m for m in sysmsgs if "DUPLICATE ANSWER DETECTED" in m], [],
+                         "При висящем pending текст должен разбираться guard'ом, не детектором дублей")
+        notices = [m for m in sysmsgs if "CONFIRMATION PENDING" in m]
+        self.assertEqual(len(notices), 1, "Пользователь должен быть предупреждён ровно один раз за ход")
+        self.assertIn("attempt 1/5", notices[0])
+        self.assertIsNone(agent._pending_operation)
+        with open(path, encoding="utf-8") as f:
+            self.assertEqual(f.read(), "world")
 
     def test_text_answer_without_answer_tool_then_answer_yes(self):
         path = os.path.join(self._tmp, "hello.txt")
@@ -464,7 +525,7 @@ class TestAnswerRequiredGuard(unittest.TestCase):
         # Модель застряла: вместо answer вызывает чужой инструмент (read).
         wrong_call = AssistantMessage(
             content="Проверю файл перед подтверждением.",
-            tool_calls=[ToolCall(id="c2", name="read", arguments=json.dumps({"path": path}))],
+            tool_calls=[ToolCall(id="c2", name=_read_tool.__name__, arguments=json.dumps({"path": path}))],
         )
         answer_call = AssistantMessage(
             content="Подтверждаю.",
@@ -488,8 +549,8 @@ class TestAnswerRequiredGuard(unittest.TestCase):
         self.assertTrue(any("Подтверждаю" in c for c in contents))
         # Мусор вычищен: чужих вызовов read (assistant + результат) и нагов нет.
         wrong_assistant = [m for m in msgs
-                           if isinstance(m, AssistantMessage) and any(tc.name == "read" for tc in m.tool_calls)]
-        wrong_results = [m for m in msgs if isinstance(m, ToolResult) and m.name in ("read",)]
+                           if isinstance(m, AssistantMessage) and any(tc.name == _read_tool.__name__ for tc in m.tool_calls)]
+        wrong_results = [m for m in msgs if isinstance(m, ToolResult) and m.name in (_read_tool.__name__,)]
         self.assertEqual(wrong_assistant, [], "Вызов чужого инструмента при pending должен быть вычищен")
         self.assertEqual(wrong_results, [], "Результат чужого инструмента при pending должен быть вычищен")
         self.assertEqual(nag_contents(msgs), [])
@@ -545,6 +606,61 @@ class TestAnswerRequiredGuard(unittest.TestCase):
         for content in user_contents:
             nags = [t for t in content if _GUARD_NAG_PREFIX in t]
             self.assertLessEqual(len(nags), 1, "Наг не должен накапливаться")
+
+    def test_scrub_after_answer_keeps_prefix_byte_stable(self):
+        """Вычистка после успешного answer не сдвигает префикс: наг и мусор — временная
+        вставка, шапки уцелевших сообщений не трогаются, потому что их собственные байта
+        не менялись (mutation-only, §1.2). Раньше remove_at считал сменившимся последним
+        сообщение, стоящее в начале префикса, и пересобирал его шапку с новым токен-бюджетом
+        → [PREFIX-HASH] и сброс всего KV-кэша. usage в фейке растёт: если бы шапку всё же
+        пересобирали, предупреждение всплыло бы — тест ловит регрессию обратно."""
+        path = os.path.join(self._tmp, "p.txt")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("a\n")
+
+        edit_call = AssistantMessage(
+            content="Отредактирую.",
+            tool_calls=[ToolCall(id="c1", name=line_range_edit_tool_name, arguments=json.dumps({
+                "path": path, "new_text": "b\n", "start_line": 1, "end_line": 1}))],
+        )
+        text_turn = AssistantMessage(content="Подтверждаю правку.")
+        answer_call = AssistantMessage(
+            content="Подтверждаю.",
+            tool_calls=[ToolCall(id="c2", name=answer_tool_name, arguments='{"text": "yes"}')],
+        )
+        final_reply = AssistantMessage(content="Готово.")
+
+        user_contents = []
+        responses = [
+            (edit_call, None, None),
+            (text_turn, None, None),
+            (answer_call, None, None),
+            (final_reply, None, None),
+        ]
+        attempt = {"n": 0}
+
+        def fake_call(messages, prefill=None, **kwargs):
+            user_contents.append([m.get("content", "") for m in messages if m.get("role") == "user"])
+            msg, err, _ = responses.pop(0)
+            attempt["n"] += 1
+            return msg, err, {"prompt_tokens": 1000 * attempt["n"], "completion_tokens": 10,
+                              "total_tokens": 1000 * attempt["n"]}
+
+        system_msgs = []
+        with mock.patch("universal_agents.agent.LLMClient.call", side_effect=fake_call):
+            agent = self.make_agent()
+            agent.on_system_msg = system_msgs.append
+            result = agent.chat("Измени файл", max_iter=10)
+
+        self.assertIn("Готово", result)
+        self.assertEqual([m for m in system_msgs if "[PREFIX-HASH]" in m], [],
+                         "Вычистка нага не должна сдвигать префикс")
+        # Вызовы: 1=edit, 2=text (guard, наг добавлен), 3=answer (наг вычищен), 4=reply.
+        self.assertEqual(len(user_contents), 4)
+        self.assertEqual(user_contents[0], user_contents[1])
+        self.assertEqual(user_contents[1][0], user_contents[3][0],
+                         "User-сообщение задачи должно вернуться байт-в-байт после вычистки нага")
+        self.assertEqual(nag_contents(agent.history.get_all()), [])
 
     def test_guard_nag_flag_roundtrip_through_save_load(self):
         """Флаг _is_guard_nag не уходит в API, но переживает save/load — скраб находит

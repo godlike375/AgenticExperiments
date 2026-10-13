@@ -258,11 +258,31 @@ def truncate_middle(
     return result
 
 
+def _decode_bytes(data: bytes, encoding: str, fallback_encoding: str | None) -> str:
+    """Декодирует вывод процесса: сначала строго ``encoding``, при неудаче — ``fallback_encoding``.
+
+    Нужно для PowerShell 5.1: при перенаправлении в pipe он пишет в OEM-кодировке
+    системы (cp866 на ru-RU), т.е. байты не являются валидным UTF-8. Пробуем UTF-8
+    строго; если не вышло — декодируем OEM-кодировкой (последняя уж точно не бросит).
+    """
+    try:
+        return data.decode(encoding)
+    except (UnicodeDecodeError, LookupError):
+        if fallback_encoding:
+            try:
+                return data.decode(fallback_encoding, errors="replace")
+            except LookupError:
+                pass
+        return data.decode(encoding, errors="replace")
+
+
 def run_capture(
     cmd: list[str],
     timeout: int,
     cwd: str = None,
     stdin: str = None,
+    encoding: str = "utf-8",
+    fallback_encoding: str | None = None,
 ) -> str:
     """Запускает ``cmd`` и возвращает текст результата.
 
@@ -272,29 +292,44 @@ def run_capture(
     Если во время выполнения запрошена остановка (interrupt event), процесс
     принудительно завершается и бросается ``GenerationInterrupted``.
 
+    Кодировка: вывод декодируется как ``encoding``; если задан ``fallback_encoding``,
+    читаем сырые байты и пробуем UTF-8, а при провале — фолбэк (для PowerShell 5.1,
+    который в pipe отдаёт OEM-кодировку; см. tools/host_shell.py).
+
     На Windows создаётся Job Object с KILL_ON_JOB_CLOSE: при прерывании или
     таймауте гарантированно убивается всё дерево процессов (Gradle, Java и т.д.),
     чтобы reader-потоки не застревали в незакрытых pipe'ах.
     """
     effective_timeout = timeout if timeout and timeout > 0 else 60
     stdin_stream = subprocess.PIPE if stdin is not None else subprocess.DEVNULL
+    raw_mode = fallback_encoding is not None
 
     # На Windows: создаём Job Object для гарантированного убийства дерева процессов.
     # При прерывании/таймауте закрытие хэндла Job убьёт все назначенные процессы,
     # включая дочерние (Gradle → Java), и reader-потоки получат EOF на pipe'ах.
     job_handle, job_assign = _create_kill_job()
 
-    proc = subprocess.Popen(
-        cmd,
-        stdin=stdin_stream,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        cwd=cwd,
-        bufsize=1,
-    )
+    if raw_mode:
+        # Сырые байты: декодируем сами (см. _decode_bytes — UTF-8, при провале fallback).
+        proc = subprocess.Popen(
+            cmd,
+            stdin=stdin_stream,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=False,
+            cwd=cwd,
+        )
+    else:
+        proc = subprocess.Popen(
+            cmd,
+            stdin=stdin_stream,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding=encoding,
+            errors="replace",
+            cwd=cwd,
+        )
 
     # Назначаем процесс в Job Object (все дочерние автоматически попадают тоже)
     if job_assign is not None:
@@ -303,12 +338,12 @@ def run_capture(
         except Exception:
             pass
 
-    out_chunks: list[str] = []
-    err_chunks: list[str] = []
+    out_chunks: list = []
+    err_chunks: list = []
 
-    def _reader(stream, sink: list[str]) -> None:
+    def _reader(stream, sink: list) -> None:
         try:
-            for chunk in iter(stream.readline, ''):
+            for chunk in iter(stream.readline, b'' if raw_mode else ''):
                 sink.append(chunk)
         except Exception:
             pass
@@ -324,7 +359,7 @@ def run_capture(
 
     if stdin is not None:
         try:
-            proc.stdin.write(stdin)
+            proc.stdin.write(stdin.encode(encoding) if raw_mode else stdin)
         except Exception:
             pass
         try:
@@ -359,8 +394,12 @@ def run_capture(
     if timed_out:
         raise TimeoutError(f"Command timed out after {effective_timeout}s")
 
-    output = "".join(out_chunks)
-    err = "".join(err_chunks)
+    if raw_mode:
+        output = _decode_bytes(b"".join(out_chunks), encoding, fallback_encoding)
+        err = _decode_bytes(b"".join(err_chunks), encoding, fallback_encoding)
+    else:
+        output = "".join(out_chunks)
+        err = "".join(err_chunks)
     if err:
         output += f"\n[stderr]\n{err}"
     output += f"\n[exit_code]: {proc.returncode}"

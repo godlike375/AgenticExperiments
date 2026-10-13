@@ -1,8 +1,10 @@
 import hashlib
+import json
+import socket
 import threading
 from typing import Optional, Callable
 from types import SimpleNamespace
-from openai import OpenAI
+import httpx
 from universal_agents.config import Config, CHARS_PER_TOKEN
 from universal_agents.generation import GenerationParams, apply_stop_markers
 from universal_agents.tool_parsing import normalize_args, build_tool_calls
@@ -286,9 +288,9 @@ class StreamAccumulator:
 
 class StreamSession:
     """Единый блокирующий потребитель стрима. Создаёт raw-соединение через
-    LLMClient.stream и пожирает его до конца/остановки, наполняя StreamAccumulator.
-    Watchdog и чанковый цикл — в одном месте (единая точка для обоих потребителей:
-    LLMClient.call и StreamingMixin._call_with_streaming)."""
+    LLMClient.open_stream и пожирает его до конца/остановки, наполняя StreamAccumulator.
+    Само-остановка (процессный стрим) и чанковый цикл — в одном месте (единая точка для
+    обоих потребителей: LLMClient.call и StreamingMixin._call_with_streaming)."""
 
     def __init__(self, messages, temp=None, timeout=None, tools=None, prefill=None,
                  top_p=None, frequency_penalty=None, presence_penalty=None,
@@ -302,7 +304,7 @@ class StreamSession:
             on_reasoning_chunk=on_reasoning_chunk,
             prefill_shown=prefill_shown,
         )
-        self._raw = LLMClient.stream(
+        self._raw = LLMClient.open_stream(
             messages,
             temp=temp, timeout=timeout, tools=tools, prefill=prefill,
             top_p=top_p, frequency_penalty=frequency_penalty,
@@ -316,11 +318,12 @@ class StreamSession:
                 stop_markers: tuple = ()):
         """Блокирующе потребляет стрим.
 
-        stop_check — пользовательская остановка (watchdog закрывает соединение, ловит
-        ошибку; в цикле — закрывает соединение и break).
+        stop_check — пользовательская остановка. Watchdog-поток закрывает стрим
+        (LLMClient.close_stream), чтобы разблокировать next(); в чанковом цикле
+        стрим закрывается и break.
         stop_on_chunk — внутренний критерий (напр. расхождение), вызывается ПОСЛЕ
-        каждого обработанного чанка; True прерывает потребление (stream НЕ закрывается
-        намеренно — watcher закроет через _watch_done).
+        каждого обработанного чанка; True прерывает потребление (стрим не дочитан —
+        уборку делает close() в finally).
         on_stream_start — вызывается ДО первого чанка (единый порядок; старый
         StreamingMixin запускал UI-отрисовку позже, но это безопасная унификация).
 
@@ -353,10 +356,10 @@ class StreamSession:
                 return "stopped", True
             if on_stream_start:
                 on_stream_start()
-            # Watchdog: закрывает соединение при остановке пользователя. Стартует ДО
-            # первого чанка, чтобы прервать долгий префилл/сетевую задержку первого
-            # next(). Закрытие стрима подавит и genuine-ошибку, и error-generator — но
-            # оба раза это происходит только когда пользователь сам запросил остановку.
+            # Остановка пользователя: watchdog-поток закрывает стрим (shutdown на
+            # сокете будит блокирующий recv), чтобы разблокировать next(). Стартует
+            # ДО первого чанка — иначе долгий префилл/сетевая задержка первого next()
+            # не были бы прерываемы.
             if stop_check is not None:
                 def _watcher():
                     while not _watch_done.is_set():
@@ -367,11 +370,13 @@ class StreamSession:
                 threading.Thread(target=_watcher, daemon=True).start()
             first = next(self._raw, None)
             if first is None:
+                if stop_check and stop_check():
+                    return "stopped", True
                 return "empty stream", False
             if isinstance(first, dict) and "error" in first:
                 return f"stream creation failed: {first['error']}", False
             self.acc.process(first)
-            # Проверка стоп-маркера сразу после первого чанка: если маркер уже появился
+            # Проверка стоп-маркера сразу после первого чанк: если маркер уже появился
             # (единственный чанк), обрезаем и выходим — иначе check только в цикле ниже.
             if stop_markers:
                 content, marker_hit = apply_stop_markers(self.acc.content, stop_markers)
@@ -404,6 +409,10 @@ class StreamSession:
             error = str(e)
         finally:
             _watch_done.set()
+            # Освобождаем соединение независимо от исхода (нормальный конец,
+            # stop/marker/расхождение, ошибка). close() идемпотентен и для уже
+            # закрытого watchdog'ом стрима, и для error-generator.
+            LLMClient.close_stream(self._raw)
         # Модель могла уйти в tool call без текстовых чанков — prefill всё равно
         # часть сообщения, дописываем его в живой вывод.
         if not error:
@@ -411,15 +420,208 @@ class StreamSession:
         return error, stopped
 
 
+def _get_underlying_socket(response):
+    """Достаёт сокет из httpx-интернала для shutdown при отмене.
+
+    httpx >= 0.23 / httpcore >= 0.17 хранят сетевой поток в
+    response.extensions["network_stream"]. Кастомные транспорты могут не его
+    выставлять — тогда отмена работает через read timeout."""
+    network_stream = response.extensions.get("network_stream")
+    if network_stream is None:
+        return None
+    try:
+        return network_stream.get_extra_info("socket")
+    except Exception:
+        return None
+
+
+class InProcessStream:
+    """In-process стрим чанков через прямой httpx POST с stream=True.
+
+    SSE-парсинг руками, отдаёт чанки в форме, которую ждёт StreamAccumulator.process
+    (choices/delta/reasoning_content/tool_calls, usage) — StreamSession не меняется.
+
+    Отмена: close() делает shutdown(SHUT_RDWR) на сокете — это гарантированно
+    будит блокирующий recv (close() не будит, POSIX оставляет undefined).
+    Если сокет не достался (старый httpx, кастомный transport) —
+    close() + read timeout как страховка."""
+
+    def __init__(
+        self,
+        messages: list[dict],
+        temp: float = None,
+        timeout: int = None,
+        tools: list[dict] = None,
+        prefill: str = None,
+        top_p: float = None,
+        frequency_penalty: float = None,
+        presence_penalty: float = None,
+        max_tokens: int = None,
+        min_p: float = None,
+        params: GenerationParams = None,
+        reasoning_effort: str = "none",
+    ):
+        self._closed = False
+        self._response = None
+        self._client = None
+        self._iter = None
+
+        temp, timeout, top_p, frequency_penalty, presence_penalty, max_tokens, min_p = LLMClient._resolve_params(
+            params, temp, timeout, top_p, frequency_penalty, presence_penalty, max_tokens, min_p
+        )
+
+        messages_to_send = LLMClient._prepare_messages(messages, prefill)
+
+        body = {
+            "model": Config.MODEL_NAME,
+            "messages": messages_to_send,
+            "stream": True,
+            "stream_options": {"include_usage": True},
+            "temperature": temp if temp is not None else Config.TEMP,
+            "max_tokens": max_tokens if max_tokens is not None else Config.MAX_OUTPUT_TOKENS,
+            "parallel_tool_calls": False,
+            "reasoning_effort": reasoning_effort,
+            "frequency_penalty": frequency_penalty if frequency_penalty is not None else Config.FREQUENCY_PENALTY,
+            "presence_penalty": presence_penalty if presence_penalty is not None else Config.PRESENCE_PENALTY,
+            "top_p": top_p if top_p is not None else Config.TOP_P,
+        }
+        if tools:
+            body["tools"] = tools
+        # min_p нет в сигнатуре OpenAI-клиента — уходит сырым полем JSON-тела
+        # (llama.cpp / LM Studio). None — не отправлять вообще.
+        if min_p is not None:
+            body["min_p"] = min_p
+
+        http_timeout = httpx.Timeout(
+            connect=10,
+            read=timeout if timeout is not None else Config.TIMEOUT,
+            write=30,
+            pool=10,
+        )
+
+        url = Config.API_URL.rstrip("/") + "/chat/completions"
+
+        try:
+            self._client = httpx.Client(timeout=http_timeout)
+            self._response = self._client.send(
+                self._client.build_request("POST", url, json=body),
+                stream=True,
+            )
+            self._response.raise_for_status()
+            self._iter = self._parse_sse()
+        except Exception as e:
+            if self._client is not None:
+                try:
+                    self._client.close()
+                except Exception:
+                    pass
+
+            def error_generator(err=str(e)):
+                yield {"error": err}
+            self._iter = error_generator()
+
+    def _parse_sse(self):
+        """Парсит SSE-поток в чанки формата OpenAI (SimpleNamespace с choices и usage)."""
+        assert self._response is not None
+        for line in self._response.iter_lines():
+            if self._closed:
+                return
+            line = line.strip()
+            if not line or not line.startswith("data:"):
+                continue
+            data = line[5:].strip()
+            if data == "[DONE]":
+                return
+            try:
+                obj = json.loads(data)
+            except json.JSONDecodeError:
+                continue
+            if "error" in obj:
+                yield {"error": obj["error"]}
+                return
+            yield self._convert_chunk(obj)
+
+    @staticmethod
+    def _convert_chunk(obj: dict):
+        """Конвертирует JSON-чанк OpenAI-формата в SimpleNamespace для StreamAccumulator."""
+        usage = None
+        if obj.get("usage"):
+            u = obj["usage"]
+            usage = SimpleNamespace(
+                prompt_tokens=u.get("prompt_tokens", 0),
+                completion_tokens=u.get("completion_tokens", 0),
+                total_tokens=u.get("total_tokens"),
+            )
+        choices = []
+        for choice_data in obj.get("choices") or []:
+            delta_data = choice_data.get("delta") or {}
+            tool_calls = []
+            for tc in delta_data.get("tool_calls") or []:
+                fn = tc.get("function") or {}
+                tool_calls.append(SimpleNamespace(
+                    index=tc.get("index", 0),
+                    id=tc.get("id"),
+                    function=SimpleNamespace(
+                        name=fn.get("name"),
+                        arguments=fn.get("arguments"),
+                    ),
+                ))
+            delta = SimpleNamespace(
+                content=delta_data.get("content"),
+                reasoning_content=delta_data.get("reasoning_content"),
+                tool_calls=tool_calls or None,
+            )
+            choices.append(SimpleNamespace(delta=delta))
+        return SimpleNamespace(choices=choices, usage=usage)
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        if self._closed:
+            raise StopIteration
+        try:
+            return next(self._iter)
+        except StopIteration:
+            raise
+        except Exception as e:
+            if self._closed:
+                raise StopIteration
+            raise
+
+    def close(self) -> None:
+        """Отмена: shutdown(SHUT_RDWR) на сокете (будит recv), потом close (освобождает).
+
+        Порядок важен: сначала shutdown, потом close. Если сокет не достался — только
+        close + read timeout как страховка."""
+        if self._closed:
+            return
+        self._closed = True
+        if self._response is not None:
+            sock = _get_underlying_socket(self._response)
+            if sock:
+                sock.settimeout(1.0)
+                try:
+                    sock.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+            try:
+                self._response.close()
+            except Exception:
+                pass
+        if self._client is not None:
+            try:
+                self._client.close()
+            except Exception:
+                pass
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
+
 class LLMClient:
-    _client = None
-
-    @classmethod
-    def get_client(cls) -> OpenAI:
-        if cls._client is None:
-            cls._client = OpenAI(api_key="lm-studio", base_url=Config.API_URL)
-        return cls._client
-
     @classmethod
     def close_stream(cls, stream) -> None:
         """Закрывает конкретное соединение стрима. Watchdog'и закрывают ИМЕННО свой
@@ -453,69 +655,78 @@ class LLMClient:
         reasoning_effort: str = "none",
         stop_markers: tuple = (),
     ):
-        """Единая точка обращения к LLM. При заданных стриминговых колбэках и STREAM_ENABLED идёт через стриминг; иначе — обычный chat.completions вызов."""
+        """Единая точка обращения к LLM. Транспорт ВСЕГДА стриминговый (StreamSession):
+        любой вызов отменяем через watchdog — stop_check закрывает соединение. Живой
+        вывод подключается колбэками (callbacks); у служебных вызовов их нет — стрим
+        просто потребляется без показа, но прервать его можно так же. Возвращает
+        (message_obj, error, usage); message_obj.stopped_at_marker отражает попадание
+        стоп-маркера (контент уже обрезан)."""
+        if stop_check and stop_check():
+            return None, "stopped", None
         temp, timeout, top_p, frequency_penalty, presence_penalty, max_tokens, min_p = LLMClient._resolve_params(
             params, temp, timeout, top_p, frequency_penalty, presence_penalty, max_tokens
         )
 
-        messages_to_send = LLMClient._prepare_messages(messages, prefill)
-
         cb = callbacks or {}
-        want_stream = (
-            Config.STREAM_ENABLED
-            and bool(cb.get("on_stream_chunk") or cb.get("on_reasoning_chunk"))
+        session = StreamSession(
+            messages, temp=temp, timeout=timeout, tools=tools,
+            prefill=prefill, top_p=top_p, frequency_penalty=frequency_penalty,
+            presence_penalty=presence_penalty, max_tokens=max_tokens, min_p=min_p,
+            reasoning_effort=reasoning_effort,
+            on_stream_chunk=cb.get("on_stream_chunk"),
+            on_reasoning_start=cb.get("on_reasoning_start"),
+            on_reasoning_chunk=cb.get("on_reasoning_chunk"),
         )
-        if want_stream:
-            session = StreamSession(
-                messages_to_send, temp=temp, timeout=timeout, tools=tools,
-                prefill=prefill, top_p=top_p, frequency_penalty=frequency_penalty,
-                presence_penalty=presence_penalty, max_tokens=max_tokens, min_p=min_p,
-                reasoning_effort=reasoning_effort,
-                on_stream_chunk=cb.get("on_stream_chunk"),
-                on_reasoning_start=cb.get("on_reasoning_start"),
-                on_reasoning_chunk=cb.get("on_reasoning_chunk"),
-            )
-            error, stopped = session.consume(
-                stop_check=stop_check,
-                on_stream_start=cb.get("on_stream_start"),
-                stop_markers=stop_markers,
-            )
-            end_cb = cb.get("on_stream_end")
-            reasoning_end_cb = cb.get("on_reasoning_end")
-            if error:
-                if end_cb:
-                    end_cb()
-                if session.acc.reasoning_started and reasoning_end_cb:
-                    reasoning_end_cb()
-                if stop_check and stop_check():
-                    return None, "stopped: stream unavailable and stop requested", None
-                return None, error, None
+        error, _stopped = session.consume(
+            stop_check=stop_check,
+            on_stream_start=cb.get("on_stream_start"),
+            stop_markers=stop_markers,
+        )
+        end_cb = cb.get("on_stream_end")
+        reasoning_end_cb = cb.get("on_reasoning_end")
+        if error:
             if end_cb:
                 end_cb()
             if session.acc.reasoning_started and reasoning_end_cb:
                 reasoning_end_cb()
-            return session.acc.build_message(prefill), None, session.acc.usage
-
-        result = None
-        if result is None:
-            # Не-стриминговый путь: не начинаем блокирующий вызов, если пользователь
-            # уже запросил остановку (такой вызов прервать невозможно).
             if stop_check and stop_check():
-                return None, "stopped", None
-            result = LLMClient._call_chat_completions(
-                messages_to_send, temp, timeout, tools, prefill, top_p,
-                frequency_penalty, presence_penalty, max_tokens,
-                reasoning_effort=reasoning_effort, min_p=min_p,
-            )
+                return None, "stopped: stream unavailable and stop requested", None
+            return None, error, None
+        if end_cb:
+            end_cb()
+        if session.acc.reasoning_started and reasoning_end_cb:
+            reasoning_end_cb()
+        message = session.acc.build_message(prefill)
+        message.stopped_at_marker = session.stopped_at_marker
+        if Config.DEBUG_LLM_CALLS:
+            LLMClient._debug_log(LLMClient._prepare_messages(messages, prefill),
+                                 (message, None, session.acc.usage))
+        return message, None, session.acc.usage
 
-        if stop_markers and result and result[0] is not None and getattr(result[0], "content", None):
-            # Пост-фактум обрезка по маркеру для не-стримингового пути: чанков нет,
-            # поэтому останавливать нечего — просто отбрасываем «хвост» после маркера.
-            content, _ = apply_stop_markers(result[0].content, stop_markers)
-            result[0].content = content
-
-        LLMClient._debug_log(messages_to_send, result)
-        return result
+    @staticmethod
+    def open_stream(
+        messages: list[dict],
+        temp: float = None,
+        timeout: int = None,
+        tools: list[dict] = None,
+        prefill: str = None,
+        top_p: float = None,
+        frequency_penalty: float = None,
+        presence_penalty: float = None,
+        max_tokens: int = None,
+        min_p: float = None,
+        params: GenerationParams = None,
+        reasoning_effort: str = "none",
+    ):
+        """Открывает сырой итератор чанков через in-process httpx-стрим (`InProcessStream`).
+        Единственная production-точка открытия стрима (`StreamSession`). Отмена —
+        shutdown(SHUT_RDWR) на сокете, будит блокирующий recv."""
+        return InProcessStream(
+            messages, temp=temp, timeout=timeout, tools=tools, prefill=prefill,
+            top_p=top_p, frequency_penalty=frequency_penalty,
+            presence_penalty=presence_penalty, max_tokens=max_tokens, min_p=min_p,
+            params=params, reasoning_effort=reasoning_effort,
+        )
 
     @staticmethod
     def _prepare_messages(messages: list[dict], prefill: Optional[str]) -> list[dict]:
@@ -565,89 +776,3 @@ class LLMClient:
             max_tokens = p.max_tokens if max_tokens is None else max_tokens
             min_p = p.min_p if min_p is None else min_p
         return temp, timeout, top_p, frequency_penalty, presence_penalty, max_tokens, min_p
-
-    @staticmethod
-    def _chat_kwargs(temp, timeout, tools, top_p, frequency_penalty, presence_penalty, max_tokens,
-                     reasoning_effort="none", min_p=None) -> dict:
-        """Общий конструктор параметров chat.completions (для обычного вызова и стрима)."""
-        kwargs = {
-            "model": Config.MODEL_NAME,
-            "temperature": temp if temp is not None else Config.TEMP,
-            "max_tokens": max_tokens if max_tokens is not None else Config.MAX_OUTPUT_TOKENS,
-            "tools": tools,
-            "parallel_tool_calls": False,
-            "timeout": timeout if timeout is not None else Config.TIMEOUT,
-            "reasoning_effort": reasoning_effort,
-            "frequency_penalty": frequency_penalty if frequency_penalty is not None else Config.FREQUENCY_PENALTY,
-            "presence_penalty": presence_penalty if presence_penalty is not None else Config.PRESENCE_PENALTY,
-            "top_p": top_p if top_p is not None else Config.TOP_P,
-        }
-        # min_p нет в сигнатуре OpenAI-клиента — уходит через extra_body (сырое поле
-        # JSON-тела); понимают llama.cpp и LM Studio. None — не отправлять вообще.
-        if min_p is not None:
-            kwargs["extra_body"] = {"min_p": min_p}
-        return kwargs
-
-    @staticmethod
-    def _call_chat_completions(messages_to_send, temp, timeout, tools, prefill, top_p,
-                               frequency_penalty, presence_penalty, max_tokens,
-                               reasoning_effort="none", min_p=None):
-        try:
-            response = LLMClient.get_client().chat.completions.create(
-                messages=messages_to_send,
-                **LLMClient._chat_kwargs(temp, timeout, tools, top_p,
-                                         frequency_penalty, presence_penalty, max_tokens,
-                                         reasoning_effort=reasoning_effort, min_p=min_p),
-            )
-            msg = response.choices[0].message
-            msg.content = apply_prefill(msg.content, prefill)
-
-            usage = None
-            if hasattr(response, 'usage') and response.usage:
-                usage = build_usage_dict(
-                    response.usage.prompt_tokens,
-                    response.usage.completion_tokens,
-                    response.usage.total_tokens,
-                )
-            return msg, None, usage
-        except Exception as e:
-            return None, str(e), None
-
-    @staticmethod
-    def stream(
-        messages: list[dict],
-        temp: float = None,
-        timeout: int = None,
-        tools: list[dict] = None,
-        prefill: str = None,
-        top_p: float = None,
-        frequency_penalty: float = None,
-        presence_penalty: float = None,
-        max_tokens: int = None,
-        min_p: float = None,
-        params: GenerationParams = None,
-        reasoning_effort: str = "none",
-    ):
-        """Streaming version of call() - returns generator of chunks.
-        """
-        temp, timeout, top_p, frequency_penalty, presence_penalty, max_tokens, min_p = LLMClient._resolve_params(
-            params, temp, timeout, top_p, frequency_penalty, presence_penalty, max_tokens, min_p
-        )
-
-        messages_to_send = LLMClient._prepare_messages(messages, prefill)
-
-        try:
-            stream = LLMClient.get_client().chat.completions.create(
-                messages=messages_to_send,
-                **LLMClient._chat_kwargs(temp, timeout, tools, top_p,
-                                         frequency_penalty, presence_penalty, max_tokens,
-                                         reasoning_effort=reasoning_effort, min_p=min_p),
-                stream=True,
-                stream_options={"include_usage": True},
-            )
-            return stream
-        except Exception as e:
-            # Для streaming ошибки возвращаем генератор с ошибкой
-            def error_generator(err=str(e)):
-                yield {"error": err}
-            return error_generator()

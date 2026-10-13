@@ -29,7 +29,8 @@ def dump_project(root_path, exclude_patterns=None):
             '.vscode',
             'dist',
             'build',
-            'code_extractor.py'
+            'code_extractor.py',
+            'tests'
         ]
 
     if not os.path.isdir(root_path):

@@ -106,7 +106,7 @@ class ChatHistory:
         safe_end = end_id
         if safe_start > safe_end:
             return err(" Nothing to delete")
-        prev_last = self.get_last_user_message()
+        last_idx = self._last_user_index()
         del self._messages[safe_start:safe_end + 1]
         self._mark_dirty()
 
@@ -116,10 +116,8 @@ class ChatHistory:
                 content=ok(" All user messages were deleted. Shortly introduce yourself in Russian.")
             ))
 
-        # После удаления могло смениться «последнее» user-сообщение — его кэш-заголовок
-        # соберётся заново (актуальный токен-бюджет), остальные префиксы не трогаем.
-        self._resync_last_user_header(prev_last)
-
+        if last_idx is not None and safe_start <= last_idx:
+            self._resync_last_user_header()
         return ok(f" Successfully deleted messages {start_id} - {end_id}")
 
     def edit_message(self, idx: int, new_text: str, old_text: str = '') -> str:
@@ -135,6 +133,8 @@ class ChatHistory:
                 return err(f": Substr '{old_text}' not found in message {idx}")
             msg.content = msg.content.replace(old_text, new_text, 1)
         if isinstance(msg, UserMessage):
+            # Контент сообщения изменился — его KV и так мёртв, шапку можно пересобрать
+            # бесплатно (товарища по принципу §1.2: инвалидируем только то, что сами и сломали).
             msg.reset_header_cache()
         if not msg.content.strip() and idx >= Config.AFTER_SYSTEM_PROMPT:
             self.delete_range(idx, idx)
@@ -151,7 +151,6 @@ class ChatHistory:
             return
 
         raw = self._messages
-        prev_last = self.get_last_user_message()
         valid = [raw[0]]
 
         # Ищем первое сообщение пользователя
@@ -189,6 +188,9 @@ class ChatHistory:
                 if isinstance(msg, UserMessage) and isinstance(last, UserMessage) and msg.images:
                     last.images = last.images + msg.images
                 if isinstance(last, UserMessage):
+                    # Контент склеенного сообщения изменился — его KV и так мёртв,
+                    # шапку пересобрать бесплатно. Сообщения, которых normalize не тронул,
+                    # сохраняют байт-идентичные заголовки (§1.2).
                     last.reset_header_cache()
                 if isinstance(msg, AssistantMessage) and msg.has_tool_calls():
                     last.tool_calls = last.tool_calls + msg.tool_calls
@@ -196,11 +198,13 @@ class ChatHistory:
 
             valid.append(msg)
 
+        changed = len(valid) != len(raw)
         self._messages = valid
         self._needs_normalize = False
-        # normalize может выкинуть хвостовые ToolResult/Assistant-заглушки — последнее
-        # user-сообщение могло смениться; его кэш-заголовок пересоберём.
-        self._resync_last_user_header(prev_last)
+        # Состав истории изменился (склейка/удаление) — у последнего вопроса устарел
+        # токен-бюджет; пересобираем его шапку (KV от этой точки и так пересобран).
+        if changed:
+            self._resync_last_user_header()
 
     def remove_failed_call_chains(self) -> int:
         """Удаляет цепочки «неудачный вызов -> неудачный вызов» (сохраняя «неудачный -> удачный», чтобы не сбрасывать KV-кэш). Возвращает число удалённых сообщений."""
@@ -347,30 +351,44 @@ class ChatHistory:
         return loaded_tools, file_states, summaries
 
     def get_last_user_message(self) -> Optional[UserMessage]:
+        """Последнее «настоящее» user-сообщение (служебные summary/наг guard'а не в счёт):
+        именно оно получает строку токен-бюджета в своей шапке."""
         for msg in reversed(self._messages):
-            if isinstance(msg, UserMessage):
+            if isinstance(msg, UserMessage) and not msg.is_auxiliary():
                 return msg
         return None
 
-    def _resync_last_user_header(self, prev_last: Optional[UserMessage]) -> None:
-        """Политика инвалидации header-кэша после удаляющих мутаций (delete/remove/replace):
-        сбрасываем кэш ТОЛЬКО у «текущего» последнего user-сообщения и ТОЛЬКО если его
-        «последность» изменилась. При добавлении новых сообщений кэш намеренно НЕ трогаем —
-        старый заголовок с устаревшим токен-бюджетом сохраняет байт-идентичный KV-префикс.
-        Добавление целей для этого правила (новой «последности» с устаревшим заголовком)
-        — регрессия: модель перестаёт видеть строку остатка бюджета на актуальном вопросе."""
+    def _last_user_index(self) -> Optional[int]:
+        """Индекс последнего «настоящего» user-сообщения (служебные summary/наг не в счёт)."""
+        for i in range(len(self._messages) - 1, -1, -1):
+            m = self._messages[i]
+            if isinstance(m, UserMessage) and not m.is_auxiliary():
+                return i
+        return None
+
+    def _resync_last_user_header(self) -> None:
+        """Пересобирает header-кэш текущего последнего user-сообщения после мутации
+        состава истории, меняющей его токен-бюджет.
+
+        Бюджет — снимок: после удаления/сжатия он устаревает (места стало больше) или
+        пропадает (прежний «последний» удалён). Вызывается ТОЛЬКО когда мутация затронула
+        область в начале префикса или сам вопрос — там KV и так мёртв. Мутации строго
+        ПОСЛЕ вопроса (вычистка нага, обрезка хвостовых заглушек) шапку не трогают: их
+        префикс цел, а сдвиг волатильной цифры сбросил бы KV всего хода (§1.2)."""
         new_last = self.get_last_user_message()
-        if new_last is not None and new_last is not prev_last:
+        if new_last is not None:
             new_last.reset_header_cache()
 
     def remove_at(self, indices: Iterable[int]) -> None:
         """Удаляет сообщения по индексам (порядок не важен)."""
-        prev_last = self.get_last_user_message()
-        for idx in sorted(indices, reverse=True):
+        idx_list = list(indices)
+        last_idx = self._last_user_index()
+        for idx in sorted(idx_list, reverse=True):
             if 0 <= idx < len(self._messages):
                 del self._messages[idx]
         self._mark_dirty()
-        self._resync_last_user_header(prev_last)
+        if last_idx is not None and any(i <= last_idx for i in idx_list):
+            self._resync_last_user_header()
 
     def pop_pending_tool_calls(self) -> int:
         """Удаляет висящие tool_calls в конце истории (без результата); возвращает число удалённых. Используется перед суммаризацией, чтобы не тащить незавершённый вызов."""
@@ -404,12 +422,13 @@ class ChatHistory:
 
     def replace_range(self, start: int, end: int, replacement: list[Message]) -> None:
         """Заменяет сообщения [start..end] на replacement."""
-        prev_last = self.get_last_user_message()
+        last_idx = self._last_user_index()
         for m in replacement:
             self._assign_seq(m)
         self._messages[start:end + 1] = replacement
         self._mark_dirty()
-        self._resync_last_user_header(prev_last)
+        if last_idx is not None and start <= last_idx:
+            self._resync_last_user_header()
 
     # --------------------------------------------------------
     # Гибридная память: блоки STATE / EPISODES
@@ -449,8 +468,9 @@ class ChatHistory:
         self._assign_seq(summary_msg)
 
         preserved = msgs[safe_end:]
-        for msg in preserved:
-            if isinstance(msg, UserMessage):
-                msg.reset_header_cache()
         self._messages = [msgs[0], summary_msg] + preserved
         self._mark_dirty()
+        # Компакция вставила summary в начало — весь префикс после неё и так пересобирается,
+        # поэтому честный бюджет на текущем вопросе бесплатен (и обязателен: до-компакционная
+        # цифра занижена). Шапки остальных сохранённых сообщений не трогаем — их байты целы.
+        self._resync_last_user_header()

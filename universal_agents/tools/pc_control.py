@@ -65,7 +65,7 @@ def take_screenshot() -> tuple[str, int, int, int, int, float]:
     img_w, img_h = img.size
     # Масштаб фиксируется здесь же: любой вызовующий (не только @tool-обёртка)
     # обновляет координатное пространство для mouse-инструментов.
-    screen_state.last_scale = scale
+    screen_state.set_last_scale(scale)
     return b64, w, h, img_w, img_h, scale
 
 
@@ -165,7 +165,7 @@ def _current_scale() -> float:
     Приоритет — у масштаба последнего реального скриншота (он знает точную ширину
     захвата, включая мониторы); до первого скриншота считается тем же фингулем,
     что и take_screenshot."""
-    s = screen_state.last_scale
+    s = screen_state.get_last_scale()
     if s is not None and s > 0:
         return s
     w, _ = pyautogui.size()
@@ -327,6 +327,7 @@ def _send_combo(parts: list[str]) -> str | None:
         "описание И изображение. Все координаты в подписях сетки = аргументы mouse/scroll-инструментов."
     ),
     short_description="screenshot with coordinate grid",
+    group="desktop",
 )
 def screenshot() -> ToolOutput:
     b64, orig_w, orig_h, img_w, img_h, scale = take_screenshot()
@@ -345,6 +346,7 @@ def screenshot() -> ToolOutput:
         "последнего скриншота (как подписано на сетке)."
     ),
     short_description="move mouse cursor",
+    group="desktop",
     x=("int", "X-координата на изображении скриншота"),
     y=("int", "Y-координата на изображении скриншота"),
 )
@@ -360,6 +362,7 @@ def mouse_move(x: int, y: int) -> str:
         "(как подписано на сетке)."
     ),
     short_description="click mouse (left/right/middle, optional double)",
+    group="desktop",
     x=("int", "X-координата на изображении скриншота"),
     y=("int", "Y-координата на изображении скриншота"),
     button=("str", "optional: 'left' (по умолчанию), 'right' или 'middle'"),
@@ -387,6 +390,7 @@ def mouse_click(x: int, y: int, button: str = "left", double: bool = False) -> s
 @tool(
     description="Прокрутить колесо мыши. Координаты — в пикселях изображения последнего скриншота.",
     short_description="scroll mouse wheel",
+    group="desktop",
     amount=("int", "Сколько юнитов: >0 — вверх, <0 — вниз"),
     x=("int", "optional: X-координата на изображении (иначе — под текущим курсором)"),
     y=("int", "optional: Y-координата на изображении (иначе — под текущим курсором)"),
@@ -409,6 +413,7 @@ def scroll(amount: int, x: int = None, y: int = None) -> str:
         "чатах, редакторах."
     ),
     short_description="type text into active window",
+    group="desktop",
     text=("str", "Текст для ввода"),
     press_enter=("bool", "optional: нажать Enter после ввода текста"),
 )
@@ -434,6 +439,7 @@ def type_text_on_keyboard(text: str, press_enter: bool = False) -> str:
         "f5; комбинации через '+': ctrl+v, ctrl+c, alt+tab, win+d, shift+tab."
     ),
     short_description="press key or combination",
+    group="desktop",
     keys=("str", "Клавиша или комбинация через '+', напр.: enter, ctrl+v, alt+tab"),
 )
 def press_key(keys: str) -> str:

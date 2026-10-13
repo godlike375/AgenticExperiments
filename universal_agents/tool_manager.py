@@ -50,9 +50,13 @@ class ToolManager:
 
     @property
     def all_known_names(self) -> set[str]:
-        """Имена всех инструментов, доступных к загрузке (даже ещё не загруженных)."""
+        """Имена всех инструментов, доступных к загрузке (даже ещё не загруженных). Скрытые
+        низкоуровневые инструменты (hidden) в набор не входят: модель их не видит."""
         if self._all_known_names is None:
-            self._all_known_names = set(load_external_plugins(_tools_directory()).keys())
+            self._all_known_names = {
+                name for name, func in load_external_plugins(_tools_directory()).items()
+                if not getattr(func, '_tool_hidden', False)
+            }
         return self._all_known_names
 
     @property
@@ -65,7 +69,9 @@ class ToolManager:
         return self._tools_config
 
     def _filter(self) -> None:
-        all_names = set(self._tools_map.keys())
+        # Скрытые низкоуровневые инструменты (hidden=True) не попадают в активную карту:
+        # их вызывает только воркер своей группы, модель их не видит и через load_tool не грузит.
+        all_names = {k for k, v in self._tools_map.items() if not v.get("hidden")}
         if self._tools_config is None:
             active = all_names
         elif isinstance(self._tools_config, list):
@@ -75,6 +81,19 @@ class ToolManager:
         else:
             raise ValueError("Invalid tools_config")
         self._tools_map = {k: v for k, v in self._tools_map.items() if k in active}
+        self._warn_mislabeled_groups()
+
+    def _warn_mislabeled_groups(self) -> None:
+        """Мягкий контроль разметки (docs/TOOL_ISOLATION_SPEC.md §6.1, этап 4): инструмент без
+        параметра-агента, помеченный internal, — вероятная ошибка конфигурации (обычно это
+        внешний инструмент, который надо вынести в группу). Предупреждение, не ошибка —
+        неизолированный legacy-плагин продолжает работать в процессе хоста."""
+        for name, info in self._tools_map.items():
+            if not info.get("has_agent_param") and info.get("group", "internal") == "internal":
+                print(
+                    f"Warning: tool '{name}' has no 'agent' param but is labeled group='internal'. "
+                    f"It will run in the host process; give it an external group to isolate it."
+                )
 
     def is_tool_allowed(self, name: str) -> bool:
         """Проверяет, разрешён ли инструмент tools_config."""
@@ -105,6 +124,8 @@ class ToolManager:
 
         external_tools = load_external_plugins(_tools_directory())
         if name in external_tools:
+            if getattr(external_tools[name], '_tool_hidden', False):
+                return f"Error '{name}' is an internal low-level tool and cannot be loaded."
             self._tools_map[name] = build_tool_dict(external_tools[name], is_instance_method=False)
 
             non_core = [n for n in self._tools_map if n not in CORE_TOOLS]
@@ -122,6 +143,8 @@ class ToolManager:
             return f"'{name}' is already loaded."
         external_tools = load_external_plugins(_tools_directory())
         if name in external_tools:
+            if getattr(external_tools[name], '_tool_hidden', False):
+                return f"Error '{name}' is an internal low-level tool and cannot be loaded."
             self._tools_map[name] = build_tool_dict(external_tools[name], is_instance_method=False)
             non_core = [n for n in self._tools_map if n not in CORE_TOOLS]
             unload_name = _unload_tool_tool.__name__
@@ -204,6 +227,8 @@ class ToolManager:
         available = set(external_tools.keys()) - enabled - MANAGED_TOOLS
         lines = []
         for name in sorted(available):
+            if getattr(external_tools[name], '_tool_hidden', False):
+                continue
             if not self.is_tool_allowed(name):
                 continue
             func = external_tools[name]

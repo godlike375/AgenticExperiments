@@ -121,6 +121,10 @@ class StreamingMixin:
         if self._should_continue_after_divergence(
             watch_prefix, prefill, session.acc.content, _stopped, stop_check,
         ):
+            # При прерывании на расхождении сырой стрим не дочитан: закрываем его
+            # (shutdown на сокете будит recv), иначе он продолжает тянуть сеть,
+            # пока идёт спокойная достройка.
+            LLMClient.close_stream(session._raw)
             return self._continue_stream_after_divergence(
                 messages, tools, prefill, session.acc, watch_continue_temp,
                 reasoning_effort=reasoning_effort, stop_check=stop_check,

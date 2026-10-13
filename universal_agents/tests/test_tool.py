@@ -4,6 +4,12 @@ from universal_agents.main import build_allowed_tools
 from universal_agents.tool import tool, ENVIRONMENT_PREFIX
 from universal_agents.constants import ENVIRONMENT_PREFIX as CONST_PREFIX
 from universal_agents.tool_registry import build_tool_dict
+from universal_agents.tools.fs import line_range_edit as _line_range_edit_tool
+from universal_agents.tools.fs import read as _read_tool
+from universal_agents.tools.builtin import have_done as _have_done_tool
+from universal_agents.tools.builtin import load_tool as _load_tool_tool
+from universal_agents.tools.builtin import make_plan as _make_plan_tool
+from universal_agents.tools.host_shell import run_bash_host as _run_bash_host_tool
 
 
 @tool(description="greet a person", short_description="greet", name=("str", "Name"))
@@ -47,27 +53,27 @@ class TestToolDecorator(unittest.TestCase):
 class TestBuildAllowedTools(unittest.TestCase):
     def test_preloaded_added_without_needing_loadable(self):
         allowed = build_allowed_tools(
-            loadable=["run_bash_host"],
-            preloaded=["read", "edit_file", "load_tool"],
+            loadable=[_run_bash_host_tool.__name__],
+            preloaded=[_read_tool.__name__, _line_range_edit_tool.__name__, _load_tool_tool.__name__],
         )
-        self.assertEqual(allowed, ["run_bash_host", "read", "edit_file", "load_tool"])
+        self.assertEqual(allowed, [_run_bash_host_tool.__name__, _read_tool.__name__, _line_range_edit_tool.__name__, _load_tool_tool.__name__])
 
     def test_no_duplicates(self):
         allowed = build_allowed_tools(
-            loadable=["read", "run_bash_host"],
-            preloaded=["read", "load_tool"],
+            loadable=[_read_tool.__name__, _run_bash_host_tool.__name__],
+            preloaded=[_read_tool.__name__, _load_tool_tool.__name__],
         )
-        self.assertEqual(allowed, ["read", "run_bash_host", "load_tool"])
+        self.assertEqual(allowed, [_read_tool.__name__, _run_bash_host_tool.__name__, _load_tool_tool.__name__])
 
     def test_preloaded_not_required_in_loadable(self):
         # Ключевой сценарий: предзагруженный инструмент отсутствует в LOADABLE_TOOLS,
         # но всё равно попадает в allow-список (иначе ToolManager его отфильтрует).
         allowed = build_allowed_tools(
-            loadable=["run_bash_host"],
-            preloaded=["make_plan", "have_done"],
+            loadable=[_run_bash_host_tool.__name__],
+            preloaded=[_make_plan_tool.__name__, _have_done_tool.__name__],
         )
-        self.assertIn("make_plan", allowed)
-        self.assertIn("have_done", allowed)
+        self.assertIn(_make_plan_tool.__name__, allowed)
+        self.assertIn(_have_done_tool.__name__, allowed)
 
 
 if __name__ == "__main__":

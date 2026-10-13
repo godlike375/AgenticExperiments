@@ -2,12 +2,14 @@ import unittest
 from types import SimpleNamespace
 from unittest import mock
 
-from universal_agents.agent import LLMAgent, MAX_CONSECUTIVE_ERRORS, _REPEAT_ANSWER_NAG
+from universal_agents.agent import LLMAgent, MAX_CONSECUTIVE_ERRORS, _CONFIRMATION_GUARD_VERDICT, _REPEAT_ANSWER_NAG
 from universal_agents.config import Config
 from universal_agents.constants import INTERRUPT_HEADER, err
 from universal_agents.llm_client import text_hash
 from universal_agents.models import AssistantMessage, ToolCall, ToolResult, UserMessage
 from universal_agents.tool import tool
+from universal_agents.tools.builtin import respond_to_system as _respond_to_system
+from universal_agents.tools.fs import read as _read_tool
 
 from tests.conftest import double_me
 
@@ -142,7 +144,7 @@ class TestPriorTextHashes(unittest.TestCase):
         agent = LLMAgent(system_prompt="sys")
         agent.history.add(UserMessage("q"))
         agent.history.add(AssistantMessage(content="ans", reasoning_content="think"))
-        agent.history.add(ToolResult.success("t1", "read", "ok"))
+        agent.history.add(ToolResult.success("t1", _read_tool.__name__, "ok"))
         t, r = agent._get_prior_text_hashes()
         self.assertEqual(t, {text_hash("ans")})
         self.assertEqual(r, {text_hash("think")})
@@ -154,6 +156,63 @@ class TestPriorTextHashes(unittest.TestCase):
         t, r = agent._get_prior_text_hashes()
         self.assertEqual(t, set())
         self.assertEqual(r, set())
+
+
+class TestConfirmationGuardVerdict(unittest.TestCase):
+    """Приоритет guard'а pending-операции над детектором дублей (§1.11): повтор текста при
+    висящей операции — не «дубль качества», а невыполненный протокол подтверждения. Повтор
+    шапки вместе с правильным вызовом respond_to_system — выполнение протокола, не дубль."""
+
+    def setUp(self):
+        self.agent = LLMAgent(system_prompt="sys")
+        self.agent.history.add(UserMessage("q"))
+        self.agent.history.add(AssistantMessage(content="Подтверждаю."))
+        self.agent.set_pending_operation({"_type": "test"})
+
+    def test_text_duplicate_while_pending_is_confirmation_guard_verdict(self):
+        msg = AssistantMessage(content="Подтверждаю.")
+        verdict = self.agent._detect_duplicate(msg)
+        self.assertIsNotNone(verdict)
+        self.assertEqual(verdict[0], _CONFIRMATION_GUARD_VERDICT)
+
+    def test_answer_duplicate_from_jaccard_while_pending_is_confirmation_guard_verdict(self):
+        prior = AssistantMessage(content="Я подтверждаю правку файла")
+        close = AssistantMessage(content="Я подтверждаю правку файла полностью")
+        agent = LLMAgent(system_prompt="sys")
+        agent.history.add(UserMessage("q"))
+        agent.history.add(prior)
+        agent.set_pending_operation({"op": 1})
+        verdict = agent._detect_duplicate(close)
+        self.assertIsNotNone(verdict)
+        self.assertEqual(verdict[0], _CONFIRMATION_GUARD_VERDICT)
+
+    def test_confirm_call_with_plate_text_while_pending_is_not_duplicate(self):
+        msg = AssistantMessage(
+            content="Подтверждаю.",
+            tool_calls=[ToolCall(id="c2", name=_respond_to_system.__name__, arguments='{"text": "yes"}')],
+        )
+        self.assertIsNone(self.agent._detect_duplicate(msg),
+                         "Правильный вызов ответа подтверждения с повторённой шапкой не должен "
+                         "отбрасываться детектором дублей — иначе подтверждение не наступает никогда")
+
+    def test_wrong_tool_call_with_plate_text_while_pending_stays_duplicate(self):
+        msg = AssistantMessage(
+            content="Подтверждаю.",
+            tool_calls=[ToolCall(id="c2", name=_read_tool.__name__, arguments='{"path": "x.txt"}')],
+        )
+        verdict = self.agent._detect_duplicate(msg)
+        self.assertIsNotNone(verdict)
+        self.assertEqual(verdict[0], 'answer',
+                         "Чужой инструмент при висящем pending — это дубль-пластинка, "
+                         "вердикт уходит в лестницу дублей/guard по пути tool_calls")
+
+    def test_text_duplicate_without_pending_stays_answer(self):
+        agent = LLMAgent(system_prompt="sys")
+        agent.history.add(UserMessage("q"))
+        agent.history.add(AssistantMessage(content="Подтверждаю."))
+        verdict = agent._detect_duplicate(AssistantMessage(content="Подтверждаю."))
+        self.assertIsNotNone(verdict)
+        self.assertEqual(verdict[0], 'answer')
 
 
 class TestDuplicateTextAcrossHistory(unittest.TestCase):
@@ -344,7 +403,7 @@ class TestDuplicateEscalation(unittest.TestCase):
                     delta = SimpleNamespace(content=piece, tool_calls=None, reasoning_content=None)
                     yield SimpleNamespace(choices=[SimpleNamespace(delta=delta)])
 
-        with mock.patch("universal_agents.agent.LLMClient.stream", side_effect=fake_stream):
+        with mock.patch("universal_agents.agent.LLMClient.open_stream", side_effect=fake_stream):
             result = agent.chat("q2")
         self.assertEqual(result, "a different answer")
         # стрим открывался на каждую попытку (дубль + свежий ответ), дубль отброшен без достройки

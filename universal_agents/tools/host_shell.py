@@ -5,7 +5,6 @@ from __future__ import annotations
 import os
 import shutil
 import sys
-import time
 
 from universal_agents.tool import tool
 from universal_agents.constants import err
@@ -86,14 +85,28 @@ def _build_bash_command(command: str) -> list[str]:
                 "will trigger a user confirmation prompt for safety. Paths inside the project run without prompting.",
     short_description="run powershell on host",
     path_safety=True,
+    self_truncating=True,
+    group="workspace",
     command=("str", "The PowerShell command to run"),
     timeout=("int", "Optional timeout in seconds (default 60)"),
 )
 def run_powershell(command: str, timeout: int = 60) -> str:
-    pwsh = shutil.which("pwsh") or shutil.which("powershell")
-    if not pwsh:
-        return err(" PowerShell executable not found")
-    output = run_capture([pwsh, "-NoProfile", "-NonInteractive", "-Command", command], timeout)
+    pwsh = shutil.which("pwsh")
+    if pwsh:
+        # PowerShell 7+ в pipe отдаёт UTF-8 — команду не трогаем.
+        output = run_capture([pwsh, "-NoProfile", "-NonInteractive", "-Command", command], timeout)
+    else:
+        legacy = shutil.which("powershell")
+        if not legacy:
+            return err(" PowerShell executable not found")
+        # PowerShell 5.1 в pipe отдаёт OEM-кодировку системы (на ru-RU — cp866), а не UTF-8.
+        # Не подмешиваем префикс к команде (это меняет её семантику), а просим run_capture
+        # декодировать сырые байты с фолбэком на OEM ("oem" резолвится в текущую OEM-CP).
+        output = run_capture(
+            [legacy, "-NoProfile", "-NonInteractive", "-Command", command],
+            timeout,
+            fallback_encoding="oem",
+        )
     return truncate_middle(output)
 
 
@@ -104,6 +117,8 @@ def run_powershell(command: str, timeout: int = 60) -> str:
                 "will trigger a user confirmation prompt for safety. Paths inside the project run without prompting.",
     short_description="run bash on host",
     path_safety=True,
+    self_truncating=True,
+    group="workspace",
     command=("str", "The bash command to run"),
     timeout=("int", "Optional timeout in seconds (default 60)"),
 )

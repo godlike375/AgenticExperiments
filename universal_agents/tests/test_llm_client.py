@@ -18,49 +18,28 @@ from universal_agents.llm_client import (
 from universal_agents.agent_mixins.response_mixin import _NO_COMMENT_PREFILL
 from universal_agents.models import AssistantMessage, ToolCall, ToolResult, UserMessage
 from universal_agents.task_tracker import PLAN_TOOL
+from universal_agents.tools.fs import line_range_edit as _line_range_edit_tool
+from universal_agents.tools.fs import read as _read_tool
+from universal_agents.tools.fs import search as _search_tool
+from universal_agents.tools.builtin import have_done as _have_done_tool
+from universal_agents.tools.host_shell import run_bash_host as _run_bash_host_tool
 
 
 from tests.conftest import stream_chunk, stream_delta
 
 
-class TestStream(unittest.TestCase):
-    def test_stream_returns_error_generator(self):
-        fake_client = mock.Mock()
-        fake_client.chat.completions.create.side_effect = RuntimeError("boom")
-        with mock.patch("universal_agents.llm_client.LLMClient.get_client", return_value=fake_client):
-            gen = LLMClient.stream([{"role": "user", "content": "hi"}])
-        self.assertEqual(next(gen), {"error": "boom"})
-
-    def test_stream_passes_params_and_prefill(self):
-        expected = [SimpleNamespace(choices=[], usage=None)]
-        fake_client = mock.Mock()
-        fake_client.chat.completions.create.return_value = iter(expected)
-        with mock.patch("universal_agents.llm_client.LLMClient.get_client", return_value=fake_client):
-            gen = LLMClient.stream(
-                [{"role": "user", "content": "hi"}],
-                prefill="You:",
-                params=GenerationParams(temp=0.3, max_tokens=100),
-            )
-            self.assertEqual(list(gen), expected)
-        kwargs = fake_client.chat.completions.create.call_args.kwargs
-        self.assertEqual(kwargs["stream"], True)
-        self.assertEqual(kwargs["temperature"], 0.3)
-        self.assertEqual(kwargs["max_tokens"], 100)
-        self.assertEqual(kwargs["messages"][-1], {"role": "assistant", "content": "You:"})
-
-
 class TestCall(unittest.TestCase):
-    def _fake_response(self, content="world"):
-        msg = SimpleNamespace(content=content, tool_calls=None)
-        return SimpleNamespace(
-            choices=[SimpleNamespace(message=msg)],
-            usage=SimpleNamespace(prompt_tokens=5, completion_tokens=3, total_tokens=8),
-        )
+    def _fake_stream_chunks(self, content="world", usage=None):
+        if usage is None:
+            usage = SimpleNamespace(prompt_tokens=5, completion_tokens=3, total_tokens=8)
+        return iter([stream_chunk(stream_delta(content=content), usage=usage)])
 
-    def test_call_chat_completions_prefill_and_usage(self):
-        fake_client = mock.Mock()
-        fake_client.chat.completions.create.return_value = self._fake_response()
-        with mock.patch("universal_agents.llm_client.LLMClient.get_client", return_value=fake_client):
+    def test_call_streams_and_applies_prefill_and_usage(self):
+        """call() ВСЕГДА идёт через стриминговый транспорт: prefill дописывается к
+        ответу, usage собирается из чанка. Разбор тела HTTP-запроса — в
+        tests/test_in_process_stream.py."""
+        with mock.patch("universal_agents.llm_client.LLMClient.open_stream",
+                        return_value=self._fake_stream_chunks()):
             result, err, usage = LLMClient.call(
                 [{"role": "user", "content": "hi"}],
                 prefill="start ",
@@ -68,93 +47,123 @@ class TestCall(unittest.TestCase):
         self.assertIsNone(err)
         self.assertEqual(result.content, "start world")
         self.assertEqual(usage["total_tokens"], 8)
-        last_msg = fake_client.chat.completions.create.call_args.kwargs["messages"][-1]
-        self.assertEqual(last_msg["role"], "assistant")
 
     def test_call_resolves_params(self):
-        fake_client = mock.Mock()
-        fake_client.chat.completions.create.return_value = self._fake_response()
-        with mock.patch("universal_agents.llm_client.LLMClient.get_client", return_value=fake_client):
+        captured = {}
+
+        def fake_open(messages, **kwargs):
+            captured.update(kwargs)
+            return self._fake_stream_chunks()
+
+        with mock.patch("universal_agents.llm_client.LLMClient.open_stream", side_effect=fake_open):
             LLMClient.call([{"role": "user", "content": "hi"}], params=GenerationParams(temp=0.9))
-        kwargs = fake_client.chat.completions.create.call_args.kwargs
-        self.assertEqual(kwargs["temperature"], 0.9)
+        self.assertEqual(captured["temp"], 0.9)
 
     def test_call_returns_error_tuple(self):
-        fake_client = mock.Mock()
-        fake_client.chat.completions.create.side_effect = RuntimeError("down")
-        with mock.patch("universal_agents.llm_client.LLMClient.get_client", return_value=fake_client):
+        with mock.patch("universal_agents.llm_client.LLMClient.open_stream",
+                        return_value=iter([{"error": "down"}])):
             result, err, usage = LLMClient.call([{"role": "user", "content": "hi"}])
         self.assertIsNone(result)
-        self.assertEqual(err, "down")
+        self.assertIn("down", err)
         self.assertIsNone(usage)
 
-    def test_stream_failure_no_blocking_fallback_when_stopped(self):
-        """Если стрим не создался и пользователь запросил остановку, call() не должен
-        скатываться в блокирующий _call_chat_completions (его прервать нельзя)."""
-        fake_client = mock.Mock()
-        fake_client.chat.completions.create.side_effect = RuntimeError("boom")
-        with mock.patch("universal_agents.llm_client.LLMClient.get_client", return_value=fake_client), \
-                mock.patch.object(Config, "STREAM_ENABLED", True), \
-                mock.patch("universal_agents.llm_client.LLMClient._call_chat_completions") as blocking:
+    def test_stop_before_start_returns_stopped(self):
+        """Stop запрошен ещё до старта — транспорт не создаётся вовсе, вердикт «stopped»."""
+        with mock.patch("universal_agents.llm_client.LLMClient.open_stream") as mocked:
             result, err, usage = LLMClient.call(
                 [{"role": "user", "content": "hi"}],
-                callbacks={"on_stream_chunk": lambda c: None},
                 stop_check=lambda: True,
             )
-        blocking.assert_not_called()
+        mocked.assert_not_called()
+        self.assertIsNone(result)
+        self.assertEqual(err, "stopped")
+        self.assertIsNone(usage)
+
+    def test_stop_during_blocking_call_returns_control_immediately(self):
+        """Стрим, заблокированный на ожидании первого чанка, прерывается watchdog'ом по
+        stop_check: управление возвращается немедленно, без ожидания Config.TIMEOUT.
+
+        Единый стриминговый транспорт (п.4) заменяет прежний `_run_interruptible`:
+        остановка закрывает соединение, а не ждёт блокирующий вызов в потоке-демоне."""
+        class BlockingStream:
+            def __init__(self):
+                self.released = threading.Event()
+
+            def __next__(self):
+                while not self.released.wait(0.02):
+                    pass
+                raise StopIteration
+
+            def close(self):
+                self.released.set()
+
+        stream = BlockingStream()
+        stop = threading.Event()
+        with mock.patch("universal_agents.llm_client.LLMClient.open_stream", return_value=stream):
+            timer = threading.Timer(0.2, stop.set)
+            timer.start()
+            started = time.monotonic()
+            result, err, usage = LLMClient.call(
+                [{"role": "user", "content": "hi"}],
+                stop_check=stop.is_set,
+            )
+            elapsed = time.monotonic() - started
+            timer.cancel()
+        self.assertLess(elapsed, 1.0, "ожидание должно прерваться по stop_check, а не по таймауту")
+        self.assertTrue(stream.released.is_set(), "watchdog не закрыл стрим")
         self.assertIsNone(result)
         self.assertIn("stopped", err)
 
+    def test_blocking_call_error_returns_error_tuple(self):
+        """Ошибка внутри потребления стрима не разрывает вызывающего, а возвращается
+        кортежем ошибки (единый контракт call())."""
+        def broken_stream():
+            if True:
+                raise RuntimeError("down")
+            yield  # pragma: no cover
+
+        with mock.patch("universal_agents.llm_client.LLMClient.open_stream", return_value=broken_stream()):
+            result, err, usage = LLMClient.call(
+                [{"role": "user", "content": "hi"}],
+                stop_check=lambda: False,
+            )
+        self.assertIsNone(result)
+        self.assertIn("down", err)
+        self.assertIsNone(usage)
+
+    def test_blocking_call_completes_normally(self):
+        with mock.patch("universal_agents.llm_client.LLMClient.open_stream",
+                        return_value=self._fake_stream_chunks()):
+            result, err, usage = LLMClient.call(
+                [{"role": "user", "content": "hi"}],
+                stop_check=lambda: False,
+            )
+        self.assertIsNone(err)
+        self.assertEqual(result.content, "world")
+
     def test_stream_creation_failure_keeps_error_no_blocking_fallback(self):
-        """Недоступный стрим возвращает кортеж ошибки (не None), чтобы call() пошёл по
-        пути ошибки, а не в блокирующий обычный вызов."""
-        fake_client = mock.Mock()
-        fake_client.chat.completions.create.side_effect = RuntimeError("boom")
-        with mock.patch("universal_agents.llm_client.LLMClient.get_client", return_value=fake_client), \
-                mock.patch.object(Config, "STREAM_ENABLED", True), \
-                mock.patch("universal_agents.llm_client.LLMClient._call_chat_completions") as blocking:
+        """Недоступный стрим возвращает кортеж ошибки (не None): служебный вызов идёт
+        по пути ошибки, а не в неотменяемый обычный вызов (такого пути больше нет)."""
+        with mock.patch("universal_agents.llm_client.LLMClient.open_stream",
+                        return_value=iter([{"error": "boom"}])):
             result, err, usage = LLMClient.call(
                 [{"role": "user", "content": "hi"}],
                 callbacks={"on_stream_chunk": lambda c: None},
             )
-        blocking.assert_not_called()
         self.assertIsNone(result)
         self.assertIn("stream creation failed", err)
-
-    def test_min_p_sent_via_extra_body(self):
-        """min_p нет в сигнатуре OpenAI-клиента — уходит сырым полем тела запроса."""
-        fake_client = mock.Mock()
-        fake_client.chat.completions.create.return_value = self._fake_response()
-        with mock.patch("universal_agents.llm_client.LLMClient.get_client", return_value=fake_client):
-            LLMClient.call(
-                [{"role": "user", "content": "hi"}],
-                params=GenerationParams(min_p=0.1),
-            )
-        kwargs = fake_client.chat.completions.create.call_args.kwargs
-        self.assertEqual(kwargs.get("extra_body"), {"min_p": 0.1})
-
-    def test_min_p_omitted_by_default(self):
-        """Без настройки min_p поле вообще не отправляется (сервер решит сам)."""
-        fake_client = mock.Mock()
-        fake_client.chat.completions.create.return_value = self._fake_response()
-        with mock.patch("universal_agents.llm_client.LLMClient.get_client", return_value=fake_client), \
-                mock.patch.object(Config, "MIN_P", None):
-            LLMClient.call([{"role": "user", "content": "hi"}])
-        kwargs = fake_client.chat.completions.create.call_args.kwargs
-        self.assertNotIn("extra_body", kwargs)
-        self.assertNotIn("min_p", kwargs)
+        self.assertIn("boom", err)
 
 
 class TestStreamSession(unittest.TestCase):
     """StreamSession: единый потребитель стрима (watchdog + чанковый цикл)."""
 
     def test_consume_returns_content(self):
-        fake_client = mock.Mock()
-        fake_client.chat.completions.create.return_value = iter([
+        chunks = iter([
             stream_chunk(SimpleNamespace(content="hello", tool_calls=None, reasoning_content=None)),
             stream_chunk(SimpleNamespace(content=" world", tool_calls=None, reasoning_content=None)),
         ])
-        with mock.patch("universal_agents.llm_client.LLMClient.get_client", return_value=fake_client):
+        with mock.patch("universal_agents.llm_client.LLMClient.open_stream", return_value=chunks):
             session = StreamSession(
                 [{"role": "user", "content": "hi"}],
                 on_stream_chunk=lambda _: None,
@@ -184,7 +193,7 @@ class TestStreamSession(unittest.TestCase):
         def stop():
             return processed[0] >= 2
 
-        with mock.patch("universal_agents.llm_client.LLMClient.stream", return_value=generator()), \
+        with mock.patch("universal_agents.llm_client.LLMClient.open_stream", return_value=generator()), \
              mock.patch("universal_agents.llm_client.LLMClient.close_stream", side_effect=track_close):
             session = StreamSession(
                 [{"role": "user", "content": "hi"}],
@@ -213,7 +222,7 @@ class TestStreamSession(unittest.TestCase):
                 released.set()
 
         stop_evt = threading.Event()
-        with mock.patch("universal_agents.llm_client.LLMClient.stream", return_value=BlockingStream()):
+        with mock.patch("universal_agents.llm_client.LLMClient.open_stream", return_value=BlockingStream()):
             session = StreamSession(
                 [{"role": "user", "content": "hi"}],
                 on_stream_chunk=lambda _: None,
@@ -234,7 +243,7 @@ class TestStreamSession(unittest.TestCase):
 
     def test_consume_stop_already_set_returns_stopped(self):
         """Если stop запрошен ещё до начала потребления — блокирующий цикл не начинается."""
-        with mock.patch("universal_agents.llm_client.LLMClient.stream",
+        with mock.patch("universal_agents.llm_client.LLMClient.open_stream",
                         return_value=iter([stream_chunk(SimpleNamespace(content="never", tool_calls=None, reasoning_content=None))])):
             session = StreamSession(
                 [{"role": "user", "content": "hi"}],
@@ -349,30 +358,30 @@ class TestLoopDetector(unittest.TestCase):
     def test_detects_duplicate_in_turn(self):
         history = [
             UserMessage("hi"),
-            AssistantMessage(content="", tool_calls=[ToolCall(id="t1", name="read", arguments="{}")]),
+            AssistantMessage(content="", tool_calls=[ToolCall(id="t1", name=_read_tool.__name__, arguments="{}")]),
         ]
-        self.assertTrue(self.detector.check_duplicate_in_turn("read", "{}", history))
+        self.assertTrue(self.detector.check_duplicate_in_turn(_read_tool.__name__, "{}", history))
 
     def test_ignores_calls_before_user_message(self):
         history = [
-            AssistantMessage(content="", tool_calls=[ToolCall(id="t1", name="read", arguments="{}")]),
+            AssistantMessage(content="", tool_calls=[ToolCall(id="t1", name=_read_tool.__name__, arguments="{}")]),
             UserMessage("hi"),
-            AssistantMessage(content="", tool_calls=[ToolCall(id="t2", name="search", arguments="{}")]),
+            AssistantMessage(content="", tool_calls=[ToolCall(id="t2", name=_search_tool.__name__, arguments="{}")]),
         ]
         # read вызывался до начала хода — не считается дублем
-        self.assertFalse(self.detector.check_duplicate_in_turn("read", "{}", history))
+        self.assertFalse(self.detector.check_duplicate_in_turn(_read_tool.__name__, "{}", history))
         # search уже вызван в текущем ходу с теми же аргументами — дубль
-        self.assertTrue(self.detector.check_duplicate_in_turn("search", "{}", history))
+        self.assertTrue(self.detector.check_duplicate_in_turn(_search_tool.__name__, "{}", history))
         # другие аргументы — не дубль
-        self.assertFalse(self.detector.check_duplicate_in_turn("search", '{"x": 1}', history))
+        self.assertFalse(self.detector.check_duplicate_in_turn(_search_tool.__name__, '{"x": 1}', history))
 
     def test_detects_semantically_duplicate_after_user(self):
         history = [
             UserMessage("hi"),
-            AssistantMessage(content="", tool_calls=[ToolCall(id="t1", name="read", arguments='{"a": 1}')]),
+            AssistantMessage(content="", tool_calls=[ToolCall(id="t1", name=_read_tool.__name__, arguments='{"a": 1}')]),
         ]
-        self.assertTrue(self.detector.check_duplicate_in_turn("read", '{ "a" : 1 }', history))
-        self.assertFalse(self.detector.check_duplicate_in_turn("read", '{"a": 2}', history))
+        self.assertTrue(self.detector.check_duplicate_in_turn(_read_tool.__name__, '{ "a" : 1 }', history))
+        self.assertFalse(self.detector.check_duplicate_in_turn(_read_tool.__name__, '{"a": 2}', history))
 
     def test_repeated_make_plan_same_args_is_loop(self):
         history = [
@@ -397,54 +406,54 @@ class TestLoopDetector(unittest.TestCase):
     def test_make_plan_resets_duplicate_scan_for_other_tools(self):
         history = [
             UserMessage("do the task"),
-            AssistantMessage(content="", tool_calls=[ToolCall(id="r", name="read", arguments="{}")]),
+            AssistantMessage(content="", tool_calls=[ToolCall(id="r", name=_read_tool.__name__, arguments="{}")]),
             AssistantMessage(content="", tool_calls=[
                 ToolCall(id="c1", name=PLAN_TOOL, arguments='{"plan":[{"id":"t1","title":"X"}]}')
             ]),
         ]
         # Повторный read ПОСЛЕ make_plan не считается дублем (ревизия = граница контекста)
-        self.assertFalse(self.detector.check_duplicate_in_turn("read", "{}", history))
+        self.assertFalse(self.detector.check_duplicate_in_turn(_read_tool.__name__, "{}", history))
 
     def test_failed_call_is_not_duplicate(self):
         # have_done отклонён (NO-WORK-DONE) → повторный вызов после работы не дубль
         history = [
             UserMessage("do the task"),
-            AssistantMessage(content="", tool_calls=[ToolCall(id="t1", name="have_done", arguments='{"id":"a1"}')]),
-            ToolResult.error("t1", "have_done", "NO-WORK-DONE: you marked done but did nothing"),
-            AssistantMessage(content="", tool_calls=[ToolCall(id="r", name="run_bash_host", arguments="{}")]),
-            ToolResult.success("r", "run_bash_host", "done"),
+            AssistantMessage(content="", tool_calls=[ToolCall(id="t1", name=_have_done_tool.__name__, arguments='{"id":"a1"}')]),
+            ToolResult.error("t1", _have_done_tool.__name__, "NO-WORK-DONE: you marked done but did nothing"),
+            AssistantMessage(content="", tool_calls=[ToolCall(id="r", name=_run_bash_host_tool.__name__, arguments="{}")]),
+            ToolResult.success("r", _run_bash_host_tool.__name__, "done"),
         ]
-        self.assertFalse(self.detector.check_duplicate_in_turn("have_done", '{"id":"a1"}', history))
+        self.assertFalse(self.detector.check_duplicate_in_turn(_have_done_tool.__name__, '{"id":"a1"}', history))
 
     def test_succeeded_call_still_counts_as_duplicate(self):
         # успешный вызов с теми же аргументами — дубль (реального прогресса не было)
         history = [
             UserMessage("do the task"),
-            AssistantMessage(content="", tool_calls=[ToolCall(id="t1", name="read", arguments="{}")]),
-            ToolResult.success("t1", "read", "ok"),
+            AssistantMessage(content="", tool_calls=[ToolCall(id="t1", name=_read_tool.__name__, arguments="{}")]),
+            ToolResult.success("t1", _read_tool.__name__, "ok"),
         ]
-        self.assertTrue(self.detector.check_duplicate_in_turn("read", "{}", history))
+        self.assertTrue(self.detector.check_duplicate_in_turn(_read_tool.__name__, "{}", history))
 
     def test_duplicate_after_other_tool_is_not_loop(self):
         # Если между двумя одинаковыми вызовами был другой инструмент — это не зацикливание.
         history = [
             UserMessage("do the task"),
-            AssistantMessage(content="", tool_calls=[ToolCall(id="t1", name="edit_file", arguments='{"path":"x.txt"}')]),
-            ToolResult.success("t1", "edit_file", "ok"),
-            AssistantMessage(content="", tool_calls=[ToolCall(id="t2", name="read", arguments='{"path":"x.txt"}')]),
-            ToolResult.success("t2", "read", "content"),
+            AssistantMessage(content="", tool_calls=[ToolCall(id="t1", name=_line_range_edit_tool.__name__, arguments='{"path":"x.txt"}')]),
+            ToolResult.success("t1", _line_range_edit_tool.__name__, "ok"),
+            AssistantMessage(content="", tool_calls=[ToolCall(id="t2", name=_read_tool.__name__, arguments='{"path":"x.txt"}')]),
+            ToolResult.success("t2", _read_tool.__name__, "content"),
         ]
-        self.assertFalse(self.detector.check_duplicate_in_turn("edit_file", '{"path":"x.txt"}', history))
+        self.assertFalse(self.detector.check_duplicate_in_turn(_line_range_edit_tool.__name__, '{"path":"x.txt"}', history))
 
     def test_consecutive_same_call_is_still_duplicate(self):
         # Два одинаковых вызова подряд (без другого инструмента между ними) — дубль
         history = [
             UserMessage("do the task"),
-            AssistantMessage(content="", tool_calls=[ToolCall(id="t1", name="edit_file", arguments='{"path":"x.txt"}')]),
-            ToolResult.success("t1", "edit_file", "ok"),
-            AssistantMessage(content="", tool_calls=[ToolCall(id="t2", name="edit_file", arguments='{"path":"x.txt"}')]),
+            AssistantMessage(content="", tool_calls=[ToolCall(id="t1", name=_line_range_edit_tool.__name__, arguments='{"path":"x.txt"}')]),
+            ToolResult.success("t1", _line_range_edit_tool.__name__, "ok"),
+            AssistantMessage(content="", tool_calls=[ToolCall(id="t2", name=_line_range_edit_tool.__name__, arguments='{"path":"x.txt"}')]),
         ]
-        self.assertTrue(self.detector.check_duplicate_in_turn("edit_file", '{"path":"x.txt"}', history))
+        self.assertTrue(self.detector.check_duplicate_in_turn(_line_range_edit_tool.__name__, '{"path":"x.txt"}', history))
 
 
 class TestTokenUsageTracker(unittest.TestCase):
@@ -478,7 +487,7 @@ class TestStreamSessionStopMarkers(unittest.TestCase):
             yield stream_chunk(SimpleNamespace(content="</structure> more stuff", tool_calls=None, reasoning_content=None))
             yield stream_chunk(SimpleNamespace(content=" never seen", tool_calls=None, reasoning_content=None))
 
-        with mock.patch("universal_agents.llm_client.LLMClient.stream", return_value=stream()), \
+        with mock.patch("universal_agents.llm_client.LLMClient.open_stream", return_value=stream()), \
              mock.patch("universal_agents.llm_client.LLMClient.close_stream"):
             session = StreamSession(
                 [{"role": "user", "content": "hi"}],
@@ -495,7 +504,7 @@ class TestStreamSessionStopMarkers(unittest.TestCase):
         def stream():
             yield stream_chunk(SimpleNamespace(content="no marker", tool_calls=None, reasoning_content=None))
 
-        with mock.patch("universal_agents.llm_client.LLMClient.stream", return_value=stream()):
+        with mock.patch("universal_agents.llm_client.LLMClient.open_stream", return_value=stream()):
             session = StreamSession(
                 [{"role": "user", "content": "hi"}],
                 on_stream_chunk=lambda _: None,
@@ -510,7 +519,7 @@ class TestStreamSessionStopMarkers(unittest.TestCase):
         def stream():
             yield stream_chunk(SimpleNamespace(content="<tag>\n</tag>", tool_calls=None, reasoning_content=None))
 
-        with mock.patch("universal_agents.llm_client.LLMClient.stream", return_value=stream()), \
+        with mock.patch("universal_agents.llm_client.LLMClient.open_stream", return_value=stream()), \
              mock.patch("universal_agents.llm_client.LLMClient.close_stream"):
             session = StreamSession(
                 [{"role": "user", "content": "hi"}],
@@ -531,7 +540,7 @@ class TestStreamSessionStopMarkers(unittest.TestCase):
                 processed[0] += 1
                 yield stream_chunk(SimpleNamespace(content=c, tool_calls=None, reasoning_content=None))
 
-        with mock.patch("universal_agents.llm_client.LLMClient.stream", return_value=stream()), \
+        with mock.patch("universal_agents.llm_client.LLMClient.open_stream", return_value=stream()), \
              mock.patch("universal_agents.llm_client.LLMClient.close_stream"):
             session = StreamSession(
                 [{"role": "user", "content": "hi"}],
@@ -547,33 +556,30 @@ class TestStreamSessionStopMarkers(unittest.TestCase):
 
 
 class TestCallWithStopMarkers(unittest.TestCase):
-    def _fake_response(self, content):
-        msg = SimpleNamespace(content=content, tool_calls=None)
-        return SimpleNamespace(
-            choices=[SimpleNamespace(message=msg)],
-            usage=None,
-        )
+    def _stream(self, content):
+        return iter([stream_chunk(stream_delta(content=content))])
 
-    def test_nonstream_truncates_at_marker(self):
-        fake_client = mock.Mock()
-        fake_client.chat.completions.create.return_value = self._fake_response(
-            "<tag>\ndata\n</tag>\nanalysis"
-        )
-        with mock.patch("universal_agents.llm_client.LLMClient.get_client", return_value=fake_client):
+    def test_call_truncates_at_marker(self):
+        """Стоп-маркер обрезает контент и ставит флаг на message_obj.stopped_at_marker —
+        потребляет стрим единый транспорт (раньше это делал не-стриминговый путь,
+        теперь маркер обрабатывается в StreamSession.consume)."""
+        with mock.patch("universal_agents.llm_client.LLMClient.open_stream",
+                        return_value=self._stream("<tag>\ndata\n</tag>\nanalysis")):
             result, err, usage = LLMClient.call(
                 [{"role": "user", "content": "hi"}],
                 stop_markers=("</tag>",),
             )
         self.assertIsNone(err)
         self.assertEqual(result.content, "<tag>\ndata\n</tag>")
+        self.assertTrue(result.stopped_at_marker)
 
-    def test_nonstream_no_marker_keeps_content(self):
-        fake_client = mock.Mock()
-        fake_client.chat.completions.create.return_value = self._fake_response("no tags")
-        with mock.patch("universal_agents.llm_client.LLMClient.get_client", return_value=fake_client):
+    def test_call_no_marker_keeps_content(self):
+        with mock.patch("universal_agents.llm_client.LLMClient.open_stream",
+                        return_value=self._stream("no tags")):
             result, err, usage = LLMClient.call(
                 [{"role": "user", "content": "hi"}],
                 stop_markers=("</end>",),
             )
         self.assertIsNone(err)
         self.assertEqual(result.content, "no tags")
+        self.assertFalse(result.stopped_at_marker)

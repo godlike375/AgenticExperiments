@@ -93,22 +93,26 @@ def _format_closing_header() -> str:
 def prepare_messages_for_api(agent: AgentContext, normalize: bool = True,
                              debug_hash_check: bool = False) -> list[dict]:
     """Готовит историю для API.
-`normalize=False` не сбрасывает кэш заголовков user-сообщений (для переиспользования KV).
-`debug_hash_check` — сверяет хеши существующих сообщений и выводит предупреждение при изменении.
+
+    Политика шапок (§1.2): шапка user-сообщения собирается при первом обращении и дальше
+    держится байт-идентичной. Строку остатка бюджета получает только «настоящий» текущий
+    вопрос (`get_last_user_message`, без служебных summary/нага). Шапку инвалидирует
+    правка самого сообщения (`UserMessage.reset_header_cache`) и мутация состава истории,
+    меняющая бюджет (`history._resync_last_user_header` после delete/компакции/normalize).
+    Внутри хода шапка не пересобирается: там состав растёт только в хвост, а пересборка
+    сообщения в начале префикса сбросила бы KV всего хода. Поэтому в пределах хода цифра
+    остаётся снимком на момент вопроса (остаток только убывает — снимок оптимистичный).
+
+    `normalize=False` не сбрасывает dirty-флаг истории. `debug_hash_check` — сверяет хеши
+    существующих сообщений и выводит предупреждение при изменении.
     """
     if normalize:
         agent.history.normalize()
     api_pairs: list = []  # (объект сообщения, api-словарь)
 
-    # «Последним user-сообщением» для токен-заголовка считаем живое, а не служебные блоки памяти.
-    last_user_idx = None
-    last_user_msg = None
-    for i in range(len(agent.history) - 1, -1, -1):
-        msg = agent.history[i]
-        if isinstance(msg, UserMessage):
-            last_user_idx = i
-            last_user_msg = msg
-            break
+    # Токен-бюджет вешает только «настоящий» текущий вопрос: служебные summary/наг guard'а
+    # исключены (get_last_user_message).
+    last_user_msg = agent.history.get_last_user_message()
 
     for i, msg in enumerate(agent.history):
         if isinstance(msg, SystemMessage):
@@ -116,9 +120,9 @@ def prepare_messages_for_api(agent: AgentContext, normalize: bool = True,
         elif isinstance(msg, UserMessage):
             if msg._cached_header is None:
                 header = _format_timestamp_header(msg)
-                if i == last_user_idx and last_user_msg:
+                if msg is last_user_msg:
                     header += _format_token_header(
-                        agent.token_tracker, agent.history[0].content, last_user_msg.content
+                        agent.token_tracker, agent.history[0].content, msg.content
                     )
                 header += _format_closing_header()
                 msg._cached_header = header
