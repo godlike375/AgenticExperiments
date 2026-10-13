@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 from universal_agents.agent import LLMAgent
 from universal_agents.constants import SUMMARY_MARKER
-from universal_agents.compressors import is_summary_message, _find_existing_summary
+from universal_agents.compressors import is_summary_message
 from universal_agents.history import ChatHistory
 from universal_agents.llm_client import TokenUsageTracker
 from universal_agents.agent_mixins.memory_mixin import MemoryMixin
@@ -51,9 +51,6 @@ class FakeAgent(MemoryMixin):
 
     def _on_history_changed(self):
         pass
-
-    def _prune_per_msg_summaries(self):
-        self.history.prune_per_msg_summaries()
 
 
 def _compression_router(summary_text=SUMMARY_TEXT, calls=None):
@@ -290,25 +287,6 @@ class TestSummaryHelpers(unittest.TestCase):
         self.assertTrue(is_summary_message(UserMessage("flagged", is_summary=True)))
         self.assertFalse(is_summary_message(UserMessage("normal user message")))
         self.assertFalse(is_summary_message(UserMessage("")))
-
-    def test_find_existing_summary(self):
-        h = ChatHistory("sys")
-        h.add(UserMessage("task: create readme"))
-        h.add(AssistantMessage(content="a1"))
-        h.add(ToolResult.success("t1", _read_tool.__name__, "some file content"))
-        h.add(AssistantMessage(content="a2"))
-        h.add(UserMessage("please summarize"))
-        msgs = h.get_all()
-        self.assertIsNone(_find_existing_summary(msgs, len(msgs) - 1))
-
-        h.replace_range(2, 2, [UserMessage("earlier facts\npath /etc/x", is_summary=True)])
-        msgs = h.get_all()
-        found = _find_existing_summary(msgs, len(msgs) - 1)
-        self.assertIsNotNone(found)
-        self.assertEqual(found["index"], 2)
-        # body — это текст после первой строки-заголовка
-        self.assertIn("path /etc/x", found["body"])
-        self.assertIn("earlier facts", found["full_content"])
 
 
 class TestAgentAutoSummarize(unittest.TestCase):

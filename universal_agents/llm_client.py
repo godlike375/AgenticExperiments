@@ -5,7 +5,7 @@ import threading
 from typing import Optional, Callable
 from types import SimpleNamespace
 import httpx
-from universal_agents.config import Config, CHARS_PER_TOKEN
+from universal_agents.config import Config
 from universal_agents.generation import GenerationParams, apply_stop_markers
 from universal_agents.tool_parsing import normalize_args, build_tool_calls
 from universal_agents.tools.builtin import make_plan as _make_plan_tool
@@ -69,7 +69,7 @@ class TokenUsageTracker:
     @staticmethod
     def estimate_tokens(text: str) -> int:
         """Грубая оценка токенов: символы / CHARS_PER_TOKEN"""
-        return int(len(text) / CHARS_PER_TOKEN)
+        return int(len(text) / Config.CHARS_PER_TOKEN)
 
     def get_total_context_tokens(self, first_system_message: str = "", last_user_content: str = "") -> int:
         known = self.estimate_tokens(first_system_message)

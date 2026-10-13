@@ -89,10 +89,6 @@ class TurnState:
     structured_output: Optional[StructuredOutputConfig] = None
     structured_output_phase: int = 0
 
-    def has_prefill(self) -> bool:
-        """Есть ли prefill для следующего шага (после [NO COMMENT] или из старта хода)."""
-        return self.prefill is not None
-
     def step_prefill(self) -> Optional[str]:
         """Возвращает prefill для текущего шага (без сброса — живёт до явного clear/set)."""
         return self.prefill
@@ -210,7 +206,6 @@ class LLMAgent(
         self.file_states = FileStateTracker(self.history)
         from universal_agents.archive import HistoryArchive
         self.archive = HistoryArchive()
-        self._pending_pins: list[str] = []
         self._read_registrations: list[str] = []
         self._gen_params = GenerationParams.from_overrides(
             temp=temp,
@@ -440,7 +435,6 @@ class LLMAgent(
         return {
             "archive": self.archive.to_list(),
             "plan_state": plan_state_to_dict(self),
-            "pending_pins": list(getattr(self, "_pending_pins", [])),
             "cwd": os.getcwd(),
             "project_root": get_project_root_override(),
         }
@@ -503,7 +497,6 @@ class LLMAgent(
         self.archive = HistoryArchive()
         self.task_plan = []
         self.task_plan_map = {}
-        self._pending_pins = []
         self.file_states = FileStateTracker(self.history)
         self._tool_usage.clear()
         self.loop_detector = LoopDetector()

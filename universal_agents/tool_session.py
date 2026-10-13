@@ -44,11 +44,6 @@ def reset_session(token: contextvars.Token) -> None:
     _current_session.reset(token)
 
 
-def default_session() -> dict:
-    """Прямой доступ к дефолтной сессии (для тестов, которые её очищают)."""
-    return _default_session
-
-
 _current_session: contextvars.ContextVar[Optional[dict]] = contextvars.ContextVar(
     "tool_group_session", default=None
 )

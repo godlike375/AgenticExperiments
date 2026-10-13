@@ -20,7 +20,7 @@ import itertools
 import threading
 from typing import Optional
 
-__all__ = ["call", "available", "set_channel", "clear_channel"]
+__all__ = ["call", "set_channel"]
 
 
 class _Channel:
@@ -54,16 +54,6 @@ def set_channel(channel: _Channel) -> None:
     """Устанавливает канал (вызывает воркер плагинов при старте)."""
     global _channel
     _channel = channel
-
-
-def clear_channel() -> None:
-    global _channel
-    _channel = None
-
-
-def available() -> bool:
-    """True, если код исполняется внутри воркера плагинов с каналом к хосту."""
-    return _channel is not None
 
 
 def call(method: str, *args, **kwargs):

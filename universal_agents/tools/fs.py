@@ -367,10 +367,8 @@ def _make_diff_preview(old_text: str, new_text: str, path: str,
     return "\n".join(parts)
 
 
-CHARS_PER_TOKEN = Config.CHARS_PER_TOKEN
-
 MIN_TOKENS_TO_SUMMARIZE = Config.MIN_TOKENS_TO_SUMMARIZE
-_SUMMARY_THRESHOLD = int(MIN_TOKENS_TO_SUMMARIZE * CHARS_PER_TOKEN)
+_SUMMARY_THRESHOLD = int(MIN_TOKENS_TO_SUMMARIZE * Config.CHARS_PER_TOKEN)
 
 
 def _read_text(path: str) -> tuple:

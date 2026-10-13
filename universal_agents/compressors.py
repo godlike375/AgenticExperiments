@@ -1,13 +1,11 @@
 from __future__ import annotations
 from typing import Optional, TYPE_CHECKING
 
-from universal_agents.config import Config, CHARS_PER_TOKEN, MIN_TOKENS_TO_SUMMARIZE
+from universal_agents.config import Config
 from universal_agents.constants import ENVIRONMENT_PREFIX, ENVIRONMENT_PREFIX_END
 from universal_agents.constants import (
     SUMMARY_PREFIX_USER,
     SUMMARY_PREFIX_AI,
-    SUMMARY_PREFIX_TOOL_CALL,
-    SUMMARY_PREFIX_TOOL_RESULT,
     SUMMARY_PREFIX_TOOL_NAMED,
     SUMMARY_MARKER,
 )
@@ -79,17 +77,6 @@ def is_summary_message(msg) -> bool:
     return isinstance(msg, UserMessage) and bool(getattr(msg, "is_summary", False))
 
 
-def _find_existing_summary(messages: list, end_id: int) -> Optional[dict]:
-    """Ищет ранее сгенерированное авто-саммари в обрезаемом диапазоне; возвращает dict или None."""
-    for i in range(0, end_id):
-        msg = messages[i]
-        if is_summary_message(msg):
-            lines = msg.content.split("\n", 1)
-            header, body = lines[0], lines[1] if len(lines) > 1 else ""
-            return {"index": i, "full_content": msg.content, "body": body}
-    return None
-
-
 def _report_service_error(agent: AgentContext, context: str, err, msg_obj=None) -> None:
     """Ошибки служебных LLM-вызовов не тонут — выводятся в system-канал."""
     if err:
@@ -119,55 +106,6 @@ def _dense_summarize_message(agent: AgentContext, content: str) -> Optional[str]
         _report_service_error(agent, "per-message summary", err, msg_obj)
         return None
     return msg_obj.content.strip()
-
-
-def _build_from_per_message_summaries(
-    agent: AgentContext, start_id: Optional[int], end_id: Optional[int],
-    truncate_result_ratio: float = 0.0, truncate_result_min_chars: int = 0,
-) -> Optional[str]:
-    """Собирает короткий диалог из накопленных per-message саммари (без саммари — исходный контент); None, если саммари нет."""
-    messages = agent.history.get_all()
-    if start_id is None:
-        start_id = Config.AFTER_SYSTEM_PROMPT
-    if end_id is None:
-        end_id = len(messages)
-
-    end_id = min(end_id, len(messages))
-
-    parts: list[str] = []
-    used_summaries = 0
-    for i in range(start_id, end_id):
-        msg = messages[i]
-        content = (msg.content or "").strip()
-        # Чистый вызов инструмента (пустой текст) раньше терялся; сохраняем, чтобы саммари включало вызовы.
-        if isinstance(msg, AssistantMessage) and msg.has_tool_calls() and not content:
-            tcs = ", ".join(f"{tc.name}({tc.arguments})" for tc in msg.tool_calls)
-            parts.append(f"{SUMMARY_PREFIX_TOOL_CALL} {tcs}")
-            continue
-        if not content:
-            continue
-        summary = agent.history.get_per_msg_summary(msg)
-        if summary:
-            parts.append(summary)
-            used_summaries += 1
-            continue
-        if isinstance(msg, UserMessage):
-            parts.append(f"{SUMMARY_PREFIX_USER} {content}")
-        elif isinstance(msg, ToolResult):
-            if truncate_result_ratio > 0 and len(content) > 0:
-                # Относительная обрезка: доля оригинала, но не меньше truncate_result_min_chars.
-                limit = max(int(len(content) * truncate_result_ratio), truncate_result_min_chars)
-                if len(content) > limit:
-                    content = content[:limit] + f"...[truncated to {limit} chars]"
-            parts.append(f"{SUMMARY_PREFIX_TOOL_RESULT} {content}")
-        else:
-            parts.append(f"{SUMMARY_PREFIX_AI} {content}")
-
-    # Без сохранённых саммари per-message сборка бессмысленна — отдаём None для отката на single-shot.
-    if used_summaries == 0:
-        return None
-
-    return "\n\n".join(parts)
 
 
 def _draft_task_summary(
@@ -305,7 +243,7 @@ def chunk_and_summarize_large_text(agent: AgentContext, text: str, tool_name: st
 
     token_limit = agent.token_tracker.get_remaining()
     token_chunk_size = token_limit // Config.SUMMARIZATION_THRESHOLD_DIVIDER
-    chunk_size = int(token_chunk_size * CHARS_PER_TOKEN)
+    chunk_size = int(token_chunk_size * Config.CHARS_PER_TOKEN)
 
     chunks = []
     pos = 0
@@ -479,7 +417,7 @@ class SummaryService:
         if getattr(msg, "skip_summarize", False):
             return
         content = (msg.content or "").strip()
-        MIN_CHARS = int(MIN_TOKENS_TO_SUMMARIZE * CHARS_PER_TOKEN)
+        MIN_CHARS = int(Config.MIN_TOKENS_TO_SUMMARIZE * Config.CHARS_PER_TOKEN)
         if len(content) < MIN_CHARS:
             return
         summary = _dense_summarize_message(agent, content)

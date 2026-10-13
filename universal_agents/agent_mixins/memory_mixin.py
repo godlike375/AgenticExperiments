@@ -23,10 +23,6 @@ class MemoryMixin:
         """Длинные выводы инструментов сразу суммаризируются в рабочую память; при сжатии саммари встанет на их место."""
         SummaryService.summarize_if_long(self, tr)
 
-    def _prune_per_msg_summaries(self) -> None:
-        """Убирает из рабочей памяти саммари сообщений, которых больше нет в истории."""
-        self.history.prune_per_msg_summaries()
-
     def _get_context_usage_percent(self) -> float:
         """Процент заполнения контекста по фактическому расходу из API (как заголовок "Context size / Remaining")."""
         total = self.token_tracker.get_total_context_tokens()

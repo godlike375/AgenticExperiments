@@ -74,7 +74,7 @@ class Config:
     SIMULATED_REASONING_ENABLED: bool = True
     # Тегированные секции ответа по порядку: ответ начинается с первой, а после её
     # закрытия идёт свободный текст. Меняешь здесь — меняется формат.
-    SIMULATED_REASONING_TAGS: tuple[str, ...] = ("thinking",)
+    SIMULATED_REASONING_TAGS: tuple[str, ...] = ("brief_thinking",)
     # Продолжений пустого ответа на одну генерацию (одна генерация = между вызовами
     # инструментов): после </short_think> подставляется _NO_COMMENT_PREFILL.
     # По исчерпании ответ принимается как есть (громкий system msg), чтобы цикл не зациклился.
@@ -103,12 +103,6 @@ class Config:
     AUTO_SUMMARY_REVIEW_PASS: bool = True  # отревьювить черновик саммари: подчистить устаревшее + добавить пропущенное
     # Попыток перегенерации саммари при неудаче; между ними температура чуть растёт, чтобы не повторять ту же ошибку.
     AUTO_SUMMARY_MAX_RETRIES: int = 5
-
-    # Слабое сжатие (меньше этой доли) → поверх него ещё усекаются выводы инструментов.
-    AUTO_SUMMARY_MIN_REDUCTION_RATIO: float = 0.25
-    # Усечение выводов при слабом сжатии: оставляем эту долю оригинала, но не меньше TRUNCATE_TOOL_RESULT_CHARS (чтобы не резать слишком коротко).
-    TRUNCATE_TOOL_RESULT_KEEP_RATIO: float = 0.2
-    TRUNCATE_TOOL_RESULT_CHARS: int = 60
 
     # Структурная компактизация истории по завершённым подзадачам
     TASK_COMPACTION_ENABLED: bool = True  # сжимать завершённые группы подзадач
@@ -164,8 +158,6 @@ class Config:
     TOOL_WORKER_TIMEOUT: int = 3600
     # Сколько ждать завершения воркера после terminate, прежде чем идти дальше.
     TOOL_WORKER_KILL_GRACE: float = 1.0
-    # Имя канала обмена секциями прокси-агента для группы плагинов (docs §9).
-    TOOL_PLUGIN_GROUP: str = "plugin"
 
     # Bash на Windows (run_bash_host): "wsl" — через WSL, "gitbash" — Git Bash, "auto" — gitbash при наличии иначе WSL, "system" — shutil.which("bash").
     BASH_BACKEND: str = "auto"
@@ -203,8 +195,7 @@ class Config:
     # per-message саммари: True — плотное саммари каждого сообщения в память,
     # False — session summary одним вызовом. Оверрайд: disable_per_msg_summarization.
     PER_MSG_SUMMARIES_ENABLED: bool = False
-    # Таймаут компакции (сек): на большом сегменте длинный ответ не успевает за 120с.
-    STATE_GEN_TIMEOUT: int = 240
+
     # Архив вытесненных оригиналов (recall); выключение ломает только ответы про давно удалённое из контекста.
     MEMORY_ARCHIVE_ENABLED: bool = True
     # Лимиты recall-инструментов (символы).
@@ -227,8 +218,3 @@ class Config:
     MOUSE_MOVE_DURATION: float = 0.25
     # Пауза после каждого pyautogui-действия (сек).
     PYAUTOGUI_PAUSE: float = 0.1
-
-
-# Модульные алиасы часто используемых констант (атрибуты Config как имена модуля)
-CHARS_PER_TOKEN = Config.CHARS_PER_TOKEN
-MIN_TOKENS_TO_SUMMARIZE = Config.MIN_TOKENS_TO_SUMMARIZE

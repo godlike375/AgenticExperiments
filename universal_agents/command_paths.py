@@ -177,7 +177,7 @@ def _resolve(token: str, cwd: str) -> str | None:
     return os.path.normpath(os.path.join(cwd, expanded))
 
 
-def extract_paths(command: str, cwd: str = None, shell: str = "auto") -> list[str]:
+def extract_paths(command: str, cwd: str = None) -> list[str]:
     """Извлекает из `command` список абсолютных путей (дедуплицированных).
 
     - Относительные пути резолвятся относительно `cwd` (по умолчанию — текущий каталог).

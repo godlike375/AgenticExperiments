@@ -80,60 +80,6 @@ def delete_messages(agent: AgentContext, start_id: int, end_id: int = -1) -> str
 
 
 @tool(
-    description="Summarizes a range of dialog messages into a single concise UserMessage. "
-                "Use to free context tokens. Cannot summarize system prompt.",
-    short_description="compress dialog",
-    requires_confirmation=True,
-    start_id=("int", "Start index of messages to summarize"),
-    end_id=("int", "End index (inclusive). Use -1 for last message"),
-)
-def summarize_messages(agent: AgentContext, start_id: int, end_id: int = -1) -> str:
-    history = agent.history
-    if end_id == -1 or end_id >= len(history):
-        end_id = len(history) - 3
-
-    safe_start = max(start_id, Config.AFTER_SYSTEM_PROMPT)
-    safe_end = min(end_id, len(history) - 3)
-
-    if safe_start > safe_end:
-        return err(
-            f" Cannot summarize: range [{start_id}:{safe_end}] "
-            f"is invalid or overlaps with protected last 2 messages."
-        )
-
-    summary = summarize_dialogue(agent, start_id=safe_start, end_id=safe_end)
-    if not summary:
-        return err(" Summarization failed (empty response or error).")
-
-    original_len = history.content_len(safe_start, safe_end)
-    if len(summary) >= original_len:
-        return err(
-            f" Summarization produced text longer than original "
-            f"({len(summary)} >= {original_len}). Nothing to compress."
-        )
-
-    # Оригиналы диапазона выселяем в архив (recall возможен), затем заменяем summary-сообщением с is_summary=True (иначе компакции не увидят блок).
-    if Config.MEMORY_ARCHIVE_ENABLED and hasattr(agent, "archive"):
-        agent.archive.append_messages(history.get_all()[safe_start:safe_end + 1])
-
-    summary_content = ok(f" [SUMMARY of messages {safe_start}-{safe_end}]: {summary}\n")
-    history.replace_range(
-        safe_start, safe_end,
-        [UserMessage(content=summary_content, is_summary=True)],
-    )
-    history.normalize()
-    tm = getattr(agent, "tools_manager", None)
-    if tm is not None:
-        tm.flush_pending_unloads()
-
-    freed = original_len - len(summary_content)
-    return (
-        f"{ENVIRONMENT_PREFIX} Successfully summarized "
-        f"{safe_end - safe_start + 1} messages into 1. Freed ~{freed} chars."
-        f"{ENVIRONMENT_PREFIX_END}"
-    )
-
-@tool(
     description="Delegates a task to a sub-agent that has access to the same tools and system prompt as you. "
                 "The sub-agent inherits your conversation history for KV-cache reuse. "
                 "It returns only its final result.",

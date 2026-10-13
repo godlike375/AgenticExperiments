@@ -109,7 +109,6 @@ class CLI:
         self.agent = agent
         self.pending_prefill = None
         self.multiline = False
-        self._monitor_active = False
         # Запрос подтверждения инструмента: поток генерации ставит его и ждёт ответа,
         # а главный поток монитора читает stdin и отвечает. Единый читатель ввода
         # исключает гонку «подтверждение против перехвата текста», из-за которой ответ
@@ -239,7 +238,6 @@ class CLI:
             extras = {
                 "archive": self.agent.archive.to_list(),
                 "plan_state": plan_state_to_dict(self.agent),
-                "pending_pins": list(getattr(self.agent, "_pending_pins", [])),
                 "cwd": os.getcwd(),
                 "project_root": get_project_root_override(),
             }
@@ -269,7 +267,6 @@ class CLI:
             self.agent.file_states.from_dict(file_states)
             self.agent.archive = HistoryArchive.from_list(extras.get("archive") or [])
             restore_plan_state(self.agent, extras.get("plan_state"))
-            self.agent._pending_pins = [str(x) for x in (extras.get("pending_pins") or [])]
             saved_root = extras.get("project_root")
             if saved_root:
                 set_project_root(saved_root)
@@ -530,7 +527,6 @@ class CLI:
         сообщение пользователя с системной шапкой в историю и сразу запускает новую
         генерацию (сценарии А/Б/В). Возврат отсюда НЕ закрывает CLI — управление
         просто возвращается в цикл run() для следующего ввода."""
-        self._monitor_active = True
         try:
             interrupt_next = False
             while True:
@@ -590,7 +586,6 @@ class CLI:
                                              "снимаю стек потоков")
                         import faulthandler
                         faulthandler.dump_traceback(file=sys.stderr)
-                    self._monitor_active = False
                 if redirect is None:
                     redirect = self.agent.take_pending_interrupt()
                 if redirect is None:
@@ -599,8 +594,8 @@ class CLI:
                 message = redirect
                 prefill = None
                 interrupt_next = True
-        finally:
-            self._monitor_active = False
+        except Exception as e:
+            print(f"_call_chat exception: {e}")
 
     def _run_chat(self, message: str, prefill=None, interrupt: bool = False):
         try:

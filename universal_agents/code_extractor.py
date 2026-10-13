@@ -30,7 +30,7 @@ def dump_project(root_path, exclude_patterns=None):
             'dist',
             'build',
             'code_extractor.py',
-            'tests'
+            #'tests'
         ]
 
     if not os.path.isdir(root_path):

@@ -382,9 +382,6 @@ class GroupManager:
             self._sessions[group] = session
         return session
 
-    def cwd(self, group: str = "workspace") -> str:
-        return self.session(group).get("cwd") or os.getcwd()
-
     # -------------------------------------------------------- Делегирование
 
     def call(
