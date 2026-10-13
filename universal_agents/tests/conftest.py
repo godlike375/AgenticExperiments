@@ -1,10 +1,3 @@
-"""Общие фикстуры и фабрики тестового окружения (pytest).
-
-Правило AGENTS.md §5: тестового агента не создавать в каждом тесте —
-использовать make_agent отсюда. Для юнит-тестов хелперов (task_tracker,
-compressors) по-прежнему допустимы лёгкие специализированные фейки
-(SimpleNamespace / MemoryMixin-only), когда полный LLMAgent не нужен.
-"""
 
 from __future__ import annotations
 
@@ -28,36 +21,22 @@ def fail_me(agent, value: int) -> str:
 
 
 def stream_chunk(delta=None, usage=None, choices=None):
-    """Фейк чанка стрима: единая форма для всех streaming-тестов."""
     if choices is None:
         choices = [SimpleNamespace(delta=delta)] if delta is not None else []
     return SimpleNamespace(choices=choices, usage=usage)
 
 
 def stream_delta(content=None, tool_calls=None, reasoning_content=None):
-    """Фейк дельты стрима: единая форма для всех streaming-тестов."""
     return SimpleNamespace(content=content, tool_calls=tool_calls, reasoning_content=reasoning_content)
 
 
 @pytest.fixture(autouse=True)
 def sim_reasoning_off(monkeypatch):
-    """По умолчанию выключает симуляцию reasoning (Config.SIMULATED_REASONING_ENABLED).
-
-    Фичи, навязывающие формат ответа, ломают фейки, которые отдают «голый» текст:
-    каждый такой ответ трактовался бы как нарушение формата и добавлял лишние вызовы
-    LLM. Тесты, которым формат нужен (tests/test_simulated_reasoning.py), включают его
-    обратно через monkeypatch.setattr — он перебивает эту фикстуру."""
     monkeypatch.setattr(Config, "SIMULATED_REASONING_ENABLED", False)
 
 
 @pytest.fixture(autouse=True)
 def no_real_llm_transport(monkeypatch, request):
-    """Транспорт LLM в тестах всегда подменяется — реальный HTTP к LM Studio не идём.
-
-    Шов — `LLMClient.open_stream`: тест сам подменяет его фейковой генерацией чанков.
-    Здесь только страховка: если тест забыл подменить транспорт, падаем понятной
-    ошибкой, а не висим на сетевом таймауте. Тесты реального InProcessStream
-    (tests/test_in_process_stream.py) подменяют httpx.Client сами — им не мешаем."""
     if "test_in_process_stream" in str(request.node.fspath):
         return
 
@@ -69,13 +48,6 @@ def no_real_llm_transport(monkeypatch, request):
 
 @pytest.fixture(autouse=True)
 def in_process_tool_isolation(monkeypatch):
-    """Инструменты в тестах исполняются в процессе хоста, а не в воркер-процессе.
-
-    Production по умолчанию включает изоляцию (Config.TOOL_ISOLATION_ENABLED=True):
-    внешние инструменты уходят в отдельный убиваемый воркер группы. Подпроцесс (spawn)
-    не наследует monkeypatch'и/моки тестов и не видит фейковые инструменты, поэтому
-    поведенческие тесты агента работают в in-process режиме. Тесты самой изоляции
-    (tests/test_tool_isolation.py) перебивают фикстуру, возвращая изоляцию обратно."""
     monkeypatch.setattr(Config, "TOOL_ISOLATION_ENABLED", False)
 
 
@@ -87,11 +59,6 @@ def make_agent(
     autosave_enabled: bool = False,
     **kwargs,
 ) -> LLMAgent:
-    """Фабрика реального LLMAgent для поведенческих тестов (пункт AGENTS.md §5).
-
-    Отключает per-message суммаризацию и авто-сохранение по умолчанию
-    (чистый, детерминированный диалог). Каждый тест сам добавляет доверенные
-    папки и внешние инструменты под свою задачу."""
     return LLMAgent(
         system_prompt=system_prompt,
         tools_config=tools_config,

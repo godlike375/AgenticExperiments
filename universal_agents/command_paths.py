@@ -1,5 +1,5 @@
-"""Извлечение файловых путей из командных строк (bash / PowerShell): токенизация с учётом кавычек, пропуск флагов, раскрытие env-переменных; нацелено на безопасность."""
 
+"""Извлечение файловых путей из командных строк (bash/PowerShell) для безопасности."""
 import os
 import re
 
@@ -22,7 +22,6 @@ _ENV_PATTERNS = (
 
 
 def _expand_env(token: str) -> str:
-    """Раскрывает переменные окружения ($HOME, ${VAR}, %VAR%, $env:VAR)."""
     result = token
     for pattern, getter in _ENV_PATTERNS:
         def _repl(m, _getter=getter):
@@ -35,11 +34,6 @@ def _expand_env(token: str) -> str:
 
 
 def _tokenize(command: str) -> list[str]:
-    """Разбивает команду на токены, учитывая кавычки и backtick-escape (PowerShell).
-
-    Возвращает токены с уже снятыми кавычками и применённым backtick-escape.
-    Обратная косая черта считается литералом (важно для Windows-путей).
-    """
     tokens: list[str] = []
     i = 0
     n = len(command)
@@ -89,7 +83,6 @@ def _tokenize(command: str) -> list[str]:
 
 
 def _is_option(token: str) -> bool:
-    """True, если токен — опция/флаг (-r, --recursive, /x)."""
     if not token:
         return False
     if token.startswith("-"):
@@ -102,7 +95,6 @@ def _is_option(token: str) -> bool:
 
 
 def _has_clear_path_marker(token: str) -> bool:
-    """Признаки, однозначно говорящие о пути (без проверки существования)."""
     if not token:
         return False
     if len(token) <= 1:
@@ -125,7 +117,6 @@ def _has_clear_path_marker(token: str) -> bool:
 
 
 def _looks_like_path(token: str, cwd: str) -> bool:
-    """Решает, является ли токен путём, минимизируя ложные срабатывания."""
     if not token or _is_option(token):
         return False
     if any(c in token for c in "=()|;&<>!"):
@@ -141,7 +132,6 @@ def _looks_like_path(token: str, cwd: str) -> bool:
 
 
 def _resolve(token: str, cwd: str) -> str | None:
-    """Резолвит токен в абсолютный нормализованный путь, раскрывая переменные."""
     t = _expand_env(token).strip()
     if not t:
         return None
@@ -159,12 +149,6 @@ def _resolve(token: str, cwd: str) -> str | None:
 
 
 def extract_paths(command: str, cwd: str = None) -> list[str]:
-    """Извлекает из `command` список абсолютных путей (дедуплицированных).
-
-    - Относительные пути резолвятся относительно `cwd` (по умолчанию — текущий каталог).
-    - `shell` ("bash" | "powershell" | "auto") влияет на интерпретацию, но сейчас
-      токенизация универсальна; параметр оставлен для расширяемости.
-    """
     if not command:
         return []
     cwd = cwd or os.getcwd()

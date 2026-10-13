@@ -22,16 +22,12 @@ class TestCLIPollInput(unittest.TestCase):
         self.assertEqual(list(cli._line_queue), [])
 
     def test_ignores_empty_injected_line(self):
-        """Пустая строка ('\n', инжектированная _request_stop для разблокировки)
-        не должна трактоваться как пользовательский ввод; она выбрасывается."""
         cli = self._make_cli()
         cli._line_queue.append("\n")
         self.assertIsNone(cli._poll_input())
         self.assertEqual(list(cli._line_queue), [])
 
     def test_drains_wakeups_and_sees_text_behind_them(self):
-        """Накопленные '\n' не должны скрывать текст пользователя позади себя: иначе
-        во время генерации реальное сообщение не видно монитору (ввод «молчит»)."""
         cli = self._make_cli()
         cli._line_queue.extend(["\n", "продолжай\n", "\n"])
         self.assertEqual(cli._poll_input(), "продолжай")
@@ -50,8 +46,6 @@ class TestCLIPollInput(unittest.TestCase):
 
 
 class TestConfirmCoordination(unittest.TestCase):
-    """Подтверждение инструмента обслуживает главный поток монитора (а не гонка с ним):
-    ответ на (y/n) не может быть перехвачен как текст-прерывание."""
 
     def _make_cli(self):
         agent = LLMAgent(system_prompt="sys")
@@ -165,7 +159,6 @@ class TestCompactHistory(unittest.TestCase):
         self.assertTrue(any("History left unchanged" in msg for msg in seen))
 
     def _make_monitored_cli(self, slow_compact):
-        """CLI с полноценным stdin-монитором и компакцией, блокирующейся до stop_event."""
         agent = mock.Mock()
         agent.stop_event = threading.Event()
         agent.request_stop = agent.stop_event.set

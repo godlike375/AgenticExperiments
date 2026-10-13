@@ -1,9 +1,3 @@
-"""Тесты in-process стрима (InProcessStream).
-
-InProcessStream делает прямой httpx POST с stream=True, парсит SSE руками и возвращает
-чанки в формате OpenAI. Отмена — shutdown(SHUT_RDWR) на сокете. Здесь проверяются
-SSE-парсинг, конвертация чанков, отмена через close() и интеграция с LLMClient.call.
-"""
 
 from __future__ import annotations
 
@@ -25,7 +19,6 @@ from universal_agents.llm_client import (
 
 
 def _sse_response(chunks: list[dict], delay: float = 0) -> httpx.Response:
-    """Создаёт httpx.Response с SSE-данными для тестов."""
     lines = []
     for chunk in chunks:
         lines.append(f"data: {json.dumps(chunk)}")
@@ -163,7 +156,6 @@ class TestInProcessStreamParsing(unittest.TestCase):
 
 class TestInProcessStreamClose(unittest.TestCase):
     def test_close_unblocks_iter_lines(self):
-        """close() делает shutdown на сокете, будит блокирующий recv."""
         released = threading.Event()
 
         class FakeSocket:
@@ -223,7 +215,6 @@ class TestInProcessStreamClose(unittest.TestCase):
             self.assertLess(elapsed, 1.0, "остановка заняла слишком долго")
 
     def test_close_without_socket_still_works(self):
-        """Если сокет не достался (кастомный transport) — close() не падает."""
         class FakeResponse:
             extensions = {}
 
@@ -254,7 +245,6 @@ class TestInProcessStreamClose(unittest.TestCase):
 
 class TestOpenStreamRequest(unittest.TestCase):
     def test_open_stream_sends_request(self):
-        """open_stream создаёт httpx-клиент и отправляет POST с stream=True."""
         with mock.patch("universal_agents.llm_client.httpx.Client") as mock_client_cls:
             mock_client = mock.Mock()
             mock_client_cls.return_value = mock_client
@@ -279,7 +269,6 @@ class TestOpenStreamRequest(unittest.TestCase):
             self.assertEqual(body["stream_options"], {"include_usage": True})
 
     def test_min_p_sent_at_top_level(self):
-        """min_p уходит плоским полем тела (не вложенным в extra_body)."""
         with mock.patch("universal_agents.llm_client.httpx.Client") as mock_client_cls:
             mock_client = mock.Mock()
             mock_client_cls.return_value = mock_client
@@ -321,7 +310,6 @@ class TestOpenStreamRequest(unittest.TestCase):
 
 class TestOpenStreamSelection(unittest.TestCase):
     def test_open_stream_returns_in_process_stream(self):
-        """open_stream безусловно возвращает InProcessStream."""
         fake = mock.Mock()
         with mock.patch("universal_agents.llm_client.InProcessStream", return_value=fake) as mocked:
             result = LLMClient.open_stream([{"role": "user", "content": "hi"}])
@@ -336,7 +324,6 @@ class TestCallEndToEndViaInProcessStream(unittest.TestCase):
         self.addCleanup(self._patcher.stop)
 
     def test_call_end_to_end(self):
-        """LLMClient.call идёт через InProcessStream: prefill и usage совпадают."""
         self._use_fake_response(_sse_response([
             _text_chunk("hello"),
             _text_chunk(" world"),
@@ -364,7 +351,6 @@ class TestCallEndToEndViaInProcessStream(unittest.TestCase):
         self.assertEqual("".join(seen), "hello world")
 
     def test_stop_closes_stream_via_watchdog(self):
-        """Запрос остановки (stop_check) закрывает стрим через watchdog."""
         released = threading.Event()
 
         class FakeSocket:

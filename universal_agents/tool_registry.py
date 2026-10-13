@@ -9,7 +9,6 @@ _PLUGIN_CACHE: dict[str, dict[str, Callable]] = {}
 
 
 def _load_plugin_module(file_path: str) -> dict[str, Callable]:
-    """Выполняет один файл-плагин и возвращает словарь «имя → @tool-функция»."""
     filename = os.path.basename(file_path)
     module_name = filename[:-3]
     spec = importlib.util.spec_from_file_location(module_name, file_path)
@@ -23,11 +22,6 @@ def _load_plugin_module(file_path: str) -> dict[str, Callable]:
 
 
 def load_external_plugins(plugins_dir: str = "tools") -> dict[str, Callable]:
-    """Загружает все функции с декоратором @tool из .py-файлов указанной директории.
-
-    Загруженные файлы кэшируются (без повторного exec_module); при повторных вызовах
-    подхватываются только новые файлы. Внутри одного процесса хэндлеры инструмента
-    сохраняют identity — а значит и ссылку на кэшированные заголовки сообщений."""
     external_tools: dict[str, Callable] = {}
     if not os.path.exists(plugins_dir):
         return external_tools
@@ -58,7 +52,6 @@ def load_external_plugins(plugins_dir: str = "tools") -> dict[str, Callable]:
 
 
 def build_tool_dict(func: Callable, is_instance_method: bool) -> dict:
-    """Создаёт словарь-описание инструмента из функции, помеченной @tool."""
     has_agent = getattr(func, '_has_agent_param', False)
     group = getattr(func, '_tool_group', 'internal')
     return {

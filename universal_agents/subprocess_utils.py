@@ -1,16 +1,3 @@
-"""Общий помощник для запуска внешних команд (host-shell и sandbox).
-
-Централизует сборку текстового результата и обработку ошибок, которые раньше
-дублировались в `tools/host_shell.py` (`_run`) и `tools/sandbox.py` (`_run_cmd`).
-
-Важно: запуск через Popen с опросом, чтобы можно было прервать выполнение по
-требованию пользователя (см. set_interrupt_event / _interrupt_requested) — иначе
-долгий вызов инструмента блокирует поток и остановка оказывается невозможной.
-
-На Windows дополнительно создаётся Job Object с KILL_ON_JOB_CLOSE: при прерывании
-процесс вместе со всеми дочерними (Gradle, Java и т.д.) гарантированно завершается,
-а reader-потоки не застревают в незакрытых pipe'ах.
-"""
 
 from __future__ import annotations
 
@@ -67,10 +54,6 @@ if _IS_WINDOWS:
 
 
 def _create_kill_job():
-    """Создаёт Windows Job Object с KILL_ON_JOB_CLOSE.
-    Все процессы, назначенные этому Job, будут принудительно завершены при закрытии хэндла.
-    Возвращает (handle, assign_fn) или (None, None) если не Windows или ошибка.
-    """
     if not _IS_WINDOWS:
         return None, None
     try:
@@ -92,7 +75,6 @@ def _create_kill_job():
             return None, None
 
         def assign(proc_handle):
-            """Назначает процесс (или его PID) в Job Object."""
             _kernel32.AssignProcessToJobObject(job, proc_handle)
 
         return job, assign
@@ -101,7 +83,6 @@ def _create_kill_job():
 
 
 def _kill_process_tree(pid: int) -> None:
-    """Принудительно убивает дерево процессов по PID (Windows taskkill /T /F)."""
     try:
         subprocess.run(
             ["taskkill", "/T", "/F", "/PID", str(pid)],
@@ -113,7 +94,6 @@ def _kill_process_tree(pid: int) -> None:
 
 
 def _safe_close_job(job) -> None:
-    """Закрывает хэндл Job Object; все назначенные процессы будут завершены."""
     if job and _IS_WINDOWS:
         try:
             _kernel32.CloseHandle(job)
@@ -122,13 +102,6 @@ def _safe_close_job(job) -> None:
 
 
 def _force_kill_proc(proc, job_handle) -> None:
-    """Принудительно завершает процесс со всем деревом потомков.
-
-    Стратегия на Windows (в порядке надёжности):
-    1. `proc.terminate()` — обычное завершение главного процесса.
-    2. `taskkill /T /F` — принудительное завершение дерева (fallback, если Job не сработал).
-    3. Закрытие Job Object убьёт всё, что в нём было (если Job активен).
-    """
     try:
         proc.terminate()
     except Exception:
@@ -175,13 +148,6 @@ def truncate_middle(
     max_chars: int = None,
     max_lines: int = None,
 ) -> str:
-    """Обрезает середину вывода, оставляя начало и конец.
-
-    Если ``text`` превышает ``max_chars`` символов ИЛИ ``max_lines`` строк,
-    из середины удаляется блок, а вместо него вставляется маркер
-    ``... [N lines / M chars skipped] ...``.  Началу выделяется ~40 %
-    лимита, концу — ~40 %, маркер занимает оставшиеся ~20 %.
-    """
     max_chars = max_chars or Config.MAX_READ_CHARS_PER_CALL
     max_lines = max_lines or Config.MAX_READ_LINES_PER_CALL
 
@@ -243,12 +209,6 @@ def truncate_middle(
 
 
 def _decode_bytes(data: bytes, encoding: str, fallback_encoding: str | None) -> str:
-    """Декодирует вывод процесса: сначала строго ``encoding``, при неудаче — ``fallback_encoding``.
-
-    Нужно для PowerShell 5.1: при перенаправлении в pipe он пишет в OEM-кодировке
-    системы (cp866 на ru-RU), т.е. байты не являются валидным UTF-8. Пробуем UTF-8
-    строго; если не вышло — декодируем OEM-кодировкой (последняя уж точно не бросит).
-    """
     try:
         return data.decode(encoding)
     except (UnicodeDecodeError, LookupError):
@@ -268,22 +228,6 @@ def run_capture(
     encoding: str = "utf-8",
     fallback_encoding: str | None = None,
 ) -> str:
-    """Запускает ``cmd`` и возвращает текст результата.
-
-    Собирает stdout + stderr + строку с кодом завершения в единый текст.
-    При ненулевом коде завершения бросает ``RuntimeError`` с этим же текстом
-    (чтобы вызывающая сторона могла трактовать результат как ошибку).
-    Если во время выполнения запрошена остановка (interrupt event), процесс
-    принудительно завершается и бросается ``GenerationInterrupted``.
-
-    Кодировка: вывод декодируется как ``encoding``; если задан ``fallback_encoding``,
-    читаем сырые байты и пробуем UTF-8, а при провале — фолбэк (для PowerShell 5.1,
-    который в pipe отдаёт OEM-кодировку; см. tools/host_shell.py).
-
-    На Windows создаётся Job Object с KILL_ON_JOB_CLOSE: при прерывании или
-    таймауте гарантированно убивается всё дерево процессов (Gradle, Java и т.д.),
-    чтобы reader-потоки не застревали в незакрытых pipe'ах.
-    """
     effective_timeout = timeout if timeout and timeout > 0 else 60
     stdin_stream = subprocess.PIPE if stdin is not None else subprocess.DEVNULL
     raw_mode = fallback_encoding is not None

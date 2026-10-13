@@ -1,4 +1,3 @@
-"""Mixin обработки ответа LLM: построение AssistantMessage, добавление в историю, рендер."""
 
 from __future__ import annotations
 
@@ -16,12 +15,10 @@ _NO_COMMENT_PREFILL = 'LLM Agent: "'
 
 
 def sim_schema_text() -> str:
-    """Схема формата симуляции текстом: '<short_think/>' (для логов и заметок UI)."""
     return "".join(f"<{tag}/>" for tag in Config.SIMULATED_REASONING_TAGS)
 
 
 def tail_after_tag(content: str, tag: str) -> str:
-    """Всё, что ПОСЛЕ закрывающего </tag> — свободный ответ ("" , если закрытия нет)."""
     if not content:
         return ""
     closing = f"</{tag}>"
@@ -30,34 +27,13 @@ def tail_after_tag(content: str, tag: str) -> str:
 
 
 class SimReasoningGroup:
-    """Секция рассуждения одного assistant-сообщения (§2.8).
-
-    Формат ответа: '<short_think>…</short_think>' + свободный текст ответа.
-    Форс минимален и сделан ОДНИМ вызовом LLM:
-    - prefill открывает секцию ('<short_think>'), стоп-маркеров нет — если модель
-      закрыла секцию сама, мы не режём её хвост и даём ей дописать ответ в том же
-      вызове (иначе пришлось бы выбрасывать уже написанный ответ);
-    - если модель секцию не закрыла, закрывающий тег дописываем сами (иначе рассуждение
-      растянулось бы на весь ответ и закрытия не было бы вовсе);
-    - всё после закрытия — ответ БЕЗ тегов: второй тег не нужен, пустой ответ не
-      нарушение формата (модель вправе сразу уйти в инструмент).
-
-    Единственный дополнительный вызов — когда ответ пуст и вызова инструмента нет:
-    тогда к концу секции подставляется _NO_COMMENT_PREFILL (общий механизм NO COMMENT),
-    бюджет ограничен retries, чтобы цикл не зациклился.
-
-    Двухфазный режим — когда задана хотя бы одна SIMULATED_REASONING_*-настройка
-    сэмплирования: секция генерируется отдельным вызовом (стоп-маркер
-    '</short_think>', параметры размышлений), затем ответ — вторым вызовом
-    (обычные параметры). Если модель дописала ответ или вызвала инструмент уже
-    в фазе размышлений — принимается как есть, лишний вызов не нужен."""
+    """Секция рассуждения (§2.8): prefill открывает тег, закрытие дописываем сами; двухфазный режим при SIMULATED_REASONING_*."""
 
 
     def __init__(self, retries: int):
         self.reset(retries)
 
     def reset(self, retries: int) -> None:
-        """Новое сообщение агента (после инструмента/ошибки): всё с нуля."""
         self.tag = Config.SIMULATED_REASONING_TAGS[0]
         self.content = ""      # накопленный ответ: '<short_think>…' + ответ
         self.appended = ""     # дописанный закрывающий тег (эхо в живой вывод)
@@ -72,7 +48,6 @@ class SimReasoningGroup:
 
     @staticmethod
     def _reasoning_overrides() -> dict:
-        """Заданные SIMULATED_REASONING_*-настройки сэмплирования (имя поля → значение)."""
         names = ("temp", "top_p", "min_p", "frequency_penalty", "presence_penalty")
         return {
             name: getattr(Config, f"SIMULATED_REASONING_{name.upper()}")
@@ -81,38 +56,31 @@ class SimReasoningGroup:
         }
 
     def two_phase(self) -> bool:
-        """Нужны ли два вызова: задана хотя бы одна настройка размышлений."""
         return self.phase in ("think", "answer")
 
     def is_think_phase(self) -> bool:
-        """Текущий вызов — фаза размышлений (свои параметры + стоп-маркер закрытия)."""
         return self.phase == "think"
 
     def advance_to_answer(self) -> None:
-        """Перейти от фазы размышлений к фазе ответа."""
         if self.phase == "think":
             self.phase = "answer"
 
     def think_params(self, base: GenerationParams) -> Optional[GenerationParams]:
-        """Параметры фазы размышлений: базовые + заданные оверрайды. None — не заданы."""
         overrides = self._reasoning_overrides()
         if not overrides:
             return None
         return replace(base, **overrides)
 
     def prefill(self) -> str:
-        """Prefill вызова: открывающий тег секции, либо накопленный ответ при продолжении."""
         if self._continuation or self.phase == "answer":
             return self.content
         return f"<{self.tag}>"
 
     def prefill_shown(self) -> int:
-        """Длина уже показанной части prefill — печатать в живой вывод только хвост."""
         return self._shown
 
 
     def absorb(self, message_obj, prefill: str) -> None:
-        """Забирает ответ вызова (текст, tool_calls, reasoning) в накопленный контент."""
         raw = apply_prefill(message_obj.content or "", prefill)
         self.content = raw
         self.tool_calls.extend(message_obj.tool_calls or [])
@@ -120,14 +88,7 @@ class SimReasoningGroup:
         self._shown = len(self.content)
 
     def close_section(self) -> None:
-        """Дописывает '</short_think>', если модель не закрыла секцию сама.
-
-        После закрытия всегда идёт перевод строки (для восприятия: ответ
-        начинается с новой строки). Если модель его уже поставила — не дублируем.
-        Эхо в живой вывод — только когда перевод вставлен в конец (его ещё можно
-        показать); если ответ уже выведен дальше тега, перевод остаётся только
-        в истории — прошедший стрим не исправить.
-        """
+        """Дописывает </tag>, если модель не закрыла; после закрытия — перевод строки."""
         closing = f"</{self.tag}>"
         if self.content and closing not in self.content:
             self.content += closing
@@ -141,23 +102,18 @@ class SimReasoningGroup:
         self._shown = len(self.content)
 
     def take_appended(self) -> str:
-        """Забрать дописанный хвост для эха в живой вывод. Одноразовый: повторный
-        вызов (например, verify фазы answer после think) ничего не вернёт."""
         tail, self.appended = self.appended, ""
         return tail
 
     def answer_text(self) -> str:
-        """Свободный ответ модели — всё после закрывающего тега, без наших вставок."""
         tail = tail_after_tag(self.content, self.tag)
         head_len = len(self.content) - len(tail)
         return self._strip_injected(tail, head_len)
 
     def final_content(self) -> str:
-        """Контент для истории: ответ модели без вклиненных приставок."""
         return self._strip_injected(self.content, 0)
 
     def _strip_injected(self, text: str, offset: int) -> str:
-        """Вырезает куски, вклиненные нами (offset — позиция text в self.content)."""
         if not self._injected:
             return text
         skip: set[int] = set()
@@ -167,7 +123,6 @@ class SimReasoningGroup:
         return "".join(ch for i, ch in enumerate(text) if i not in skip)
 
     def start_continuation(self) -> None:
-        """Продолжение пустого ответа: приставка после секции, вынуждающая написать текст."""
         self._shown = len(self.content)
         self._injected.append(len(self.content))
         self.content += _NO_COMMENT_PREFILL
@@ -178,7 +133,6 @@ class SimReasoningGroup:
 
 
 class ResponseMixin:
-    """Преобразует сырой ответ LLM в сообщение истории и управляет его добавлением/рендером."""
 
     def _assemble_assistant_message(
         self,
@@ -188,7 +142,6 @@ class ResponseMixin:
         prefill: str = None,
         streamed: bool = False,
     ) -> AssistantMessage:
-        """Единая точка сборки AssistantMessage (инвариант §2): строит сообщение и применяет prefill. Раньше дублировалась в 4 местах."""
         message_obj = AssistantMessage(
             content=content or "",
             tool_calls=list(tool_calls or []),
@@ -229,7 +182,6 @@ class ResponseMixin:
         return f"Tools: {items} ({total} total)"
 
     def _append_assistant(self, msg: AssistantMessage) -> None:
-        """Добавляет сообщение ассистента в историю и рендерит его."""
         self.history.add(msg)
         if self._per_msg_enabled:
             self._summarize_assistant_message(msg)
@@ -237,7 +189,6 @@ class ResponseMixin:
         self._emit_token_info()
 
     def _append_tool_results(self, results: list[ToolResult]) -> None:
-        """Добавляет результаты инструментов в историю и рендерит их."""
         for tr in results:
             self.history.add(tr)
             if self._per_msg_enabled:
@@ -247,9 +198,6 @@ class ResponseMixin:
 
 
     def _sim_verify_phase(self, group: SimReasoningGroup) -> Optional[AssistantMessage]:
-        """Доводит ответ до готового сообщения или просит дописать пустой ответ.
-
-        None → нужен ещё один вызов LLM (prefill = group.prefill())."""
         group.close_section()
         appended = group.take_appended()
         if appended and getattr(self, "on_stream_chunk", None):
@@ -279,7 +227,6 @@ class ResponseMixin:
         return self._sim_message(group)
 
     def _sim_message(self, group: SimReasoningGroup) -> AssistantMessage:
-        """Собирает накопленный ответ в одно AssistantMessage (контент уже в стриме показан)."""
         return self._assemble_assistant_message(
             group.final_content(), group.tool_calls, group.reasoning, streamed=True
         )
@@ -289,20 +236,7 @@ class ResponseMixin:
                               skip_broken_detection: bool = False,
                               allow_tools: bool = True,
                               broken_scan_text: Optional[str] = None) -> tuple[str, bool, bool, Optional[str]]:
-        """Обрабатывает сырой ответ LLM. Возвращает (text, tool_error, broken_call, rerun_prefill);
-        rerun_prefill непуст, когда следующий ход надо перегенерировать с указанным prefill (_NO_COMMENT_PREFILL).
-        no_comment_retry_left — сколько раз ещё можно перегенерировать голый вызов инструмента
-        без пояснения; агенту достаётся из TurnState (Config.NO_COMMENT_RETRIES).
-        reasoning_effort — ожидаемое значение хода из API (отличает «модель уже прокомментировала
-        ход в reasoning_content»); по умолчанию берётся текущее состояние агента.
-        skip_broken_detection — пропустить детекцию сломанного вызова (True для фаз
-        структурированного вывода: закрытый маркером XML не должен выглядеть сломанным
-        вызовом даже при содержании имён инструментов внутри).
-        broken_scan_text — что именно сканировать на сломанный вызов (по умолчанию весь
-        контент). При симуляции reasoning сюда передаётся свободный ответ (всё после
-        </short_think>): в секции рассуждения всегда есть теги, и без сужения гейт
-        «есть XML-тег» срабатывал бы на каждом ответе, а проза вида «read() выполнен»
-        или «Вызываю read() для просмотра…» давала бы ложные срабатывания."""
+        """Обрабатывает ответ LLM. broken_scan_text — что сканировать на сломанный вызов (симуляция reasoning: только хвост)."""
         if reasoning_effort is None:
             reasoning_effort = self._reasoning_effort
         if not message_obj:

@@ -25,7 +25,6 @@ from tests.conftest import make_agent
 class TestServiceTurn(unittest.TestCase):
 
     def _base_history(self, agent: LLMAgent) -> None:
-        """Подготовка стабильного состояния истории (системный промпт уже на месте)."""
         agent.history.add(UserMessage("вопрос"))
         agent.history.add(AssistantMessage(content="ответ"))
 

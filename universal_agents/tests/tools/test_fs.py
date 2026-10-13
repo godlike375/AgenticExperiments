@@ -177,7 +177,6 @@ class TestMatchReplaceEdit(unittest.TestCase):
         self.assertEqual(open(f, encoding="utf-8").read(), "y\nkeep\ny\n")
 
     def test_all_mode_preview_isolates_changed_lines(self):
-        """Превью mode='all' не должно выглядеть как удаление всего файла."""
         lines = ["line %d" % i for i in range(1, 30)]
         lines[9] = "// old comment"
         f = self._path("iso.py", "\n".join(lines) + "\n")
@@ -194,7 +193,6 @@ class TestMatchReplaceEdit(unittest.TestCase):
         self.assertIn("line 29", content)
 
     def test_all_mode_multiple_occurrences_scope_header(self):
-        """Заголовок mode='all' — объём вхождений; нетронутые строки не удаляются в превью."""
         f = self._path("iso2.py", "x\nkeep_a\nx\nmiddle\nx\nkeep_b\n")
         preview, _resolve, _ask = match_replace_edit(f, "x", "y", mode="all", dry_run=True)
         self.assertIn("-3+3", preview)
@@ -231,7 +229,6 @@ class TestMatchReplaceEdit(unittest.TestCase):
 
 
 def _make_fake_agent():
-    """Лёгкий фейк агента: read обращается только к file_states/_read_registrations."""
     agent = SimpleNamespace(
         file_states=SimpleNamespace(
             _history=[],
@@ -334,7 +331,6 @@ class TestReadBatchMode(unittest.TestCase):
 
 
 class _PendingAgent:
-    """Минимальный агент для respond_to_system: отдаёт resolve ожидающей операции."""
     def __init__(self, resolve):
         self._resolve = resolve
     def pop_pending_operation(self):
@@ -400,7 +396,6 @@ class TestEditFileEndToEnd(unittest.TestCase):
 
 
     def test_dry_run_error_string_is_not_config_error(self):
-        """Ненайденная подстрока в dry_run: модель видит 'substring not found', а не конфиг-ошибку."""
         path = os.path.join(self._tmp, "nomatch.xml")
         with open(path, "w", encoding="utf-8") as f:
             f.write("<root>\n    <x/>\n</root>\n")
@@ -438,7 +433,6 @@ class TestEditFileEndToEnd(unittest.TestCase):
         self.assertFalse(any("Tool configuration error" in c for c in flat))
 
     def test_dry_run_nothing_changed_is_not_config_error(self):
-        """No-op правка в dry_run: модель видит 'Nothing changed', а не конфиг-ошибку."""
         path = os.path.join(self._tmp, "same.txt")
         with open(path, "w", encoding="utf-8") as f:
             f.write("a = 1\nb = 2\n")

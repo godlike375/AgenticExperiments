@@ -1,10 +1,3 @@
-"""Симуляция reasoning при выключенном thinking (Config.SIMULATED_REASONING_*).
-
-Ответ обязан начаться с секции рассуждения из Config.SIMULATED_REASONING_TAGS, а всё, что после
-её закрытия, — свободный ответ без тегов. Формат навязывает SimReasoningGroup ОДНИМ
-вызовом LLM: prefill открывает секцию, стоп-маркеров нет (модель закрывает секцию сама
-и дописывает ответ в том же вызове), а незакрытую секцию закрывает агент.
-"""
 
 import unittest
 from unittest import mock
@@ -24,7 +17,6 @@ CLOSE_T = f"</{TAG}>"
 
 
 class _Call:
-    """Запись одного вызова транспорта (что ушло на сервер)."""
 
     def __init__(self, prefill, markers, params=None):
         self.prefill = prefill
@@ -33,10 +25,6 @@ class _Call:
 
 
 def _transport(script):
-    """Фейк транспорта: script = [(delta, tool_calls), ...] по вызовам.
-
-    Имитирует реальный транспорт: prefill приклеивается к контенту, стоп-маркеры (их у
-    симуляции нет) режут хвост. Возвращает (фейк, список вызовов)."""
     calls = []
 
     def fake_call(messages, prefill=None, stop_markers=(), **kwargs):
@@ -49,7 +37,6 @@ def _transport(script):
 
 
 def _plain_transport(responses):
-    """Фейк транспорта для одиночных ответов (формат выключен): список строк контента."""
     calls = []
 
     def fake_call(messages, prefill=None, stop_markers=(), **kwargs):
@@ -115,7 +102,6 @@ class SimReasoningTestCase(unittest.TestCase):
         )
 
     def _scripted_stream(self, script):
-        """Фейк стрима по вызовам: script = [[куски текста], ...]."""
         calls = []
 
         def stream(*args, **kwargs):
@@ -304,9 +290,6 @@ class TestEmptyAnswerContinuation(SimReasoningTestCase):
 
 
 class TestTwoPhaseReasoning(SimReasoningTestCase):
-    """Двухфазный режим: задана хотя бы одна SIMULATED_REASONING_*-настройка —
-    секция размышлений генерируется отдельно (свои параметры + стоп-маркер),
-    ответ — вторым вызовом с обычными параметрами."""
 
     def _enable_overrides(self):
         Config.SIMULATED_REASONING_TEMP = 0.9

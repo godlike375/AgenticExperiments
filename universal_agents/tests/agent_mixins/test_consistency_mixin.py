@@ -1,4 +1,3 @@
-"""Тесты сквозной согласованности thinking на весь ход (consistency_mixin)."""
 
 import unittest
 from unittest import mock
@@ -11,10 +10,6 @@ from tests.conftest import double_me
 
 class TestThinkingConsistency(unittest.TestCase):
     def test_thinking_once_consistent_across_whole_turn(self):
-        """Разовый /think применяется ко всему ходу: и API, и обработчик ответа видят
-        reasoning 'low', поэтому пустой tool-call исполняется без NO COMMENT-перегенераций.
-        Регрессия: раньше _reasoning_effort сбрасывал _thinking_once при первом чтении,
-        и второе чтение (NO COMMENT-ветка) расходилось с отправленным в API."""
         agent = LLMAgent(
             system_prompt="sys",
             tools_config=["double_me"],

@@ -1,16 +1,16 @@
-"""Общие константы фреймворка."""
 
+"""Общие константы фреймворка."""
 ENVIRONMENT_PREFIX = '<SYSTEM>'
 ENVIRONMENT_PREFIX_END = '</SYSTEM>'
 
 
 def err(msg: str) -> str:
-    """Единый формат сообщения об ошибке (инвариант §2-4). ``msg`` — текст сразу после ``Error`` для побайтово точной замены."""
+    """Единый формат ошибки (§1.4): msg — текст сразу после Error для побайтовой замены."""
     return f"{ENVIRONMENT_PREFIX} Error{msg}{ENVIRONMENT_PREFIX_END}"
 
 
 def ok(msg: str) -> str:
-    """Единый формат системного сообщения инструмента. ``msg`` — текст сразу после префикса для побайтово точной замены."""
+    """Единый формат системного сообщения: msg — текст сразу после префикса."""
     return f"{ENVIRONMENT_PREFIX} {msg} {ENVIRONMENT_PREFIX_END}"
 
 

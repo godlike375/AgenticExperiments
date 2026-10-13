@@ -7,13 +7,6 @@ from universal_agents.config import Config
 
 
 def multimodal_content(text: str, images: list[str]) -> str | list[dict]:
-    """Content для API: строка, когда картинок нет; иначе список частей [text, image_url...].
-
-    Картинки — side-field сообщений (images), в content не хранятся: весь код фреймворка
-    работает со строковым content как раньше, а мультимодальность появляется только здесь.
-    Сериализация сообщения с картинками детерминирована и никогда не меняется после
-    создания — стабильный префикс KV-кэша (§1.2). Часть text присутствует всегда
-    (в т.ч. служебная шапка user-сообщения из context_builder)."""
     if not images:
         return text
     parts: list[dict] = [{"type": "text", "text": text or ""}]
@@ -36,7 +29,6 @@ class Message(ABC):
         pass
 
     def to_persist_dict(self) -> dict[str, Any]:
-        """Словарь для сохранения в историю (JSON). По умолчанию = API-представлению; подклассы добавляют служебные метаданные, которые не уходят в LLM, но переживают /save+/load."""
         d = self.to_api_dict()
         d["_ts"] = self.timestamp.isoformat()
         if self.seq is not None:
@@ -59,16 +51,9 @@ class UserMessage(Message):
     _is_guard_nag: bool = field(default=False, init=False, repr=False)
 
     def reset_header_cache(self) -> None:
-        """Сбрасывает кэш заголовка user-сообщения: следующая prepare_messages_for_api
-        соберёт header заново. Пересборка оправдана только тогда, когда KV и так мёртв:
-        правка собственных байт сообщения (edit_message, склейка в normalize) или мутация
-        состава истории, после которой устарел токен-бюджет (delete/компакция), — §1.2."""
         self._cached_header = None
 
     def is_auxiliary(self) -> bool:
-        """True для служебных user-сообщений (session summary, наг guard'а): они не
-        являются «текущим вопросом» — не получают строку токен-бюджета и не выбираются
-        как последний user при пересчёте шапки."""
         return self.is_summary or self._is_guard_nag
 
     def to_api_dict(self) -> dict[str, Any]:

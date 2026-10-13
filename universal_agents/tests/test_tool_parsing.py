@@ -60,7 +60,6 @@ class TestDetectBrokenCall(unittest.TestCase):
 
 
 class TestDetectBrokenCallWithoutGate(unittest.TestCase):
-    """require_tag=False: гейт снят, сканируется свободный ответ (тело симуляции reasoning)."""
 
     NAMES = {_read_tool.__name__, _line_range_edit_tool.__name__, _run_powershell_tool.__name__}
 

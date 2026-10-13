@@ -1,10 +1,8 @@
-"""Презентационный слой: рендеринг сообщений для консоли."""
 
 from universal_agents.models import Message, SystemMessage, UserMessage, AssistantMessage, ToolResult
 
 
 def render_message(msg: Message, label: str = "Agent") -> str:
-    """Возвращает строку для вывода сообщения в консоль."""
     if isinstance(msg, SystemMessage):
         return ""
     if isinstance(msg, UserMessage):

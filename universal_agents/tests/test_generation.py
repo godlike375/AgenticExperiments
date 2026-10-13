@@ -149,8 +149,6 @@ class TestApplyStopMarkers(unittest.TestCase):
 
 class TestAgentStructuredOutput(unittest.TestCase):
     def test_two_phase_structured_output(self):
-        """Фаза 1: <structure>...</structure> обрезается по маркеру, затем запускается
-        фаза 2 с другим prefill. Цикл завершается когда next_prefills исчерпан."""
         agent = LLMAgent(system_prompt="sys", disable_per_msg_summarization=True, autosave_enabled=False)
 
         phase1 = AssistantMessage(content="<structure>\nL1-5 foo\nL7-10 bar\n</structure>\nanalysis text")
@@ -177,7 +175,6 @@ class TestAgentStructuredOutput(unittest.TestCase):
         self.assertEqual(call_idx[0], 2)
 
     def test_single_phase_just_truncates(self):
-        """Одна фаза без next_prefills: модель обрезается по маркеру, цикл завершается."""
         agent = LLMAgent(system_prompt="sys", disable_per_msg_summarization=True, autosave_enabled=False)
 
         phase1 = AssistantMessage(content="<data>\nrow1\nrow2\n</data>\nextra analysis")
@@ -195,7 +192,6 @@ class TestAgentStructuredOutput(unittest.TestCase):
         self.assertEqual(result, "<data>\nrow1\nrow2\n</data>")
 
     def test_max_phases_limited(self):
-        """Если max_phases=1, вторая фаза не запускается (next_prefills[0] игнорируется)."""
         agent = LLMAgent(system_prompt="sys", disable_per_msg_summarization=True, autosave_enabled=False)
 
         phase1 = AssistantMessage(content="<a>\n</a>\nanalysis")
@@ -216,7 +212,6 @@ class TestAgentStructuredOutput(unittest.TestCase):
         self.assertEqual(len(responses), 0)
 
     def test_broken_call_skipped_when_marker_hit(self):
-        """Если маркер сработал, broken_call detection НЕ срабатывает на XML-контенте."""
         agent = LLMAgent(
             system_prompt="sys",
             disable_per_msg_summarization=True,

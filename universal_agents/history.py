@@ -17,7 +17,6 @@ class ChatHistory:
         self._needs_normalize: bool = False
 
     def _mark_dirty(self) -> None:
-        """Отмечает историю изменённой — следующая normalize() реально выполнится."""
         self._needs_normalize = True
 
     def _assign_seq(self, msg: Message) -> None:
@@ -48,7 +47,6 @@ class ChatHistory:
         self._per_msg_summaries.pop(id(msg), None)
 
     def prune_per_msg_summaries(self) -> None:
-        """Убирает из рабочей памяти саммари сообщений, которых больше нет в истории."""
         alive = {id(m) for m in self._messages}
         self._per_msg_summaries = {k: v for k, v in self._per_msg_summaries.items() if k in alive}
 
@@ -187,7 +185,6 @@ class ChatHistory:
             self._resync_last_user_header()
 
     def remove_failed_call_chains(self) -> int:
-        """Удаляет цепочки «неудачный вызов -> неудачный вызов» (сохраняя «неудачный -> удачный», чтобы не сбрасывать KV-кэш). Возвращает число удалённых сообщений."""
         n = len(self._messages)
         if n <= Config.AFTER_SYSTEM_PROMPT + 1:
             return 0
@@ -220,8 +217,6 @@ class ChatHistory:
 
     def save(self, path: str, loaded_tools: list[str] = None, file_states: dict = None,
              extras: dict = None):
-        """Сохраняет историю. extras — произвольные данные верхнего уровня
-        (архив сессии, состояние плана и т.п.), которые переживут /load."""
         summaries: list[str] = (
             [] if not self._per_msg_summaries
             else [self._per_msg_summaries.get(id(m)) or "" for m in self._messages]
@@ -329,15 +324,12 @@ class ChatHistory:
         return loaded_tools, file_states, summaries
 
     def get_last_user_message(self) -> Optional[UserMessage]:
-        """Последнее «настоящее» user-сообщение (служебные summary/наг guard'а не в счёт):
-        именно оно получает строку токен-бюджета в своей шапке."""
         for msg in reversed(self._messages):
             if isinstance(msg, UserMessage) and not msg.is_auxiliary():
                 return msg
         return None
 
     def _last_user_index(self) -> Optional[int]:
-        """Индекс последнего «настоящего» user-сообщения (служебные summary/наг не в счёт)."""
         for i in range(len(self._messages) - 1, -1, -1):
             m = self._messages[i]
             if isinstance(m, UserMessage) and not m.is_auxiliary():
@@ -345,20 +337,11 @@ class ChatHistory:
         return None
 
     def _resync_last_user_header(self) -> None:
-        """Пересобирает header-кэш текущего последнего user-сообщения после мутации
-        состава истории, меняющей его токен-бюджет.
-
-        Бюджет — снимок: после удаления/сжатия он устаревает (места стало больше) или
-        пропадает (прежний «последний» удалён). Вызывается ТОЛЬКО когда мутация затронула
-        область в начале префикса или сам вопрос — там KV и так мёртв. Мутации строго
-        ПОСЛЕ вопроса (вычистка нага, обрезка хвостовых заглушек) шапку не трогают: их
-        префикс цел, а сдвиг волатильной цифры сбросил бы KV всего хода (§1.2)."""
         new_last = self.get_last_user_message()
         if new_last is not None:
             new_last.reset_header_cache()
 
     def remove_at(self, indices: Iterable[int]) -> None:
-        """Удаляет сообщения по индексам (порядок не важен)."""
         idx_list = list(indices)
         last_idx = self._last_user_index()
         for idx in sorted(idx_list, reverse=True):
@@ -369,7 +352,6 @@ class ChatHistory:
             self._resync_last_user_header()
 
     def pop_pending_tool_calls(self) -> int:
-        """Удаляет висящие tool_calls в конце истории (без результата); возвращает число удалённых. Используется перед суммаризацией, чтобы не тащить незавершённый вызов."""
         popped = 0
         while (
             self._messages
@@ -383,7 +365,6 @@ class ChatHistory:
         return popped
 
     def _message_len(self, msg: Message) -> int:
-        """Исчерпывающая длина сообщения: content + reasoning_content + tool_calls."""
         total = len(msg.content or '')
         if isinstance(msg, AssistantMessage):
             total += len(msg.reasoning_content or '')
@@ -392,14 +373,12 @@ class ChatHistory:
         return total
 
     def content_len(self, start: int, end: int) -> int:
-        """Суммарная исчерпывающая длина сообщений [start..end]: content + reasoning_content + tool_calls (все расходуют токены)."""
         return sum(
             self._message_len(m)
             for m in self._messages[start:end + 1]
         )
 
     def replace_range(self, start: int, end: int, replacement: list[Message]) -> None:
-        """Заменяет сообщения [start..end] на replacement."""
         last_idx = self._last_user_index()
         for m in replacement:
             self._assign_seq(m)
@@ -410,14 +389,12 @@ class ChatHistory:
 
 
     def get_session_summary(self) -> Optional[str]:
-        """Текст текущего session summary без обёртки (или None); при повторной компакции подаётся модели для слияния."""
         for m in self._messages:
             if isinstance(m, UserMessage) and m.is_summary:
                 return (m.content)
         return None
 
     def compress_old_messages(self, summary: str, preserve_last: int = 2) -> None:
-        """Заменяет старые сообщения одним summary UserMessage (сохраняя system prompt и последние preserve_last). При необходимости сдвигает границу назад, чтобы не оставить ToolResult без предшествующего вызова ассистента."""
         safe_end = len(self._messages) - preserve_last
 
         if Config.AFTER_SYSTEM_PROMPT > safe_end:

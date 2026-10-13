@@ -1,4 +1,3 @@
-"""Тесты доверия путям и доверенных каталогов (tools_mixin)."""
 
 import os
 import tempfile

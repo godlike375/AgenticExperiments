@@ -11,7 +11,6 @@ MAX_SUB_AGENT_DEPTH = 1
 
 
 def run_subagent_once(agent, prompt: str, temp: float = 0.2, max_iter: int = None) -> str:
-    """Запускает субагента для задачи; проверка глубины, полный набор схем родителя (KV-cache safe) и наследование прочитанных файлов (read-skip)."""
     from universal_agents.constants import err, ok
 
     depth = getattr(agent, '_depth', 0)
@@ -46,7 +45,6 @@ def run_subagent_once(agent, prompt: str, temp: float = 0.2, max_iter: int = Non
 
 
 class SubAgent:
-    """Субагент на базе LLMAgent: наследует системный промпт, историю и полный набор схем родителя (KV-cache safe, denied_tools => ошибка «forbidden»); изолированный трекер токенов; рекурсия блокируется depth check."""
 
     def __init__(
             self,
@@ -162,7 +160,6 @@ class SubAgent:
         on_reasoning_end: Callable[[], None],
         disable_per_msg_summarization: bool,
     ):
-        """Фабрика сборки LLMAgent для субагента: трекер передаётся в конструктор; tools_config=None + external_plugins=parent_tools дают родительский набор схем (префикс совпадает)."""
         from universal_agents.agent import LLMAgent
 
         agent = LLMAgent(
@@ -192,15 +189,6 @@ class SubAgent:
         return agent
 
     def run(self, task: str, prefill: str = None) -> str:
-        """Выполняет задачу и возвращает финальный ответ субагента.
-
-        Ответ берётся напрямую из возвращаемого значения ``chat`` (оно уже
-        содержит финальный текст ассистента, включая prefill) — это надёжнее,
-        чем извлечение из истории: история субагента клонирует родительский
-        префикс, и при срабатывании внутри ``chat`` auto-summary (компакции)
-        сообщения перестраиваются/сдвигаются, из-за чего поиск по истории
-        (даже по всей ``history[:]``) может не найти ответ. Поиск по истории
-        оставлен только как страховка, если ``chat`` вернул пустоту."""
         result = self._agent.chat(task, max_iter=self._max_iter, prefill=prefill)
         if result and result.strip():
             return result

@@ -1,24 +1,3 @@
-"""Хостовая сторона изоляции инструментов (docs/TOOL_ISOLATION_SPEC.md).
-
-GroupManager владеет состоянием групп (session) и воркерами. Состояние — только у
-хоста; воркер забирает его с каждым запросом и возвращает обновлённым (дельта не
-передаётся — состояние ходит целиком). Убить воркер можно в любой момент: состояние
-осталось у хоста, следующий вызов поднимет процесс заново.
-
-Режимы:
-  • isolated=True  — внешний инструмент исполняется в дочернем процессе группы
-    (SubprocessGroupWorker), который хост может убить по стопу/таймауту;
-  • isolated=False — исполнение в процессе хоста (тесты/отладка): сессия и рабочая
-    папка применяются так же, но без отдельного процесса.
-
-Воркер группы запускается через subprocess.Popen, а не multiprocessing.Process:
-на Windows multiprocessing.spawn при старте синхронно пишет в bootstrap-pipe и
-ждёт, пока ребёнок прочитает, — а ребёнок при этом инициализирует sys.stdin/
-stdout/stderr, унаследованные от родителя. Если родитель трогал консоль
-(tkinter, pyautogui, stdin-поток CLI, IDE-консоль) — ребёнок залипает в
-init_sys_streams, pipe переполняется, и start() висит вечно. subprocess.Popen
-передаёт ребёнку явные PIPE-хендлы, ничего не наследуется — проблемы нет.
-"""
 
 from __future__ import annotations
 
@@ -45,14 +24,10 @@ WorkerCallResult = namedtuple("WorkerCallResult", "status value session")
 
 
 def _worker_died_message(group: str) -> str:
-    """Единая сигнатура «воркер не поднялся» (сравнивается при фолбэке в in-process)."""
     return f"worker for group '{group}' died"
 
 
 def _no_window_kwargs() -> dict:
-    """Popen-аргументы, чтобы ребёнок на Windows не получил консоль: ни своей, ни
-    унаследованной от родителя. Именно отсутствие консольного хендла устраняет
-    залипание init_sys_streams."""
     if sys.platform == "win32":
         si = subprocess.STARTUPINFO()
         si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
@@ -61,9 +36,6 @@ def _no_window_kwargs() -> dict:
 
 
 def tool_config_snapshot() -> dict:
-    """Снапшот Config (все поля dataclass) для переноса в дочерний процесс: spawn не
-    наследует память родителя, а инструментам нужны их лимиты (MAX_READ_*, BASH_*,
-    SCREENSHOT_* и т.д.)."""
     snapshot = {}
     for field in dataclasses.fields(Config):
         snapshot[field.name] = getattr(Config, field.name)
@@ -71,7 +43,6 @@ def tool_config_snapshot() -> dict:
 
 
 def default_group_session(group: str) -> dict:
-    """Начальное состояние группы (домены крошечные: строка/число/None)."""
     if group == "workspace":
         return {"cwd": os.getcwd()}
     if group == "desktop":
@@ -82,12 +53,6 @@ def default_group_session(group: str) -> dict:
 
 
 class SubprocessGroupWorker:
-    """Один воркер-процесс группы. Ленивый старт, переиспользование, принудительное
-    завершение по стопу/таймауту (убитый воркер не переиспользуется — хост поднимет новый).
-
-    stdio ребёнка — явные PIPE, поэтому унаследованное состояние родителя (в т.ч.
-    испорченные консольные хендлы IDE/pyautogui/stdin-потока) не передаётся вообще.
-    """
 
     def __init__(
             self,
@@ -163,9 +128,6 @@ class SubprocessGroupWorker:
 
 
     def _warmup(self, timeout: float) -> None:
-        """Проверяем, что воркер отвечает. Если нет — не бросаем исключение: следующий
-        же вызов вернёт WorkerCallResult("error", "worker ... died"), и GroupManager
-        сработает как обычно (деградация в in-process)."""
         try:
             self.call("__noop__", {}, self._session, timeout=timeout)
         except Exception:
@@ -175,7 +137,6 @@ class SubprocessGroupWorker:
         return self._proc is not None and self._proc.poll() is None
 
     def kill(self) -> None:
-        """Принудительно завершает процесс воркера."""
         proc, self._proc = self._proc, None
         if proc is None:
             return
@@ -265,11 +226,6 @@ class SubprocessGroupWorker:
 
 
 class LocalWorker:
-    """Воркер группы в процессе хоста (isolated=False: тесты и фолбэк при сбое spawn).
-
-    Тот же контракт, что у SubprocessGroupWorker (.call → WorkerCallResult), но без
-    отдельного процесса: инструмент резолвится и вызывается прямо здесь. Состояние
-    группы хост применяет так же — через tool_session на время вызова."""
 
     def __init__(
             self,
@@ -330,11 +286,6 @@ class LocalWorker:
 
 
 class GroupManager:
-    """Владеет состоянием групп и воркерами; точка делегирования внешних инструментов.
-
-    call() — единый путь: воркер группы (процесс или локальный) отвечает по одному
-    контракту. isolated лишь выбирает реализацию воркера (SubprocessGroupWorker vs
-    LocalWorker), а не отдельную ветку исполнения."""
 
     def __init__(
             self,
@@ -359,9 +310,6 @@ class GroupManager:
 
 
     def session(self, group: str) -> dict:
-        """Состояние группы (владеет хост). Создаётся лениво. Рабочая папка
-        синхронизируется с процессом хоста, чтобы инструменты вне групп видели тот же
-        cwd, что и раньше."""
         session = self._sessions.get(group)
         if session is None:
             session = default_group_session(group)
@@ -391,8 +339,6 @@ class GroupManager:
         return result
 
     def _get_worker(self, group: str):
-        """Живой воркер группы; убитый/отсутствующий пересоздаётся. Сбой старта процесса —
-        разовая деградация в LocalWorker, чтобы приложение осталось рабочим."""
         worker = self._workers.get(group)
         if worker is not None and worker.is_alive():
             return worker
@@ -421,8 +367,6 @@ class GroupManager:
         )
 
     def _sync_host_cwd(self, group: str) -> None:
-        """Рабочая папка группы — авторитетна у хоста. Инструменты вне групп (read и т.п.)
-        резолвят относительные пути от cwd процесса, поэтому держим его в согласии с сессией."""
         cwd = self._sessions.get(group, {}).get("cwd")
         if cwd and os.path.isdir(cwd):
             try:
@@ -432,8 +376,6 @@ class GroupManager:
                 pass
 
     def _degrade_to_in_process(self, reason: str) -> None:
-        """Разовое отключение изоляции при сбое старта воркера: приложение должно
-        остаться рабочим."""
         if self.isolated:
             self.isolated = False
             print(
@@ -460,8 +402,6 @@ def make_worker_resolve(
         args: dict,
         stop_check: Optional[Callable[[], bool]] = None,
 ):
-    """Разрешение отложенной правки для изолированного обёрнутого инструмента: по «yes»
-    хост повторно зовёт инструмент в воркере (dry_run=False применяет правку)."""
 
     def resolve(agent, text):
         raw = (text or "").strip().lower()

@@ -1,7 +1,3 @@
-"""Тесты PC-инструментов (tools/pc_control.py): координаты, схемы, allow-list.
-
-GUI замокан (ImageGrab / pyautogui / pyperclip) — тесты не трогают реальный экран.
-"""
 
 from __future__ import annotations
 
@@ -29,7 +25,6 @@ def _fake_screen(w: int = 1920, h: int = 1080) -> Image.Image:
 
 
 class PCControlTestCase(unittest.TestCase):
-    """Общий state (screen_state.last_scale) сохраняется между тестами."""
 
     def setUp(self):
         prev = screen_state.last_scale
@@ -148,7 +143,6 @@ class TestMouseTools(PCControlTestCase):
 
 
 class TestKeyResolution(unittest.TestCase):
-    """Раскладка не должна ломать раскладку клавиш: буквы — scancode, именованные — VK."""
 
     def test_letters_resolve_to_scancodes(self):
         self.assertEqual(pc_control._resolve_key("v"), ("scan", 0x2F, 0))
@@ -178,7 +172,6 @@ class TestKeyResolution(unittest.TestCase):
 
 class TestKeyboardTools(unittest.TestCase):
     def _sent(self, result_patcher):
-        """Список (mode, code, flags, up) реально отправленных событий."""
         calls = []
 
         def fake(mode, code, flags, up):
@@ -196,7 +189,6 @@ class TestKeyboardTools(unittest.TestCase):
         self.assertEqual(res, "Нажато: enter.")
 
     def test_press_key_combination_order(self):
-        """Модификатор вниз → клавиша вниз → клавиша вверх → модификатор вверх."""
         calls, fake = self._sent(True)
         with patch.object(pc_control, "_send_key_event", side_effect=fake), \
                 patch.object(pc_control.time, "sleep"):
@@ -209,7 +201,6 @@ class TestKeyboardTools(unittest.TestCase):
         self.assertEqual(res, "Нажато: ctrl+v.")
 
     def test_press_key_paste_uses_new_layer(self):
-        """Ctrl+V: модификатор по VK, буква — по scancode (без pyautogui-маппинга)."""
         with patch.object(pc_control, "_send_key_event", return_value=True) as send, \
                 patch.object(pc_control.time, "sleep"):
             pc_control.press_key("ctrl+v")
@@ -260,14 +251,12 @@ class TestKeyboardTools(unittest.TestCase):
         self.assertTrue(res.startswith(f"{ENVIRONMENT_PREFIX} Error"))
 
     def test_type_text_does_not_touch_focus(self):
-        """type_text не управляет фокусом: только буфер + Ctrl+V в активное окно."""
         src = inspect.getsource(pc_control.type_text_on_keyboard)
         for forbidden in ("SetForegroundWindow", "activate", "SwitchToThisWindow",
                           "AttachThreadInput", "pygetwindow"):
             self.assertNotIn(forbidden, src)
 
     def test_keyboard_never_uses_pyautogui(self):
-        """pyautogui на не-US раскладке шлёт мусорные VK — ввод только через SendInput."""
         for fn in (pc_control.type_text_on_keyboard, pc_control.press_key):
             self.assertNotIn("pyautogui", inspect.getsource(fn))
 

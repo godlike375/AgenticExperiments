@@ -1,14 +1,6 @@
-"""PC-control инструменты: скриншот с сеткой 4x4, мышь, колесо, клавиатура.
 
-Перенос screen_agent.py на рельсы universal_agents (@tool + ToolOutput с картинкой).
-Координаты в аргументах mouse/scroll-инструментов — В ПИКСЕЛЯХ ИЗОБРАЖЕНИЯ
-последнего скриншота (ровно те, что подписаны на сетке); конвертация image→screen
-идёт по масштабу последнего скриншота (screen_state.last_scale).
-
-FAILSAFE: перемести мышь в левый верхний угол экрана — pyautogui бросит исключение,
-его перехватит ExecuteMixin и вернёт модели ошибку.
-"""
-
+"""PC-control: скриншот с сеткой 4x4, мышь, клавиатура.
+Координаты в аргументах — В ПИКСЕЛЯХ ИЗОБРАЖЕНИЯ последнего скриншота; конвертация по scale."""
 from __future__ import annotations
 
 import base64
@@ -42,8 +34,6 @@ COLORS = {
 
 
 def take_screenshot() -> tuple[str, int, int, int, int, float]:
-    """Делает скриншот с наложенной сеткой.
-    Возвращает (base64_jpeg, original_w, original_h, img_w, img_h, scale)."""
     cursor_x, cursor_y = pyautogui.position()
     img = ImageGrab.grab()
     w, h = img.size
@@ -79,7 +69,6 @@ def _get_font(size=14):
 
 
 def draw_grid(img: Image.Image, cursor_x=None, cursor_y=None) -> None:
-    """Рисует сетку 4x4 с подписями координат, квадрантов и курсором."""
     draw = ImageDraw.Draw(img)
     w, h = img.size
     font = _get_font(11)
@@ -152,11 +141,7 @@ def draw_grid(img: Image.Image, cursor_x=None, cursor_y=None) -> None:
 
 
 def _current_scale() -> float:
-    """Масштаб перевода координат изображения в экранные.
-
-    Приоритет — у масштаба последнего реального скриншота (он знает точную ширину
-    захвата, включая мониторы); до первого скриншота считается тем же фингулем,
-    что и take_screenshot."""
+    """Масштаб image→screen: приоритет у последнего скриншота; до него — эвристика."""
     s = screen_state.get_last_scale()
     if s is not None and s > 0:
         return s
@@ -165,7 +150,6 @@ def _current_scale() -> float:
 
 
 def _to_screen(x: int, y: int) -> tuple[int, int]:
-    """Координаты изображения (пиксели сетки) → координаты экрана."""
     scale = _current_scale()
     return round(x / scale), round(y / scale)
 
@@ -245,7 +229,6 @@ if _IS_WINDOWS:
 
 
 def _resolve_key(name: str) -> tuple[str, int, int] | None:
-    """Имя клавиши → ('vk'|'scan', код, флаги). None — клавиша неизвестна."""
     n = (name or "").strip().lower()
     if not n:
         return None
@@ -260,7 +243,6 @@ def _resolve_key(name: str) -> tuple[str, int, int] | None:
 
 
 def _send_key_event(mode: str, code: int, flags: int, up: bool) -> bool:
-    """Одно событие клавиатуры. False — система отклонила ввод (SendInput вернул 0)."""
     if not _IS_WINDOWS:
         return False
     fl = flags | (_KEYEVENTF_KEYUP if up else 0)
@@ -282,7 +264,6 @@ def _send_key_event(mode: str, code: int, flags: int, up: bool) -> bool:
 
 
 def _send_combo(parts: list[str]) -> str | None:
-    """Нажимает комбинацию клавиш. None — успех, иначе текст ошибки для модели."""
     resolved: list[tuple[str, tuple[str, int, int]]] = []
     for part in parts:
         key = _resolve_key(part)

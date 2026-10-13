@@ -10,12 +10,6 @@ __all__ = ["tool", "ToolOutput", "ENVIRONMENT_PREFIX"]
 
 @dataclass
 class ToolOutput:
-    """Возвращаемое значение инструмента с опциональными картинками (альтернатива str).
-
-    text — обычный текстовый вывод (усечение, саммаризация, is_error_content работают
-    как раньше); images — base64 JPEG, которые уйдут в API как image_url-части
-    результата (side-field ToolResult.images). Спайк фазы 0 подтвердил: LM Studio
-    принимает image в role=tool и модель его видит."""
 
     text: str
     images: list[str] = field(default_factory=list)

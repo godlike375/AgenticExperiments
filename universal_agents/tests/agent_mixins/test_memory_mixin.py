@@ -52,9 +52,6 @@ class FakeAgent(MemoryMixin):
 
 
 def _compression_router(summary_text=SUMMARY_TEXT, calls=None):
-    """Перехват транспорта: на вызов компакции отвечает заготовленным текстом
-    (полная перезапись заметок по 7 разделам). Захватывает весь список
-    сообщений (полная история + инструкция), а не только инструкцию."""
     def fake_call(msgs, **kwargs):
         if calls is not None:
             calls.append(msgs)

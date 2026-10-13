@@ -1,14 +1,3 @@
-"""Тесты изоляции инструментов (docs/TOOL_ISOLATION_SPEC.md).
-
-Проверяют: метаданные группы/hidden и вывод вида инструмента; исключение скрытых
-инструментов из схем/load; мягкий контроль разметки; делегирование внешних
-инструментов в воркер группы (spawn) с сохранением состояния у хоста; убийство
-зависшего воркера по стопу; обёрнутый протокол правки через воркер; прокси-агент
-группы плагинов.
-
-Autouse-фикстура conftest отключает изоляцию для поведенческих тестов агента; здесь
-GroupManager(isolated=True) создаётся явно, поэтому изоляция не зависит от Config.
-"""
 
 from __future__ import annotations
 
@@ -200,7 +189,6 @@ class TestIsolatedStop(unittest.TestCase):
 
 
 def _dying_worker(*args, **kwargs):
-    """Воркер, который сразу умирает — имитация сбоя spawn (init_sys_streams под IDE)."""
     os._exit(1)
 
 
@@ -263,8 +251,6 @@ class TestPluginProxy(unittest.TestCase):
 
 
 class TestAgentEndToEndIsolated(unittest.TestCase):
-    """Реальный агент с включённой изоляцией: внешние инструменты идут через воркеры,
-    скрытое низкоуровневое чтение — в воркере workspace (гибридный read)."""
 
     def setUp(self):
         self._tmp = tempfile.mkdtemp()

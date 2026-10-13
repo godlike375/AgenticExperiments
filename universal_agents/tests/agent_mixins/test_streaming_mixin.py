@@ -10,7 +10,6 @@ from tests.conftest import double_me, stream_chunk, stream_delta
 
 
 class TestWatchDiverged(unittest.TestCase):
-    """§Streaming: `_watch_diverged` отличает продолжение прежнего ответа от расходящегося."""
 
     def test_matches_prefix(self):
         self.assertFalse(StreamingMixin._watch_diverged("The answer is 4", "", "The answer is"))
@@ -26,7 +25,6 @@ class TestWatchDiverged(unittest.TestCase):
 
 
 class TestStreamInterrupt(unittest.TestCase):
-    """§Streaming: прерывание стрима через stop_check и проброс GenerationInterrupted."""
 
     def make_streaming_agent(self):
         return LLMAgent(
@@ -58,10 +56,6 @@ class TestStreamInterrupt(unittest.TestCase):
         self.assertTrue(msg.streamed)
 
     def test_exception_with_stop_raises_generation_interrupted(self):
-        """Если стрим прерывается ошибкой (connection drop) и пользователь запросил
-        остановку, вызывается GenerationInterrupted. close_stream патчится в no-op,
-        чтобы watcher не подавлял异常 mock-генератора (реальный HTTP close вызывает
-        ConnectionError на next(), здесь эмулируем через RuntimeError)."""
         agent = self.make_streaming_agent()
 
         def stream(*args, **kwargs):
@@ -95,9 +89,6 @@ class TestStreamInterrupt(unittest.TestCase):
 
 
 class TestStreamDivergence(unittest.TestCase):
-    """§Streaming: позднее расхождение с прежним ответом → достройка спокойной
-    генерацией; расхождение с первого символа — свежий ответ целиком, принимается
-    как есть без достройки (иначе холодный рестарт: лишний вызов + риск дубля)."""
 
     def test_late_divergence_continues_on_calm_temp(self):
         agent = LLMAgent(system_prompt="sys", streaming_enabled=True, on_stream_chunk=lambda _: None)

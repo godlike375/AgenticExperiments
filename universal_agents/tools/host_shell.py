@@ -1,4 +1,3 @@
-"""Инструменты исполнения shell-команд напрямую на хосте (без Docker): run_powershell и run_bash_host. Помечены path_safety=True — пути вне корня проекта (.git) требуют подтверждения."""
 
 from __future__ import annotations
 
@@ -13,7 +12,6 @@ from universal_agents.subprocess_utils import run_capture, truncate_middle
 
 
 def _git_bash_candidates() -> list[str]:
-    """Стандартные места установки Git Bash на Windows."""
     candidates = []
     if Config.GIT_BASH_PATH:
         candidates.append(Config.GIT_BASH_PATH)
@@ -35,7 +33,6 @@ def _is_windows() -> bool:
 
 
 def _resolve_bash_backend() -> str:
-    """Определяет, каким bash исполнять, согласно Config.BASH_BACKEND."""
     backend = (Config.BASH_BACKEND or "auto").strip().lower()
     if backend == "gitbash":
         return "gitbash"
@@ -53,7 +50,6 @@ def _resolve_bash_backend() -> str:
 
 
 def _build_bash_command(command: str) -> list[str]:
-    """Собирает argv для запуска bash-команды согласно выбранному бэкенду."""
     backend = _resolve_bash_backend()
 
     if backend == "gitbash":

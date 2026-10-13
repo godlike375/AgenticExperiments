@@ -79,35 +79,24 @@ class TestChatHistory(unittest.TestCase):
         self.assertEqual(roles, ["system", "user"])
 
     def test_delete_range_resyncs_new_last_user_header(self):
-        """Удаление последнего вопроса возвращает «последность» к предыдущему — его шапку
-        пересобираем, чтобы бюджет был актуален (прежняя цифра устарела/отсутствует).
-        Пересборка бесплатна: удаление инвалидирует префикс от своей точки."""
         h = history_with_dialog()  # 0 sys, 1 u1, 2 a1, 3 tool, 4 a2, 5 u2, 6 a3
         h[1]._cached_header = "cached-u1"
         h.delete_range(5, 6)  # удаляем u2 и a3 → последним остаётся u1
         self.assertIsNone(h[1]._cached_header)
 
     def test_delete_range_before_last_user_resyncs_header(self):
-        """Удаление сообщений ПЕРЕД вопросом меняет его префикс и токен-бюджет — шапку
-        пересобираем (KV от точки удаления и так мёртв)."""
         h = history_with_dialog()
         h[2]._cached_header = "cached-u2"  # u2 после удаления станет индексом 2
         h.delete_range(2, 4)  # удаляем a1+tool+a2 (перед u2)
         self.assertIsNone(h[2]._cached_header)
 
     def test_remove_at_after_last_user_keeps_its_header(self):
-        """Удаление строго ПОСЛЕ вопроса (напр. хвостовая заглушка или наг guard'а) шапку
-        вопроса не трогает: его префикс цел, сдвиг волатильной цифры сбросил бы KV всего
-        хода (§1.2)."""
         h = history_with_dialog()
         h[5]._cached_header = "cached-u2"
         h.remove_at({6})  # a3 — после u2
         self.assertEqual(h[5]._cached_header, "cached-u2")
 
     def test_add_preserves_previous_last_user_header(self):
-        """Добавление нового user-сообщения не трогает кэш старого последнего: собственные
-        байта старого не менялись, а остаток бюджета в его шапке — снимок на момент
-        постановки вопроса (осознанный платёж за KV-стабильность)."""
         h = history_with_dialog()
         h[5]._cached_header = "cached-u2"
         h.add(UserMessage("u3"))
@@ -120,8 +109,6 @@ class TestChatHistory(unittest.TestCase):
         self.assertIsNone(h[1]._cached_header)
 
     def test_edit_message_resets_modified_user_header(self):
-        """Обратная сторона правила: у сообщения, которое МЫ ИЗМЕНИЛИ, кэш сбрасывается —
-        его KV и так мёртв, пересборка шапки ничего не стоит (§1.2)."""
         h = history_with_dialog()
         h[1]._cached_header = "cached-u1"
         h[5]._cached_header = "cached-u2"
@@ -153,7 +140,6 @@ class TestChatHistory(unittest.TestCase):
 
 
 class TestNormalizeMergeImages(unittest.TestCase):
-    """normalize(): склейка соседних user-сообщений не теряет картинки."""
 
     def _merged_users(self, first: UserMessage, second: UserMessage) -> list[UserMessage]:
         h = ChatHistory("sys")

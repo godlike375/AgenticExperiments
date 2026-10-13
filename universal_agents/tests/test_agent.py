@@ -155,9 +155,6 @@ class TestPriorTextHashes(unittest.TestCase):
 
 
 class TestConfirmationGuardVerdict(unittest.TestCase):
-    """Приоритет guard'а pending-операции над детектором дублей (§1.11): повтор текста при
-    висящей операции — не «дубль качества», а невыполненный протокол подтверждения. Повтор
-    шапки вместе с правильным вызовом respond_to_system — выполнение протокола, не дубль."""
 
     def setUp(self):
         self.agent = LLMAgent(system_prompt="sys")
@@ -212,8 +209,6 @@ class TestConfirmationGuardVerdict(unittest.TestCase):
 
 
 class TestDuplicateTextAcrossHistory(unittest.TestCase):
-    """Сценарий пользователя: модель пишет один и тот же комментарий перед каждым
-    вызовом read (с prefill 'LLM:\\n"') — пусть инструменты разные."""
 
     def test_repeated_comment_with_different_tool_call_triggers_regen(self):
         agent = LLMAgent(
@@ -268,7 +263,6 @@ class TestDuplicateTextAcrossHistory(unittest.TestCase):
         self.assertEqual(count, 1)
 
     def test_different_continuation_same_prefill_not_blocked(self):
-        """Одна приставка, другой текст после неё — не ложное срабатывание."""
         agent = LLMAgent(
             system_prompt="sys",
             max_generation_attempts=3,
@@ -288,12 +282,8 @@ class TestDuplicateTextAcrossHistory(unittest.TestCase):
 
 
 class TestDuplicateEscalation(unittest.TestCase):
-    """Эскалация повторов: первые дубли — просто отброс + буст температуры (без NAG),
-    после Config.DUPLICATE_NAG_THRESHOLD подряд — вставка NAG в контекст, а при
-    исчерпании MAX_LOOP_RETRIES — сдача хода пользователю (дубль НЕ пропускается)."""
 
     def test_single_duplicate_then_fresh_no_nag(self):
-        """Один дубль → отброс + буст, без NAG в запросах; свежий ответ принимается."""
         agent = LLMAgent(
             system_prompt="sys",
             max_generation_attempts=3,
@@ -319,7 +309,6 @@ class TestDuplicateEscalation(unittest.TestCase):
             self.assertNotIn(_REPEAT_ANSWER_NAG, msgs[-1][1])
 
     def test_nag_injected_only_after_threshold(self):
-        """NAG появляется в контексте только после DUPLICATE_NAG_THRESHOLD дублей."""
         agent = LLMAgent(
             system_prompt="sys",
             max_generation_attempts=4,
@@ -346,7 +335,6 @@ class TestDuplicateEscalation(unittest.TestCase):
             self.assertTrue(_has_nag(captured[i]))
 
     def test_max_retries_hands_control_to_user(self):
-        """Дубль, не вылеченный за все попытки, НЕ пропускается: ход отдаётся пользователю."""
         agent = LLMAgent(
             system_prompt="sys",
             max_generation_attempts=2,
@@ -368,10 +356,6 @@ class TestDuplicateEscalation(unittest.TestCase):
         self.assertEqual(count, 1)
 
     def test_duplicate_retry_keeps_prefix_byte_identical(self):
-        """Регрессия поломки KV-кэша: перегенерация после DUPLICATE ANSWER DETECTED
-        должна уходить с байт-идентичным префиксом (модель не перечитывает контекст
-        с нуля). Раньше watch-достройка прерывала стрим на расхождении и достраивала
-        ответ по partial — сервер кэшировал дубль как «префикс» и сломал переиспользование."""
         agent = LLMAgent(
             system_prompt="sys",
             max_generation_attempts=3,
@@ -419,8 +403,6 @@ def _make_failing_agent(on_system_msg):
 
 
 class TestIdenticalErrorLimit(unittest.TestCase):
-    """Одинаковые инструмент + аргументы + текст ошибки подряд — это зацикливание,
-    лимит достигается, ход сдаётся пользователю (прежнее поведение сохраняется)."""
 
     def test_identical_errors_reach_limit(self):
         calls = []
@@ -458,8 +440,6 @@ class TestIdenticalErrorLimit(unittest.TestCase):
 
 
 class TestVaryingErrorNoLimit(unittest.TestCase):
-    """Разные ошибки (другой текст, другие аргументы) — это диагностика, а не
-    зацикливание: даже больше порога ошибок подряд лимит НЕ достигается."""
 
     def test_varying_error_text_does_not_reach_limit(self):
         calls = []
@@ -483,8 +463,6 @@ class TestVaryingErrorNoLimit(unittest.TestCase):
         self.assertFalse(any("LIMIT REACHED" in m for m in calls))
 
     def test_one_different_error_resets_series(self):
-        """Если среди одинаковых ошибок вклинилась другая — серия начинается заново:
-        одиночные совпадения по разные стороны разрыва в лимит не складываются."""
         calls = []
         agent = _make_failing_agent(calls.append)
         agent._thinking_enabled = True
@@ -502,8 +480,6 @@ class TestVaryingErrorNoLimit(unittest.TestCase):
 
 
 class TestSignatureDerivation(unittest.TestCase):
-    """Юнит-проверка сигнатуры ошибки: одинаковые вызовы дают одинаковую сигнатуру,
-    отличаться должен любой из трёх компонентов (инструмент/аргументы/ошибка)."""
 
     def _signature(self, name: str, args: str, error_content: str) -> str:
         agent = _make_failing_agent(lambda x: None)
@@ -538,8 +514,6 @@ class TestSignatureDerivation(unittest.TestCase):
 
 
 class TestTurnStateSignature(unittest.TestCase):
-    """Поведение счётчика: счёт по-сигнатурный. Каждая сигнатура растёт независимо —
-    чередование [A,B,A,B,...] тоже зацикливание и даёт лимит по любой из них."""
 
     def test_series_counts_only_identical(self):
         from universal_agents.agent import TurnState
@@ -554,8 +528,6 @@ class TestTurnStateSignature(unittest.TestCase):
         self.assertTrue(state.max_errors_reached)
 
     def test_alternating_signatures_accumulate_independently(self):
-        """[A,B,A,B,...]: A и B растут по отдельности — чередование НЕ сбрасывает.
-        До достижения одной из них MAX лимит не наступает."""
         from universal_agents.agent import TurnState
 
         state = TurnState()
@@ -566,11 +538,6 @@ class TestTurnStateSignature(unittest.TestCase):
         self.assertFalse(state.max_errors_reached)
 
     def test_alternating_signatures_reach_limit_at_2x(self):
-        """Половина повторений на сигнатуру — порог вдвое больше, но он достижим:
-        когда ЛЮБАЯ из сигнатур добирает MAX, ход прерывается.
-
-        (Это тот случай, что раньше уходил в бесконечный цикл: серия «сбрасывалась»
-        на каждой смене сигнатуры и лимит никогда не наступал.)"""
         from universal_agents.agent import TurnState
 
         state = TurnState()
@@ -581,8 +548,6 @@ class TestTurnStateSignature(unittest.TestCase):
         self.assertTrue(state.max_errors_reached)
 
     def test_one_different_error_does_not_reset_accumulated_count(self):
-        """Другая сигнатура между повторами одной и той же — не сброс: модель могла
-        диагностировать, но точный сбой A всё равно повторился MAX раз."""
         from universal_agents.agent import TurnState
 
         state = TurnState()
@@ -625,9 +590,6 @@ class TestTurnStateSignature(unittest.TestCase):
 
 
 class TestAlternatingErrorsReachLimit(unittest.TestCase):
-    """Чередующиеся разные сигнатуры [A,B,A,B,...] — реальное зацикливание: раньше
-    серия сбрасывалась на каждой смене и цикл шёл бесконечно, теперь ЛЮБАЯ сигнатура,
-    набравшая MAX_CONSECUTIVE_ERRORS, прерывает ход."""
 
     def test_alternating_failures_are_interrupted(self):
         calls = []
@@ -647,8 +609,6 @@ class TestAlternatingErrorsReachLimit(unittest.TestCase):
 
 
 class TestCompressionResetsCounters(unittest.TestCase):
-    """Сжатие истории убирает старые ошибки из контекста — счётчики повторов (§1.10)
-    сбрасываются, отсчёт зацикливания идёт по актуальной картине."""
 
     def _agent_compressing_once(self):
         calls = []
@@ -690,8 +650,6 @@ class TestCompressionResetsCounters(unittest.TestCase):
         self.assertFalse(any("LIMIT REACHED" in m for m in calls))
 
     def test_compression_does_not_reset_without_compaction(self):
-        """Если сжатия фактически не было (низкая занятость контекста) — счётчики
-        не трогаются и серия из MAX одинаковых ошибок всё равно прерывается."""
         calls = []
         agent = _make_failing_agent(calls.append)
         agent._thinking_enabled = True

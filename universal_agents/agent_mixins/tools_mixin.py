@@ -1,4 +1,3 @@
-"""Mixin управления инструментами LLMAgent (делегирование в ToolManager + path-safety)."""
 
 from __future__ import annotations
 
@@ -10,16 +9,14 @@ from universal_agents.project_root import find_project_root, external_paths
 
 
 class ToolsMixin:
-    """Публичная обвязка поверх ToolManager: load/unload/trust и проверка путей."""
+    """Обвязка поверх ToolManager: load/unload/trust и проверка путей."""
 
     @property
     def _all_tools(self) -> dict:
-        """Карта активных инструментов (схемы + обработчики)."""
         return self.tools_manager.tools_map
 
     @property
     def tools(self) -> list[dict]:
-        """JSON-схемы активных инструментов для API."""
         return self.tools_manager.schemas
 
     @property
@@ -31,35 +28,28 @@ class ToolsMixin:
         return self.tools_manager.trusted_dirs
 
     def load_tool(self, name: str) -> str:
-        """Enable a previously disabled tool by name."""
         return self.tools_manager.load(name)
 
     def unload_tool(self, name: str) -> str:
-        """Disable a tool by name, removing it from available tools."""
         return self.tools_manager.unload(name)
 
     def is_tool_denied(self, name: str) -> bool:
-        """True, если вызов инструмента запрещён запретительным конфигом."""
         return self.tools_manager.is_denied(name)
 
     def list_available_tools(self) -> str:
-        """List all available (loadable) tools from plugins directory."""
         return self.tools_manager.list_available()
 
     def trust_dir(self, path: str) -> str:
-        """Add a directory to trusted dirs (edit tools skip confirmation)."""
         return self.tools_manager.trust_dir(path)
 
     def untrust_dir(self, path: str) -> str:
-        """Remove a directory from trusted dirs."""
         return self.tools_manager.untrust_dir(path)
 
     def is_path_trusted(self, path: str) -> bool:
-        """Check if path is inside a trusted directory."""
         return self.tools_manager.is_path_trusted(path)
 
     def _auto_trust_git_root(self) -> None:
-        """При наличии валидного .git в текущей/родительской папке доверяем корень проекта: редакторы файлов внутри него не запрашивают подтверждение (git позволяет откатить правки)."""
+        """При наличии .git доверяем корень проекта: редакторы внутри него не спрашивают подтверждение."""
         if not Config.AUTO_TRUST_GIT_ROOT:
             return
         root = find_project_root()
@@ -67,7 +57,7 @@ class ToolsMixin:
             self.tools_manager.trusted_dirs.add(os.path.abspath(root))
 
     def _check_external_paths(self, name: str, args: dict) -> list[str]:
-        """Для инструментов с path_safety извлекает из аргументов команды пути вне корня проекта (.git) и возвращает список внешних. Триггерятся только существующие пути (создание менее критично)."""
+        """Для path_safety: извлекает пути вне корня проекта (.git); только существующие."""
         if not args:
             return []
         root = find_project_root()
@@ -83,7 +73,6 @@ class ToolsMixin:
         return list(dict.fromkeys(external))
 
     def _known_tool_names(self) -> set[str]:
-        """Имена всех инструментов, о которых модель может знать (загруженных и доступных к загрузке)."""
         names = set(self._all_tools.keys())
         names |= self.tools_manager.all_known_names
         return names

@@ -87,7 +87,6 @@ class TestMessages(unittest.TestCase):
 
 
 class TestImageSerialization(unittest.TestCase):
-    """to_api_dict: строка без картинок, список частей с картинками."""
 
     def test_tool_result_without_images_is_plain_str(self):
         tr = ToolResult.success("t1", _read_tool.__name__, "ok")
@@ -116,7 +115,6 @@ class TestImageSerialization(unittest.TestCase):
         self.assertEqual(d["content"][1]["type"], "image_url")
 
     def test_serialization_is_stable_between_calls(self):
-        """KV-кэш: повторная сериализация одного объекта байт-идентична."""
         tr = ToolResult("t1", "screenshot", "ok", images=[B64])
         um = UserMessage("текст", images=[B64])
         for msg in (tr, um):
@@ -126,7 +124,6 @@ class TestImageSerialization(unittest.TestCase):
 
 
 class TestImagePersist(unittest.TestCase):
-    """to_persist_dict / load_from_payload: картинки в JSON только под флагом."""
 
     def test_persist_strips_images_by_default(self):
         tr = ToolResult("t1", "screenshot", "ок", images=[B64])

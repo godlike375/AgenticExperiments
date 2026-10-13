@@ -12,11 +12,6 @@ if TYPE_CHECKING:
 
 
 def _hash_api_message(d) -> str:
-    """Стабильный хэш сериализованного представления, уходящего в LLM.
-
-    Покрывает всё содержимое сообщения (role, content, tool_calls, заголовки
-    user-сообщений и т.п.), а также — при передаче списка — схемы инструментов.
-    """
     try:
         s = json.dumps(d, ensure_ascii=False, sort_keys=True)
     except TypeError:
@@ -25,10 +20,7 @@ def _hash_api_message(d) -> str:
 
 
 def _check_prefix_hashes(agent: "AgentContext", pairs: list) -> None:
-    """Сравнивает хеши сообщений по id с прошлой итерацией. Изменение → сброс KV-кэша.
-     Также проверяет tools и model — их смена тоже ломает кэш. Хранит состояние
-     в _prev_prefix_hashes. Новые сообщения игнорируются.
-    """
+    """Сравнивает хеши с прошлой итерацией: изменение → сброс KV-кэша (PREFIX-HASH)."""
     prev = getattr(agent, "_prev_prefix_hashes", None)
     if prev is None:
         prev = {}
@@ -71,39 +63,23 @@ def _check_prefix_hashes(agent: "AgentContext", pairs: list) -> None:
 
 
 def _format_timestamp_header(msg) -> str:
-    """Метка времени из timestamp сообщения."""
     ts = msg.timestamp.strftime("%Y-%m-%d %H:%M:%S")
     return '{' + f"{ENVIRONMENT_PREFIX}:\n{ts} \n"
 
 
 def _format_token_header(tracker, first_system_message: str = "", last_user_content: str = "") -> str:
-    """Только информация о токенах (с учётом последнего сообщения)."""
     total = tracker.get_total_context_tokens(first_system_message, last_user_content)
     remaining = tracker.max_context_tokens - total
     return f"Memory: {remaining} tokens left"
 
 
 def _format_closing_header() -> str:
-    """Закрывающая часть заголовка."""
     return " }\n\n"
 
 
 def prepare_messages_for_api(agent: AgentContext, normalize: bool = True,
                              debug_hash_check: bool = False) -> list[dict]:
-    """Готовит историю для API.
-
-    Политика шапок (§1.2): шапка user-сообщения собирается при первом обращении и дальше
-    держится байт-идентичной. Строку остатка бюджета получает только «настоящий» текущий
-    вопрос (`get_last_user_message`, без служебных summary/нага). Шапку инвалидирует
-    правка самого сообщения (`UserMessage.reset_header_cache`) и мутация состава истории,
-    меняющая бюджет (`history._resync_last_user_header` после delete/компакции/normalize).
-    Внутри хода шапка не пересобирается: там состав растёт только в хвост, а пересборка
-    сообщения в начале префикса сбросила бы KV всего хода. Поэтому в пределах хода цифра
-    остаётся снимком на момент вопроса (остаток только убывает — снимок оптимистичный).
-
-    `normalize=False` не сбрасывает dirty-флаг истории. `debug_hash_check` — сверяет хеши
-    существующих сообщений и выводит предупреждение при изменении.
-    """
+    """Готовит историю для API. Шапка user-сообщения кэшируется (§1.2): бюджет только у последнего user."""
     if normalize:
         agent.history.normalize()
     api_pairs: list = []  # (объект сообщения, api-словарь)
@@ -138,7 +114,6 @@ def prepare_messages_for_api(agent: AgentContext, normalize: bool = True,
 
 
 def get_effective_prefill(custom_prefill: Optional[str]) -> Optional[str]:
-    """Возвращает prefill, если задан."""
     if custom_prefill:
         return custom_prefill
     return None

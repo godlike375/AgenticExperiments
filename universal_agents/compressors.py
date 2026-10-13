@@ -67,15 +67,10 @@ _REQUIRED_SECTION_IDS_WITH_73 = _REQUIRED_SECTION_IDS + (
 
 
 def is_summary_message(msg) -> bool:
-    """Проверяет, является ли сообщение ранее сгенерированным авто-саммари.
-
-    Детекция исключительно по метаданным объекта `UserMessage.is_summary` —
-   никаких текстовых маркеров внутри контента не используется."""
     return isinstance(msg, UserMessage) and bool(getattr(msg, "is_summary", False))
 
 
 def _report_service_error(agent: AgentContext, context: str, err, msg_obj=None) -> None:
-    """Ошибки служебных LLM-вызовов не тонут — выводятся в system-канал."""
     if err:
         agent.on_system_msg(f"[llm-service] Error in {context}: {err}")
     elif not msg_obj or not getattr(msg_obj, "content", None):
@@ -83,7 +78,6 @@ def _report_service_error(agent: AgentContext, context: str, err, msg_obj=None) 
 
 
 def _dense_summarize_message(agent: AgentContext, content: str) -> Optional[str]:
-    """Плотное безпотерьное саммари одного сообщения (per-message режим); складывается в рабочую память."""
     content = (content or "").strip()
     if not content:
         return None
@@ -107,7 +101,6 @@ def _dense_summarize_message(agent: AgentContext, content: str) -> Optional[str]
 def _draft_task_summary(
     agent: AgentContext, history_msgs: list[dict], task_id: str, task_title: str
 ) -> Optional[str]:
-    """Черновик саммари завершённой подзадачи по её сегменту истории."""
     prompt = (
         f"{ENVIRONMENT_PREFIX} Below is the execution trace of a COMPLETED subtask "
         f"'{task_title}' (id={task_id}).\n"
@@ -133,7 +126,6 @@ def _draft_task_summary(
 def _review_task_summary(
     agent: AgentContext, history_msgs: list[dict], draft: str, task_id: str, task_title: str
 ) -> Optional[str]:
-    """Review-проход: прунинг устаревшего + добавление пропущенного в черновике."""
     review_prompt = (
         f"{ENVIRONMENT_PREFIX} Below is a DRAFT summary of the completed subtask "
         f"'{task_title}' (id={task_id}) from the conversation above.\n"
@@ -155,7 +147,6 @@ def _review_task_summary(
 
 
 def synthesize_task_goal(agent: AgentContext, tool_name: str) -> str:
-    """Формулирует через LLM точную цель анализа вывода конкретного инструмента."""
     agent.on_system_msg(f"[GOAL SYNTHESIS] Analyzing conversation history to formulate goal for '{tool_name}'...")
 
     messages_base = prepare_messages_for_api(agent)[:-1]
@@ -191,7 +182,6 @@ def synthesize_task_goal(agent: AgentContext, tool_name: str) -> str:
 
 
 def auto_compress_tool_result(agent: AgentContext, tool_result: ToolResult) -> None:
-    """Автоматически сжимает длинный вывод инструмента перед добавлением в историю (порционный анализ)."""
     if tool_result.is_error or tool_result.is_user_denied:
         return
 
@@ -233,7 +223,6 @@ def auto_compress_tool_result(agent: AgentContext, tool_result: ToolResult) -> N
 
 
 def chunk_and_summarize_large_text(agent: AgentContext, text: str, tool_name: str, task_goal: str) -> str:
-    """Инкрементально собирает факты по чанкам и синтезирует их в единый отчёт."""
     agent.on_system_msg(f"[CHUNK ANALYZER] Starting chunked analysis of {len(text)} chars for tool '{tool_name}'...")
 
     token_limit = agent.token_tracker.get_remaining()
@@ -343,7 +332,7 @@ def summarize_history_plain(
     extra_instruction: str = None,
     include_new_to_previous: bool = False,
 ) -> Optional[str]:
-    """Сборка session summary в режиме single-shot: подаётся полная история (префикс совпадает для KV-cache), инструкция — последним сообщением. Перезаписывает заметки с нуля. ``include_new_to_previous`` добавляет раздел 7.3 (новые находки относительно предыдущего саммари) — имеет смысл только при повторной компакции, на первой предыдущего саммари нет. Возвращает текст или None."""
+    """Single-shot session summary: полная история + инструкция; include_new_to_previous — раздел 7.3 при повторной компакции."""
     new_section = NEW_TO_PREVIOUS if include_new_to_previous else ""
     prompt = (
         f"{ENVIRONMENT_PREFIX} Fill these sections of the very detailed session summary because "
@@ -365,7 +354,6 @@ def summarize_history_plain(
 
 
 def _raw_summary(content: str) -> str:
-    """Извлекает чистый текст саммари из содержимого summary-сообщения (убирая обёртку [[SYSTEM]] и служебный префикс), чтобы сравнивать старую и новую саммари на тождественность."""
     s = content or ""
     marker = f": [{SUMMARY_MARKER}]:"
     if marker in s:
@@ -375,28 +363,16 @@ def _raw_summary(content: str) -> str:
 
 
 def _validate_summary_sections(text: str, include_73: bool = False) -> str | None:
-    """Проверяет, что саммари содержит все обязательные разделы (1.1-7.2, опционально 7.3).
-    Возвращает строку с перечнем отсутствующих разделов или None, если всё на месте."""
     required = _REQUIRED_SECTION_IDS_WITH_73 if include_73 else _REQUIRED_SECTION_IDS
     missing = [sec for sec in required if not _re.search(r'\b' + _re.escape(sec) + r'\b', text)]
     return ", ".join(missing) if missing else None
 
 
 class SummaryService:
-    """Единственная точка для суммаризации: per-message плотные саммари рабочих нот
-    (summarize_if_long) и компактизация диалога в session summary (compact_segment).
-
-    Инкапсулирует: порог длины (MIN_TOKENS_TO_SUMMARIZE), префиксы хранения,
-    retry-логику компакции (буст температуры, проверку обязательных разделов,
-    детект повтора). Миксин MemoryMixin вызывает сервис вместо собственной логики.
-    """
+    """Единая точка суммаризации: per-message саммари + компактация в session summary."""
 
     @staticmethod
     def summarize_if_long(agent: AgentContext, msg) -> None:
-        """Плотное саммари одного длинного сообщения в рабочую память (вне контекста);
-        только для контента длиннее порога. Понимает UserMessage/AssistantMessage/ToolResult
-        (выбирает префикс хранения по роли; для read заменяет контент прямо в результате).
-        Ничего не делает, если суммаризация выключена/невыгодна/ошибочна."""
         if not Config.PER_MSG_SUMMARIES_ENABLED:
             return
         is_tool = isinstance(msg, ToolResult)
@@ -445,12 +421,7 @@ class SummaryService:
 
     @staticmethod
     def compact_segment(agent: AgentContext, force: bool = False) -> bool:
-        """Компакция: сегмент уходит в архив, вместо него — session summary (UserMessage после system prompt).
-        Первая компакция пишет заметки с нуля, повторные правят по SEARCH/REPLACE; при неудаче история не трогается.
-
-        force=True — принудительная компакция (команда /compact_history): сжимает на любой границе,
-        включая нетипичные хвосты (например, висящий незавершённый tool_call).
-        Возвращает True, если история реально сжата."""
+        """Компакция: сегмент → архив, вместо него session summary; force — на любой границе."""
         preserve_last = Config.AUTO_SUMMARY_PRESERVE_LAST
 
         if agent.stop_event.is_set():

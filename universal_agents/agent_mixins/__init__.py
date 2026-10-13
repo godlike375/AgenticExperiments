@@ -1,4 +1,3 @@
-"""Mixin-классы, из которых собирается LLMAgent (см. universal_agents.agent)."""
 
 from universal_agents.agent_mixins.tools_mixin import ToolsMixin
 from universal_agents.agent_mixins.memory_mixin import MemoryMixin

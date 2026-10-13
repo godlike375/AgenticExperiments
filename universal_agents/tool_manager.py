@@ -1,4 +1,3 @@
-"""Управление инструментами агента: регистрация, фильтрация, доверенные папки."""
 
 import os
 from typing import Callable, Iterable, Union, Optional
@@ -14,7 +13,6 @@ CORE_TOOLS = (_load_tool_tool.__name__, _unload_tool_tool.__name__)
 
 
 def _tools_directory() -> str:
-    """Путь к директории с инструментами-плагинами."""
     return os.path.join(os.path.dirname(__file__), "tools")
 
 
@@ -22,7 +20,6 @@ MANAGED_TOOLS = {_have_done_tool.__name__}
 
 
 class ToolManager:
-    """Владеет набором инструментов: схемами, обработчиками и доверенными папками."""
 
     def __init__(
         self,
@@ -46,8 +43,6 @@ class ToolManager:
 
     @property
     def all_known_names(self) -> set[str]:
-        """Имена всех инструментов, доступных к загрузке (даже ещё не загруженных). Скрытые
-        низкоуровневые инструменты (hidden) в набор не входят: модель их не видит."""
         if self._all_known_names is None:
             self._all_known_names = {
                 name for name, func in load_external_plugins(_tools_directory()).items()
@@ -77,10 +72,7 @@ class ToolManager:
         self._warn_mislabeled_groups()
 
     def _warn_mislabeled_groups(self) -> None:
-        """Мягкий контроль разметки (docs/TOOL_ISOLATION_SPEC.md §6.1, этап 4): инструмент без
-        параметра-агента, помеченный internal, — вероятная ошибка конфигурации (обычно это
-        внешний инструмент, который надо вынести в группу). Предупреждение, не ошибка —
-        неизолированный legacy-плагин продолжает работать в процессе хоста."""
+        """Мягкий контроль разметки: инструмент без agent в internal группе — вероятная ошибка конфигурации."""
         for name, info in self._tools_map.items():
             if not info.get("has_agent_param") and info.get("group", "internal") == "internal":
                 print(
@@ -89,7 +81,6 @@ class ToolManager:
                 )
 
     def is_tool_allowed(self, name: str) -> bool:
-        """Проверяет, разрешён ли инструмент tools_config."""
         if self._tools_config is None:
             return True
         if isinstance(self._tools_config, list):
@@ -99,7 +90,6 @@ class ToolManager:
         return True
 
     def load(self, name: str) -> str:
-        """Включает ранее отключённый инструмент по имени."""
         if name in self._pending_unload:
             self._pending_unload.discard(name)
             return f"'{name}' re-enabled (unload cancelled)."
@@ -130,7 +120,6 @@ class ToolManager:
         return f"Error '{name}' not found in loadable tools"
 
     def force_load(self, name: str) -> str:
-        """Внутренняя загрузка управляемого инструмента в обход allow-list (например, have_done подключается только после make_plan)."""
         if name in self._tools_map:
             return f"'{name}' is already loaded."
         external_tools = load_external_plugins(_tools_directory())
@@ -146,7 +135,7 @@ class ToolManager:
         return f"Error '{name}' not found in loadable tools"
 
     def unload(self, name: str) -> str:
-        """Откладывает отключение до следующего изменения истории: инструмент остаётся в префиксе (KV-cache safe), вызов возвращает «was unloaded»; реальное удаление — flush_pending_unloads()."""
+        """Откладывает отключение до следующего изменения истории (KV-cache safe); реальное удаление — flush_pending_unloads()."""
         if name in CORE_TOOLS:
             return f"Error Cannot disable built-in tool '{name}'."
 
@@ -162,32 +151,27 @@ class ToolManager:
                 f"if you still need it, call load_tool('{name}') first.")
 
     def is_pending_unload(self, name: str) -> bool:
-        """True, если по инструменту вызвали unload_tool, но он ещё не выгружен физически."""
         return name in self._pending_unload
 
     @property
     def pending_unload(self) -> set[str]:
-        """Набор инструментов, ожидающих физической выгрузки при изменении истории."""
         return set(self._pending_unload)
 
 
     def deny(self, names: Union[str, Iterable[str]]) -> None:
-        """Запрещает вызов инструментов по имени (KV-cache safe: схемы не удаляются, ExecuteMixin вернёт «forbidden»). '*'/'all' запрещает все загруженные."""
         if isinstance(names, str):
             names = list(self._tools_map.keys()) if names in ("*", "all") else [names]
         self._denied.update(names)
 
     def is_denied(self, name: str) -> bool:
-        """True, если вызов инструмента запрещён запретительным конфигом."""
         return name in self._denied
 
     @property
     def denied(self) -> set[str]:
-        """Текущий набор запрещённых инструментов."""
         return set(self._denied)
 
     def flush_pending_unloads(self) -> list[str]:
-        """Физически удаляет помеченные unload_tool инструменты и очищает метки; вызывается только при изменении истории (когда KV-кэш всё равно инвалидируется)."""
+        """Физически удаляет помеченные unload инструменты (только при изменении истории)."""
         flushed = [n for n in self._pending_unload if n in self._tools_map]
         for name in flushed:
             del self._tools_map[name]
@@ -201,7 +185,6 @@ class ToolManager:
         return flushed
 
     def list_loaded(self) -> str:
-        """Список уже активных (загруженных) инструментов с кратким описанием."""
         lines = []
         for name in sorted(self._tools_map):
             func = self._tools_map[name].get("handler")
@@ -210,7 +193,6 @@ class ToolManager:
         return "LOADED TOOLS:\n" + "\n".join(lines)
 
     def list_available(self) -> str:
-        """Список загружаемых (неактивных) инструментов из директории плагинов."""
         external_tools = load_external_plugins(_tools_directory())
         enabled = set(self._tools_map.keys())
         available = set(external_tools.keys()) - enabled - MANAGED_TOOLS
@@ -226,7 +208,6 @@ class ToolManager:
         return "\n".join(lines)
 
     def trust_dir(self, path: str) -> str:
-        """Добавляет директорию в доверенные (редакторы файлов пропускают подтверждение)."""
         abs_path = os.path.abspath(path)
         if not os.path.isdir(abs_path):
             return f"Error '{path}' is not a directory"
@@ -234,7 +215,6 @@ class ToolManager:
         return f"Trusted: {abs_path}"
 
     def untrust_dir(self, path: str) -> str:
-        """Убирает директорию из доверенных."""
         abs_path = os.path.abspath(path)
         if abs_path in self.trusted_dirs:
             self.trusted_dirs.discard(abs_path)
@@ -242,7 +222,6 @@ class ToolManager:
         return f"Error '{path}' was not trusted"
 
     def is_path_trusted(self, path: str) -> bool:
-        """Проверяет, находится ли путь внутри доверенной директории."""
         abs_path = os.path.abspath(path)
         for trusted in self.trusted_dirs:
             if abs_path.startswith(trusted + os.sep) or abs_path == trusted:

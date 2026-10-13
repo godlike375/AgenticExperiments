@@ -12,8 +12,6 @@ class UnifiedDockerAgent:
 
     @classmethod
     def _session(cls) -> dict:
-        """Состояние группы sandbox (docs/TOOL_ISOLATION_SPEC.md §5.3): имя контейнера и
-        рабочая папка репозитория. Воркер без памяти — состояние приходит с каждым вызовом."""
         return tool_session.get_session()
 
     @classmethod
@@ -22,7 +20,6 @@ class UnifiedDockerAgent:
 
     @classmethod
     def _is_container_running(cls) -> bool:
-        """Проверяет, существует ли и запущен ли контейнер."""
         cmd = ["docker", "inspect", "-f", "{{.State.Running}}", cls._container_name()]
         result = subprocess.run(cmd, capture_output=True, text=True)
         return result.returncode == 0 and result.stdout.strip() == "true"
@@ -79,7 +76,6 @@ class UnifiedDockerAgent:
 
     @classmethod
     def _ensure_container(cls):
-        """Гарантирует, что контейнер запущен перед выполнением команд."""
         if not cls._is_container_running():
             cls.start(cls._session().get("repo_path") or os.getcwd())
 

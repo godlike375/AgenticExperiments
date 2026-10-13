@@ -3,7 +3,6 @@ import sys
 import fnmatch
 
 def should_exclude(path, patterns):
-    """Проверяет, соответствует ли путь (или имя файла/папки) хотя бы одной маске из списка."""
     parts = path.replace(os.sep, '/').split('/')
 
     for part in parts:
@@ -28,6 +27,7 @@ def dump_project(root_path, exclude_patterns=None):
             'dist',
             'build',
             'code_extractor.py',
+            'tests'
         ]
 
     if not os.path.isdir(root_path):

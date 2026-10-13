@@ -94,7 +94,6 @@ def cwd(path: str = None):
     return os.getcwd()
 
 def _ensure_file_exists(path: str) -> bool:
-    """Создаёт файл (с родительскими папками), если его нет. Возвращает True, если создан."""
     if os.path.isfile(path):
         return False
     try:
@@ -123,9 +122,7 @@ def _apply_edit_result(
     replaced: Optional[int] = None,
     added: Optional[int] = None,
 ) -> tuple | str:
-    """Финализация правки (общая для редакторов файлов): если dry_run — возвращает
-    (preview, resolve, ask) для подтверждения моделью через 'respond_to_system'; иначе пишет файл
-    и возвращает отчёт '+ L<n>: ...' (или report_text, если задан)."""
+    """Финализация правки: dry_run → (preview, resolve, ask) для подтверждения; иначе пишет файл."""
     if new_content == content or new_content == content.rstrip('\n'):
         return f"Nothing changed: {nothing}"
 
@@ -178,8 +175,6 @@ def _apply_edit_result(
     new_text=("str", "New content that replaces the range start_line..end_line. Supports \\n. Do NOT re-include lines that exist outside the range — they are NOT deleted and would duplicate; include only what the range itself should become. Be careful to not break existing indentation."),
 )
 def line_range_edit(path: str, new_text: str, start_line: int = None, end_line: int = None, dry_run: bool = False):
-    """Правка файла по диапазону строк (1-based, инклюзивно). Выделена из прежнего edit_file:
-    точный и предсказуемый способ править/создавать файлы, когда номера строк известны."""
     _ensure_file_exists(path)
 
     with open(path, "r", encoding="utf-8") as f:
@@ -234,8 +229,6 @@ def line_range_edit(path: str, new_text: str, start_line: int = None, end_line: 
     mode=("str", "'one' — exactly 1 match required (error otherwise); 'all' — replace every occurrence. Default 'one'"),
 )
 def match_replace_edit(path: str, old: str, new_text: str, mode: str = "one", dry_run: bool = False):
-    """Правка файла по точному совпадению подстроки (одиночному или всем). Компаньон
-    line_range_edit для правок «по образцу», когда номера строк неизвестны."""
     old_text = old or ""
     new_clean = new_text.rstrip('\n')
 
@@ -302,15 +295,6 @@ def match_replace_edit(path: str, old: str, new_text: str, mode: str = "one", dr
 def _make_diff_preview(old_text: str, new_text: str, path: str,
                        replaced: int = 0, added: int = 0,
                        context_before: str = "", context_after: str = "") -> str:
-    """Компактный git-style дифф для превью правки файла.
-
-    Только изменённые хунки, вокруг каждого изменения — один ряд контекста
-    (до и/или после, если существует). Маркеры как в git: ' ' — неизменный
-    контекст, '+' — добавлено, '-' — удалено. Лишние вспомогательные символы
-    не выводятся; строки — это буквальные строки файла.
-    context_before/context_after — явные строки контекста (из head/tail),
-    используются для ±1 строк вокруг диапазона замены, чтобы покрыть границы.
-    """
     old_lines = old_text.splitlines()
     new_lines = new_text.splitlines()
     sm = difflib.SequenceMatcher(None, old_lines, new_lines)
@@ -360,7 +344,6 @@ _SUMMARY_THRESHOLD = int(MIN_TOKENS_TO_SUMMARIZE * Config.CHARS_PER_TOKEN)
 
 
 def _read_text(path: str) -> tuple:
-    """Читает файл как UTF-8; возвращает (content, None) или (None, error_msg)."""
     try:
         with open(path, 'r', encoding='utf-8', errors='strict') as f:
             return f.read(), None
@@ -374,15 +357,11 @@ def _read_text(path: str) -> tuple:
       hidden=True,
       path=("str", "File path"))
 def _read_file_raw(path: str) -> tuple:
-    """Низкоуровневое чтение файла для read (docs/TOOL_ISOLATION_SPEC.md §4): сам read —
-    внутренний (ведёт учёт и строит представление), а блокирующее чтение файла вынесено в
-    воркер workspace. Скрытый инструмент: модель его не видит, вызов только от хоста."""
+    """Низкоуровневое чтение для read (§4): скрытый инструмент, вызов только от хоста."""
     return _read_text(path)
 
 
 def _raw_read(agent, path: str) -> tuple:
-    """Чтение файла для read: в изолированном режиме — в воркере workspace (можно убить),
-    иначе локально (тесты/прямые вызовы). Возвращает (content, error_msg)."""
     manager = getattr(agent, "group_manager", None)
     if manager is not None and getattr(manager, "isolated", False):
         result = manager.call(
@@ -396,7 +375,7 @@ def _raw_read(agent, path: str) -> tuple:
 
 
 def _summarize_file(content: str, agent) -> str:
-    """Строит структурный скелет файла ОДНИМ вызовом LLM (без суб-агента, как в summarize_history_plain): инструкция + пронумерованный файл как user-сообщение. Разовая операция — KV-cache не нужен, суб-агент бы только зря тратил контекст и ломал извлечение ответа."""
+    """Структурный скелет файла одним вызовом LLM (без субагента): инструкция + пронумерованный файл."""
     max_tokens = agent.token_tracker.get_remaining() // Config.SUMMARIZATION_THRESHOLD_DIVIDER
     max_chars = int(max_tokens * Config.CHARS_PER_TOKEN)
     truncated = len(content) > max_chars
@@ -463,11 +442,6 @@ def _summarize_file(content: str, agent) -> str:
 
 
 def _ranges_to_structure(ranges_text: str, content: str) -> str | None:
-    """Превращает текст с диапазонами строк (например `1-7\\n9-28`) в структуру вида
-    `L1-7 import abc\\nL9-28 class GenerationParams:`, подставляя реальный контент
-    первой строки каждого диапазона из файла. Диапазоны — в оригинальной нумерации
-    файла (пустые строки уже вырезаны на этапе подачи в LLM). Возвращает None,
-    если не удалось извлечь ни одного валидного диапазона."""
     import re
     lines = content.splitlines()
     total = len(lines)
@@ -490,17 +464,11 @@ def _ranges_to_structure(ranges_text: str, content: str) -> str | None:
 
 
 def _is_meaningful_line(line: str) -> bool:
-    """Строка годится для заголовка: непустая после strip() и содержит хотя бы 2
-    буквы (пробелы/табуляция/разделители/``` и т.п. не считаются содержательными)."""
     s = line.strip()
     return bool(s) and sum(1 for c in s if c.isalpha()) >= 2
 
 
 def _pick_nonempty_line(start: int, end: int, lines: list[str]) -> int:
-    """Выбирает номер строки (1-based) для заголовка диапазона: первая
-    содержательная строка (см. _is_meaningful_line). Порядок: start -> start-1
-    -> start+1 -> ближайшая по обе стороны от start. Если все не содержательные
-    — возвращает start (fallback)."""
     total = len(lines)
     if 1 <= start <= total and _is_meaningful_line(lines[start - 1]):
         return start
@@ -518,7 +486,6 @@ def _pick_nonempty_line(start: int, end: int, lines: list[str]) -> int:
 
 
 def _limit_read_chunk(lines: list[str]) -> tuple[list[str], bool]:
-    """Порция чтения: ≤ MAX_READ_CHARS_PER_CALL символов и ≤ MAX_READ_LINES_PER_CALL строк; строка на лимите включается целиком, порция кончается концом строки. Возвращает (строки, обрезано_ли)."""
     out: list[str] = []
     total_chars = 0
     for line in lines[:Config.MAX_READ_LINES_PER_CALL]:
@@ -530,11 +497,7 @@ def _limit_read_chunk(lines: list[str]) -> tuple[list[str], bool]:
 
 
 def _peripheral_indices(near: int, far: int, total: int, growth: float = 2.0) -> list[int]:
-    """Периферийное (размытое) зрение: от границы `near` (сразу за фокусом) до края
-    файла `far` (1 или total) выбирает строки с экспоненциально растущим шагом —
-    плотно у границы фокуса, всё реже к краю файла. `growth` — во сколько раз растёт
-    шаг каждое кольцо (меньше → плотнее). Всегда добавляет крайний якорь `far`.
-    Возвращает отсортированный список номеров строк (1-based)."""
+    """Периферийное зрение: экспоненциально растущий шаг от границы фокуса к краю файла."""
     if near < 1 or near > total or far < 1 or far > total or near == far:
         return []
     direction = 1 if far > near else -1
@@ -559,10 +522,7 @@ def _build_portion_content(
     path: str, mtime: str, lines: list[str], total: int,
     start: int, actual_end: int, truncated: bool,
 ) -> str:
-    """Собирает вывод порционного чтения: фокус-диапазон [start..actual_end] целиком
-    («центральное зрение») + редкая периферия до краёв файла («периферийное зрение»).
-    Общая для ranged read (start_line/end_line) и для первого батча большого файла,
-    когда структурный скелет выключен (BIG_FILE_SKELETON=False)."""
+    """Собирает вывод порционного чтения: фокус-диапазон + периферийное зрение."""
     focus_idx = range(start, actual_end + 1)
     peripheral: set[int] = set()
     focus_size = actual_end - start + 1
@@ -690,7 +650,6 @@ def read(agent: 'AgentContext', path: str = '.', start_line: int = None, end_lin
 
 
 def _reread_err(path: str) -> str:
-    """Единая ошибка повторного чтения неизменённого файла (один текст, без дублирования в read и _finish_read)."""
     return err(
         f": re-reading file '{path}' is not allowed - it is unchanged "
         f"since the last read and its content/structure is already in context. "
@@ -700,7 +659,6 @@ def _reread_err(path: str) -> str:
 
 
 def _finish_read(agent: 'AgentContext', path: str, raw: str, content: str, disk_hash: str) -> str:
-    """Для маленьких файлов: пропуск неизменённого + регистрация чтения (привязка к _execute_tools). Контент уже собран в read — здесь только проверка/учёт."""
     if agent.file_states.should_skip(path, disk_hash):
         return _reread_err(path)
     agent.file_states.record(path, disk_hash, _content_hash(content))

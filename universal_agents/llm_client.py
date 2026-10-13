@@ -13,9 +13,6 @@ from universal_agents.exceptions import GenerationInterrupted
 
 
 def jaccard_similarity(a: str, b: str) -> float:
-    """Биграммный Jaccard: схожесть множеств пар соседних слов двух текстов.
-    1.0 при идентичных текстах, 0.0 при полностью разных. Учитывает порядок
-    слов (в отличие от мешка слов): перестановка даёт низкую схожесть."""
     words_a = a.split()
     words_b = b.split()
     if not words_a and not words_b:
@@ -30,14 +27,10 @@ def jaccard_similarity(a: str, b: str) -> float:
 
 
 def text_hash(text: str) -> str:
-    """SHA-256 хэш очищенного (по краям) текста. Единая «память повторов»: если хэш
-    нового ответа ассистента совпал с хэшем сообщения из истории (текста или
-    reasoning-блока) — это повтор, независимо от того, сколько итераций назад он был."""
     return hashlib.sha256(text.strip().encode("utf-8")).hexdigest()
 
 
 def build_usage_dict(prompt_tokens: int, completion_tokens: int, total_tokens: Optional[int] = None) -> dict:
-    """Собирает usage-словарь в едином формате для агента."""
     if total_tokens is None:
         total_tokens = prompt_tokens + completion_tokens
     return {
@@ -48,7 +41,6 @@ def build_usage_dict(prompt_tokens: int, completion_tokens: int, total_tokens: O
 
 
 def apply_prefill(content: Optional[str], prefill: Optional[str]) -> str:
-    """Добавляет prefill в начало содержимого, если его там ещё нет."""
     if prefill is None:
         return content or ""
     content = content or ""
@@ -68,7 +60,6 @@ class TokenUsageTracker:
 
     @staticmethod
     def estimate_tokens(text: str) -> int:
-        """Грубая оценка токенов: символы / CHARS_PER_TOKEN"""
         return int(len(text) / Config.CHARS_PER_TOKEN)
 
     def get_total_context_tokens(self, first_system_message: str = "", last_user_content: str = "") -> int:
@@ -85,7 +76,6 @@ class TokenUsageTracker:
         return remaining
 
     def format_user_token_info(self) -> str:
-        """Информация о токенах для пользователя: «Context size» из total_tokens последнего вызова, «Remaining» — из prompt_tokens; неизвестное заранее оценивается через CHARS_PER_TOKEN."""
         if not self.last_usage:
             return ""
         spent = self.last_usage.get("total_tokens", 0)
@@ -98,11 +88,9 @@ class LoopDetector:
 
     @staticmethod
     def normalize_args(args_str: str) -> str:
-        """Канонизирует аргументы для сравнения на дубликаты (см. tool_parsing.normalize_args)."""
         return normalize_args(args_str)
 
     def check_duplicate_in_turn(self, tool_name: str, arguments: str, messages: list) -> bool:
-        """Проверяет повторный вызов того же инструмента с теми же аргументами после последнего сообщения пользователя. Ошибочные/отклонённые вызовы дубликатами не считаются."""
         from universal_agents.models import UserMessage, AssistantMessage, ToolResult
         norm_args = self.normalize_args(arguments)
         failed_call_ids = set()
@@ -135,7 +123,6 @@ class LoopDetector:
         return False
 
 class StreamAccumulator:
-    """Собирает из чанков стрима финальный ответ (текст, reasoning, tool calls, usage); единая логика для диалога и служебных вызовов."""
 
     def __init__(self, prefill=None, on_stream_chunk=None,
                  on_reasoning_start=None, on_reasoning_chunk=None,
@@ -153,24 +140,14 @@ class StreamAccumulator:
         self.on_reasoning_chunk = on_reasoning_chunk
 
     def _emit_text(self, text: str) -> None:
-        """Отправляет текст в живой вывод, если есть подписчик и текст непустой."""
         if text and self.on_stream_chunk:
             self.on_stream_chunk(text)
 
     def _prefill_tail(self, pending: str) -> str:
-        """Возвращает ещё не показанную часть prefill."""
         start = min(max(0, self._prefill_shown), len(pending))
         return pending[start:]
 
     def _resolve_prefill_echo(self, text: str) -> str:
-        """Сопоставляет начало ответа с prefill и возвращает текст для накопления.
-
-        Шлюз может либо опустить prefill, либо повторить его в первых дельтах (так
-        делает сырой llama.cpp). Пока входящий текст совпадает с началом prefill,
-        ответ буферизуется: иначе повторённый тег был бы показан дважды, а ручная
-        печать prefill — продублирована. После решения prefill показывается ровно
-        один раз, а повтор возвращается без его копии.
-        """
         pending = self._prefill_pending or ""
         if not pending:
             self._prefill_pending = None
@@ -191,13 +168,6 @@ class StreamAccumulator:
         return combined
 
     def flush_prefill(self) -> None:
-        """Дописывает в живой вывод ещё не показанную часть prefill.
-
-        Нужно, когда модель ушла в tool call без текстовых чанков: prefill иначе
-        остался бы невидимым, хотя он часть сообщения модели. Если стрим оборвался
-        в середине возможного повтора, незавершённый буфер считается обычным
-        текстом, а не копией prefill.
-        """
         if self._prefill_pending is None and not self._unresolved_head:
             return
         pending = self._prefill_pending or ""
@@ -207,7 +177,6 @@ class StreamAccumulator:
         self._emit_text(head)
 
     def process(self, chunk) -> str:
-        """Применяет чанк (usage, reasoning, текст, tool calls); возвращает text-delta."""
         usage = getattr(chunk, 'usage', None)
         if usage:
             self.usage = build_usage_dict(
@@ -270,10 +239,6 @@ class StreamAccumulator:
 
 
 class StreamSession:
-    """Единый блокирующий потребитель стрима. Создаёт raw-соединение через
-    LLMClient.open_stream и пожирает его до конца/остановки, наполняя StreamAccumulator.
-    Само-остановка (процессный стрим) и чанковый цикл — в одном месте (единая точка для
-    обоих потребителей: LLMClient.call и StreamingMixin._call_with_streaming)."""
 
     def __init__(self, messages, temp=None, timeout=None, tools=None, prefill=None,
                  top_p=None, frequency_penalty=None, presence_penalty=None,
@@ -299,37 +264,6 @@ class StreamSession:
 
     def consume(self, stop_check=None, stop_on_chunk=None, on_stream_start=None,
                 stop_markers: tuple = ()):
-        """Блокирующе потребляет стрим.
-
-        stop_check — пользовательская остановка. Watchdog-поток закрывает стрим
-        (LLMClient.close_stream), чтобы разблокировать next(); в чанковом цикле
-        стрим закрывается и break.
-        stop_on_chunk — внутренний критерий (напр. расхождение), вызывается ПОСЛЕ
-        каждого обработанного чанка; True прерывает потребление (стрим не дочитан —
-        уборку делает close() в finally).
-        on_stream_start — вызывается ДО первого чанка (единый порядок; старый
-        StreamingMixin запускал UI-отрисовку позже, но это безопасная унификация).
-
-        stop_markers — стоп-маркеры структурированного вывода. После каждого чанка
-        проверяется накопленный контент: если какой-то маркер появился, контент
-        обрезается до этого вхождения включительно (см. apply_stop_markers), стрим
-        закрывается и self.stopped_at_marker становится True. «Хвост» после маркера
-        (лишний анализ модели) отбрасывается; следующая фаза генерации запускается
-        вызывающим через новый prefill.
-
-        Возвращает (error, stopped):
-        - error непуст → сбой соединения или создания (stop_on_chunk не достигнут).
-        - stopped=True → прерывание по stop_check, stop_on_chunk или stop_markers (error пуст).
-
-        Колбэки жизненного цикла после потребления (on_stream_end, on_reasoning_end) —
-        контракт вызывающего (единый для обоих потребителей).
-
-        Watchdog стартует ДО первого чанка: первый next() может блокироваться на время
-        префилла длинного контекста/сетевой задержки, и без него запрос остановки
-        пользователя ('q') некому обработать. Стриму с ошибкой создания (error-generator)
-        ранний watcher не мешает: тот не управляет реальным HTTP-соединением, а при
-        запрошенной остановке подавление его ошибки и не нужно.
-        """
         error = ""
         stopped = False
         _watch_done = threading.Event()
@@ -392,11 +326,6 @@ class StreamSession:
 
 
 def _get_underlying_socket(response):
-    """Достаёт сокет из httpx-интернала для shutdown при отмене.
-
-    httpx >= 0.23 / httpcore >= 0.17 хранят сетевой поток в
-    response.extensions["network_stream"]. Кастомные транспорты могут не его
-    выставлять — тогда отмена работает через read timeout."""
     network_stream = response.extensions.get("network_stream")
     if network_stream is None:
         return None
@@ -407,15 +336,6 @@ def _get_underlying_socket(response):
 
 
 class InProcessStream:
-    """In-process стрим чанков через прямой httpx POST с stream=True.
-
-    SSE-парсинг руками, отдаёт чанки в форме, которую ждёт StreamAccumulator.process
-    (choices/delta/reasoning_content/tool_calls, usage) — StreamSession не меняется.
-
-    Отмена: close() делает shutdown(SHUT_RDWR) на сокете — это гарантированно
-    будит блокирующий recv (close() не будит, POSIX оставляет undefined).
-    Если сокет не достался (старый httpx, кастомный transport) —
-    close() + read timeout как страховка."""
 
     def __init__(
         self,
@@ -490,7 +410,6 @@ class InProcessStream:
             self._iter = error_generator()
 
     def _parse_sse(self):
-        """Парсит SSE-поток в чанки формата OpenAI (SimpleNamespace с choices и usage)."""
         assert self._response is not None
         for line in self._response.iter_lines():
             if self._closed:
@@ -512,7 +431,6 @@ class InProcessStream:
 
     @staticmethod
     def _convert_chunk(obj: dict):
-        """Конвертирует JSON-чанк OpenAI-формата в SimpleNamespace для StreamAccumulator."""
         usage = None
         if obj.get("usage"):
             u = obj["usage"]
@@ -559,10 +477,6 @@ class InProcessStream:
             raise
 
     def close(self) -> None:
-        """Отмена: shutdown(SHUT_RDWR) на сокете (будит recv), потом close (освобождает).
-
-        Порядок важен: сначала shutdown, потом close. Если сокет не достался — только
-        close + read timeout как страховка."""
         if self._closed:
             return
         self._closed = True
@@ -593,8 +507,6 @@ class InProcessStream:
 class LLMClient:
     @classmethod
     def close_stream(cls, stream) -> None:
-        """Закрывает конкретное соединение стрима. Watchdog'и закрывают ИМЕННО свой
-        стрим — чтобы отмена одного запроса не рубила чужой параллельный стрим."""
         if stream is None:
             return
         try:
@@ -624,12 +536,6 @@ class LLMClient:
         reasoning_effort: str = "none",
         stop_markers: tuple = (),
     ):
-        """Единая точка обращения к LLM. Транспорт ВСЕГДА стриминговый (StreamSession):
-        любой вызов отменяем через watchdog — stop_check закрывает соединение. Живой
-        вывод подключается колбэками (callbacks); у служебных вызовов их нет — стрим
-        просто потребляется без показа, но прервать его можно так же. Возвращает
-        (message_obj, error, usage); message_obj.stopped_at_marker отражает попадание
-        стоп-маркера (контент уже обрезан)."""
         if stop_check and stop_check():
             return None, "stopped", None
         temp, timeout, top_p, frequency_penalty, presence_penalty, max_tokens, min_p = LLMClient._resolve_params(
@@ -687,9 +593,6 @@ class LLMClient:
         params: GenerationParams = None,
         reasoning_effort: str = "none",
     ):
-        """Открывает сырой итератор чанков через in-process httpx-стрим (`InProcessStream`).
-        Единственная production-точка открытия стрима (`StreamSession`). Отмена —
-        shutdown(SHUT_RDWR) на сокете, будит блокирующий recv."""
         return InProcessStream(
             messages, temp=temp, timeout=timeout, tools=tools, prefill=prefill,
             top_p=top_p, frequency_penalty=frequency_penalty,
@@ -706,7 +609,6 @@ class LLMClient:
 
     @staticmethod
     def _debug_log(messages_to_send, result):
-        """Выводит в лог экрана содержимое служебного вызова LLM (для отладки)."""
         try:
             print("\n" + "=" * 30)
             print("📤 LLM DEBUG CALL INPUT:")

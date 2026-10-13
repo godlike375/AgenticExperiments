@@ -9,7 +9,6 @@ class TestDecodeBytes(unittest.TestCase):
         self.assertEqual(_decode_bytes(data, "utf-8", "cp866"), "привет")
 
     def test_cp866_bytes_fall_back(self):
-        """Вывод PowerShell 5.1 (OEM/cp866) не является валидным UTF-8 — фолбэк спасает."""
         data = "привет".encode("cp866")
         self.assertEqual(_decode_bytes(data, "utf-8", "cp866"), "привет")
 

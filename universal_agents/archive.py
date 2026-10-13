@@ -1,5 +1,5 @@
-"""Архив сессии: оригиналы сообщений, вытесненных компакцией (recall_search/recall_read). Адресация по стабильному Message.seq."""
 
+"""Архив сессии: оригиналы сообщений, вытесненных компакцией (recall_search/recall_read)."""
 from __future__ import annotations
 
 import re
@@ -59,8 +59,6 @@ class HistoryArchive:
         tool_name: str = "",
         limit: int = 5,
     ) -> str:
-        """Поиск по архиву. Возвращает отформатированный список находок c seq,
-        ролью и сниппетом; результат готов к вставке в контекст."""
         words = [w.lower() for w in re.findall(r"\w+", query or "") if len(w) >= 2]
         if not words:
             return "[recall_search] Empty or too short query."
@@ -105,7 +103,6 @@ class HistoryArchive:
         return "\n".join(lines)
 
     def read_span(self, from_seq: int, to_seq: int, max_chars: int | None = None) -> str:
-        """Дословный кусок переписки по диапазону seq (границы включительно)."""
         max_chars = max_chars or Config.RECALL_READ_MAX_CHARS
         try:
             lo = min(int(from_seq), int(to_seq))

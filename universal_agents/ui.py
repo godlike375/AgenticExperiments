@@ -48,7 +48,6 @@ class ConsoleUI:
     
     @staticmethod
     def start_stream():
-        """Начало streaming вывода"""
         print('\n' + '=' * 15)
         print("🤖 Agent: ", end="", flush=True)
         ConsoleUI._reasoning_started = False
@@ -56,7 +55,6 @@ class ConsoleUI:
 
     @staticmethod
     def stream_chunk(chunk: str):
-        """Вывод чанка streaming"""
         if not ConsoleUI._answer_header_shown:
             if ConsoleUI._reasoning_started:
                 print()
@@ -66,28 +64,23 @@ class ConsoleUI:
 
     @staticmethod
     def end_stream():
-        """Завершение streaming вывода"""
         print('\n' + '=' * 15)
 
     @staticmethod
     def start_reasoning():
-        """Начало streaming вывода reasoning"""
         print("\n📝 Reasoning: ", end="", flush=True)
         ConsoleUI._reasoning_started = True
 
     @staticmethod
     def stream_reasoning_chunk(chunk: str):
-        """Вывод чанка reasoning"""
         print(chunk, end="", flush=True)
 
     @staticmethod
     def end_reasoning():
-        """Завершение streaming вывода reasoning"""
         ConsoleUI._reasoning_started = False
 
     @staticmethod
     def start_service_stream():
-        """Начало стрима служебного вызова LLM. Отдельный канал со своей меткой, чтобы служебный текст не выглядел вторым ответом; метка печатается лениво при первом чанке."""
         ConsoleUI._service_stream_shown = False
 
     @staticmethod
@@ -387,7 +380,6 @@ class CLI:
         ConsoleUI.system_msg(result)
 
     def _request_stop(self):
-        """Единая точка остановки: ставит флаг и разблокирует возможный ожидающий ввод в воркере."""
         self.agent.request_stop()
         self._inject_line("\n")
         ConsoleUI.system_msg("⏹ Stop requested — finishing current step…")
@@ -416,7 +408,6 @@ class CLI:
                 self._line_cond.notify_all()
 
     def _get_line(self) -> str:
-        """Блокирующе читает следующую строку из общей очереди ввода (единственный читатель stdin)."""
         with self._line_cond:
             while not self._line_queue and not self._stdin_eof:
                 self._line_cond.wait(timeout=0.2)
@@ -425,9 +416,7 @@ class CLI:
             return ''
 
     def _ask_confirm(self, name: str, args: dict) -> bool:
-        """Вызывается на потоке генерации, когда инструмент требует подтверждения.
-        Ставит запрос; ответ читает и возвращает главный поток монитора
-        (_answer_next_confirm). Вне CLI (нет stdin-очереди) — классический инпут."""
+        """Запрос подтверждения на потоке генерации; ответ читает главный поток (_answer_next_confirm)."""
         if getattr(self, "_line_queue", None) is None:
             return ConsoleUI.confirm_action(name, args)
         with self._confirm_cond:
@@ -442,10 +431,7 @@ class CLI:
             return self._confirm_answer
 
     def _answer_next_confirm(self):
-        """Главный поток: печатает запрос подтверждения и читает ответ для потока
-        генерации. 'q'/стоп — отказ + запрос остановки. 'y' — да. Произвольный текст —
-        отказ, но строка не теряется: она становится текстом пользователя (pending
-        interrupt) и уйдёт в историю после завершения шага."""
+        """Главный поток: печатает запрос, читает ответ. 'q' — стоп, произвольный текст — pending interrupt."""
         with self._confirm_cond:
             req = self._confirm_request
         if req is None:
@@ -475,10 +461,7 @@ class CLI:
             self._request_stop()
 
     def _poll_input(self):
-        """Неразрушающе проверяет очередь ввода. Пустые строки (в т.ч. инжектированные
-        _request_stop '\n' для разблокировки) выбрасываются — они не несут ввода и иначе
-        блокируют видимость реального текста позади них. Команды ('/...') не считаются
-        вводом и остаются в очереди. Возвращает строку или None."""
+        """Неразрушающая проверка очереди: пустые строки выбрасываются, команды ('/...') остаются."""
         with self._line_lock:
             while self._line_queue and not self._line_queue[0].strip():
                 self._line_queue.popleft()
@@ -491,18 +474,12 @@ class CLI:
             return line.strip()
 
     def _inject_line(self, line: str):
-        """Подкладывает строку в очередь (чтобы разблокировать ожидающий ввод в воркере при остановке)."""
         with self._line_lock:
             self._line_queue.append(line)
             self._line_cond.notify_all()
 
     def _call_chat(self, message: str, prefill=None):
-        """Генерация идёт в отдельном потоке; основной поток опрашивает очередь ввода.
-        'q' на новой строке + Enter — принудительная остановка. Любой другой текст
-        + Enter во время работы LLM останавливает текущую генерацию, вставляет
-        сообщение пользователя с системной шапкой в историю и сразу запускает новую
-        генерацию (сценарии А/Б/В). Возврат отсюда НЕ закрывает CLI — управление
-        просто возвращается в цикл run() для следующего ввода."""
+        """Генерация в отдельном потоке; основной поток опрашивает ввод. 'q' — остановка, текст — interrupt."""
         try:
             interrupt_next = False
             while True:

@@ -44,7 +44,6 @@ def _plan_call(plan_list):
 
 
 def _work(path="a"):
-    """Сообщение с реальным вызовом инструмента (read)."""
     return AssistantMessage(content="", tool_calls=[ToolCall(f"r_{path}", _read_tool.__name__, json.dumps({"path": path}))])
 
 

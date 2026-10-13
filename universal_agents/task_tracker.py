@@ -1,4 +1,3 @@
-"""План-ориентированная декомпозиция и структурная компактизация истории: make_plan задаёт упорядоченный список задач, have_done помечает выполнение строго по порядку плана (подключается только после успешного make_plan)."""
 
 from __future__ import annotations
 
@@ -24,12 +23,10 @@ PLAN_TOOL = _make_plan_tool.__name__
 
 
 def plan_leaf_sequence(plan_map: dict) -> list[str]:
-    """Порядок выполнения задач — порядок списка плана."""
     return list(plan_map.keys())
 
 
 def set_plan(agent: AgentContext, plan_list: list) -> str:
-    """Обработчик make_plan. Сохраняет плоский план на агенте и возвращает порядок."""
     if not isinstance(plan_list, list) or not plan_list:
         return err(": make_plan expects a non-empty list of {id, title} tasks.")
     meta: dict = {}
@@ -66,7 +63,6 @@ def set_plan(agent: AgentContext, plan_list: list) -> str:
 
 
 def mark_task_done(agent: AgentContext, task_id: str) -> str:
-    """Обработчик have_done. Информационное подтверждение (не блокирует)."""
     tid = (task_id or "").strip()
     if not tid:
         return err(": have_done requires a non-empty 'id'.")
@@ -85,7 +81,6 @@ def _parse_call_args(tc) -> dict:
 
 
 def _last_plan_position(history: list) -> int:
-    """Индекс последнего вызова make_plan (граница текущего плана), иначе -1."""
     pos = -1
     for i, msg in enumerate(history):
         if isinstance(msg, AssistantMessage) and msg.has_tool_calls():
@@ -98,8 +93,6 @@ _META_TOOLS = {PLAN_TOOL, DONE_TOOL, _load_tool_tool.__name__}
 
 
 def _last_real_work_position(history: list, after: int) -> int:
-    """Индекс последнего вызова РЕАЛЬНОГО инструмента (не make_plan/have_done)
-    после позиции `after`; иначе -1."""
     pos = -1
     for i, msg in enumerate(history):
         if i <= after or not isinstance(msg, AssistantMessage) or not msg.has_tool_calls():
@@ -111,8 +104,6 @@ def _last_real_work_position(history: list, after: int) -> int:
 
 
 def _last_done_position(history: list, after: int) -> int:
-    """Индекс последнего УСПЕШНОГО вызова have_done после позиции `after`;
-    иначе -1. Ошибочные/отклонённые вызовы игнорируются."""
     ok_results = _success_result_by_id(history)
     pos = -1
     for i, msg in enumerate(history):
@@ -124,7 +115,6 @@ def _last_done_position(history: list, after: int) -> int:
 
 
 def _success_result_by_id(history: list) -> dict:
-    """tool_call_id -> ToolResult, если результат УСПЕШЕН (не ошибка, не отказ)."""
     ok: dict = {}
     for msg in history:
         if not isinstance(msg, ToolResult):
@@ -135,7 +125,6 @@ def _success_result_by_id(history: list) -> dict:
 
 
 def _done_marker_positions(history: list, leaves: list, after: int = -1) -> dict:
-    """id задачи -> индекс УСПЕШНОГО ToolResult её have_done (первое вхождение, маркеры после `after`; ошибочные/отклонённые вызовы игнорируются)."""
     result_idx: dict = {}
     for i, msg in enumerate(history):
         if isinstance(msg, ToolResult) and not msg.is_error and not msg.is_user_denied:
@@ -158,7 +147,6 @@ def _done_marker_positions(history: list, leaves: list, after: int = -1) -> dict
 
 def validate_task_mark_call(history_before: list, args: dict, plan_map: dict,
                             compacted: set[str]) -> Optional[str]:
-    """Проверяет, что have_done вызван для следующего по плану шага; возвращает None или сообщение об ошибке (перегенерация)."""
     tid = (args.get("id") or "").strip()
     if not tid:
         return "have_done requires a non-empty 'id'."
@@ -201,7 +189,6 @@ def validate_task_mark_call(history_before: list, args: dict, plan_map: dict,
 
 
 def compact_completed_tasks(agent: AgentContext) -> int:
-    """Компактизирует завершённые задачи (по одной за проход, с самой поздней); возвращает число."""
     if not Config.TASK_COMPACTION_ENABLED:
         return 0
     compacted = 0
@@ -223,7 +210,6 @@ def _earliest_done_leaf(history: list, leaves: list, compacted: set[str], plan_p
 
 
 def _leaf_block(history: list, leaf: str, leaves: list, plan_pos: int) -> tuple:
-    """Возвращает (start, end) сегмента задачи — только реальная работа между сохраняемыми маркерами make_plan/have_done (сами маркеры остаются в истории)."""
     done = _done_marker_positions(history, leaves, after=plan_pos)
     done_idx = done[leaf]        # индекс результата have_done этой задачи
 
@@ -303,7 +289,6 @@ def _compact_one_group(agent: AgentContext) -> Optional[str]:
 
 
 def summarize_task_segment(agent: AgentContext, segment_msgs: list, task_id: str, task_title: str) -> Optional[str]:
-    """Суммаризация сегмента истории через LLM: черновик + review."""
     from universal_agents.compressors import _review_task_summary, _draft_task_summary
     from universal_agents.context_builder import prepare_messages_for_api
 

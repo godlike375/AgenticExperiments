@@ -1,4 +1,3 @@
-"""Mixin восстановления истории LLMAgent: стирание сломанных/неудачных сообщений."""
 
 from __future__ import annotations
 
@@ -13,12 +12,7 @@ class HistoryMixin:
     """Операции по удалению/восстановлению сообщений в истории."""
 
     def _last_failed_tool_signature(self) -> Optional[str]:
-        """Сигнатура последней серии ошибок инструментов из истории: инструмент + нормализованные
-        аргументы + хэш текста ошибки для каждого упавшего вызова. Используется детектором
-        зацикливания (§1): только при ПОЛНОМ совпадении серий (инструменты, аргументы и ошибки)
-        ошибки считаются «одинаковыми» — модель реально застряла, а не диагностирует.
-
-        Возвращает None, если в конце истории нет неудачных вызовов (например, пустой ответ)."""
+        """Сигнатура последней серии ошибок: инструмент+аргументы+хэш ошибки (§1.10)."""
         msgs = self.history.get_all()
         errors: list[ToolResult] = []
         assistant = None
@@ -42,7 +36,6 @@ class HistoryMixin:
         return ";".join(parts) if parts else None
 
     def _erase_last_assistant(self) -> None:
-        """Удаляет последнее сообщение ассистента из истории (сломанный вызов без tool_calls)."""
         msgs = self.history.get_all()
         if msgs and isinstance(msgs[-1], AssistantMessage):
             self.history.remove_at({len(msgs) - 1})
@@ -50,7 +43,6 @@ class HistoryMixin:
             self._on_history_changed()
 
     def _erase_last_failed_tool_call(self) -> int:
-        """Удаляет из истории последний неудачный вызов инструмента (assistant + его error result)."""
         msgs = self.history.get_all()
         removed: set[int] = set()
         for i in range(len(msgs) - 1, -1, -1):
@@ -69,14 +61,11 @@ class HistoryMixin:
         return len(removed)
 
     def _mark_confirmation_junk(self, obj) -> None:
-        """Помечает сообщение «мусором» подтверждения: неверные попытки до успешного
-        respond_to_system, вычищаются скрабом (§1.11). id→obj вместо WeakSet: Message
-        неhashable, а сильная ссылка не даёт переиспользовать id — identity не сработает ложно."""
+        """Помечает мусор подтверждения для скраба (§1.11): id→obj, т.к. Message неhashable."""
         self._confirmation_junk[id(obj)] = obj
 
     def _scrub_confirmation_trail(self) -> int:
-        """После успешного respond_to_system убирает наги guard'а и помеченный мусор —
-        в контексте остаётся только правильный путь подтверждения. Возвращает число удалённых."""
+        """После успешного respond_to_system убирает наги и мусор — остаётся только правильный путь."""
         removed: set[int] = set()
         for i, m in enumerate(self.history.get_all()):
             if id(m) in self._confirmation_junk and self._confirmation_junk[id(m)] is m:
@@ -92,7 +81,6 @@ class HistoryMixin:
         return len(removed)
 
     def _get_last_answer_text(self) -> Optional[str]:
-        """Текст последнего текстового ответа ассистента из истории."""
         for msg in reversed(self.history.get_all()):
             if isinstance(msg, AssistantMessage) and (msg.content or "").strip():
                 return msg.content.strip()

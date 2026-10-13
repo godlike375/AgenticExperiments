@@ -187,8 +187,6 @@ class TestRealUnloadTool(unittest.TestCase):
 
 
 class TestSubAgentToolPermissions(unittest.TestCase):
-    """Denied/safe_only состояние менеджера унаследовано субагентом: схемы остаются
-    в префиксе ради KV-кэша, вызовы запрещённого возвращают ошибку «forbidden»."""
 
     def _make_parent(self):
         return LLMAgent(

@@ -35,9 +35,6 @@ class TestCall(unittest.TestCase):
         return iter([stream_chunk(stream_delta(content=content), usage=usage)])
 
     def test_call_streams_and_applies_prefill_and_usage(self):
-        """call() ВСЕГДА идёт через стриминговый транспорт: prefill дописывается к
-        ответу, usage собирается из чанка. Разбор тела HTTP-запроса — в
-        tests/test_in_process_stream.py."""
         with mock.patch("universal_agents.llm_client.LLMClient.open_stream",
                         return_value=self._fake_stream_chunks()):
             result, err, usage = LLMClient.call(
@@ -68,7 +65,6 @@ class TestCall(unittest.TestCase):
         self.assertIsNone(usage)
 
     def test_stop_before_start_returns_stopped(self):
-        """Stop запрошен ещё до старта — транспорт не создаётся вовсе, вердикт «stopped»."""
         with mock.patch("universal_agents.llm_client.LLMClient.open_stream") as mocked:
             result, err, usage = LLMClient.call(
                 [{"role": "user", "content": "hi"}],
@@ -80,11 +76,6 @@ class TestCall(unittest.TestCase):
         self.assertIsNone(usage)
 
     def test_stop_during_blocking_call_returns_control_immediately(self):
-        """Стрим, заблокированный на ожидании первого чанка, прерывается watchdog'ом по
-        stop_check: управление возвращается немедленно, без ожидания Config.TIMEOUT.
-
-        Единый стриминговый транспорт (п.4) заменяет прежний `_run_interruptible`:
-        остановка закрывает соединение, а не ждёт блокирующий вызов в потоке-демоне."""
         class BlockingStream:
             def __init__(self):
                 self.released = threading.Event()
@@ -115,8 +106,6 @@ class TestCall(unittest.TestCase):
         self.assertIn("stopped", err)
 
     def test_blocking_call_error_returns_error_tuple(self):
-        """Ошибка внутри потребления стрима не разрывает вызывающего, а возвращается
-        кортежем ошибки (единый контракт call())."""
         def broken_stream():
             if True:
                 raise RuntimeError("down")
@@ -142,8 +131,6 @@ class TestCall(unittest.TestCase):
         self.assertEqual(result.content, "world")
 
     def test_stream_creation_failure_keeps_error_no_blocking_fallback(self):
-        """Недоступный стрим возвращает кортеж ошибки (не None): служебный вызов идёт
-        по пути ошибки, а не в неотменяемый обычный вызов (такого пути больше нет)."""
         with mock.patch("universal_agents.llm_client.LLMClient.open_stream",
                         return_value=iter([{"error": "boom"}])):
             result, err, usage = LLMClient.call(
@@ -156,7 +143,6 @@ class TestCall(unittest.TestCase):
 
 
 class TestStreamSession(unittest.TestCase):
-    """StreamSession: единый потребитель стрима (watchdog + чанковый цикл)."""
 
     def test_consume_returns_content(self):
         chunks = iter([
@@ -174,8 +160,6 @@ class TestStreamSession(unittest.TestCase):
         self.assertEqual(session.acc.content, "hello world")
 
     def test_consume_stop_check_breaks_loop_and_closes(self):
-        """stop_check в цикле прерывает потребление: стрим закрывается, последующие
-        чанки не обрабатываются."""
         processed = [0]
 
         def generator():
@@ -207,9 +191,6 @@ class TestStreamSession(unittest.TestCase):
         self.assertTrue(close_calls)
 
     def test_consume_watchdog_covers_first_chunk_wait(self):
-        """Stop во время ожидания ПЕРВОГО чанка закрывает стрим и завершает consume.
-        До починки watchdog стартовал после первого чанка, и 'q' не работал, пока сервер
-        долго считал префилл (ввод выглядел замороженным)."""
         released = threading.Event()
 
         class BlockingStream:
@@ -242,7 +223,6 @@ class TestStreamSession(unittest.TestCase):
         self.assertIn("res", result)
 
     def test_consume_stop_already_set_returns_stopped(self):
-        """Если stop запрошен ещё до начала потребления — блокирующий цикл не начинается."""
         with mock.patch("universal_agents.llm_client.LLMClient.open_stream",
                         return_value=iter([stream_chunk(SimpleNamespace(content="never", tool_calls=None, reasoning_content=None))])):
             session = StreamSession(
@@ -255,7 +235,6 @@ class TestStreamSession(unittest.TestCase):
 
 
 class TestStreamAccumulatorPrefillEcho(unittest.TestCase):
-    """Шлюзы по-разному возвращают prefill: LM Studio вырезает его, сырой llama.cpp повторяет."""
 
     def _text_chunk(self, content):
         return stream_chunk(stream_delta(content=content))
@@ -314,7 +293,6 @@ class TestTextHash(unittest.TestCase):
 
 
 class TestBigramJaccard(unittest.TestCase):
-    """Биграммный Jaccard: учитывает порядок слов, в отличие от мешка слов."""
 
     def test_identical_texts(self):
         self.assertEqual(jaccard_similarity("read the file", "read the file"), 1.0)
@@ -323,7 +301,6 @@ class TestBigramJaccard(unittest.TestCase):
         self.assertEqual(jaccard_similarity("alpha beta gamma", "delta epsilon zeta"), 0.0)
 
     def test_word_order_matters(self):
-        """Перестановка слов даёт низкую схожесть — ключевое отличие от мешка слов."""
         sim = jaccard_similarity("read A then edit B", "edit B then read A")
         self.assertLess(sim, 0.5)
         self.assertLess(sim, Config.DUPLICATE_SIMILARITY_THRESHOLD)
@@ -471,7 +448,6 @@ class TestTokenUsageTracker(unittest.TestCase):
 
 class TestStreamSessionStopMarkers(unittest.TestCase):
     def test_marker_truncates_content_and_closes(self):
-        """Стоп-маркер обрезает контент, закрывает стрим и ставит флаг."""
         def stream():
             yield stream_chunk(SimpleNamespace(content="L1-5 foo\n", tool_calls=None, reasoning_content=None))
             yield stream_chunk(SimpleNamespace(content="</structure> more stuff", tool_calls=None, reasoning_content=None))
@@ -522,7 +498,6 @@ class TestStreamSessionStopMarkers(unittest.TestCase):
         self.assertEqual(session.acc.content, "<tag>\n</tag>")
 
     def test_stop_check_takes_priority_over_marker(self):
-        """Если stop_check сработал раньше маркера — это stop_check, а не маркер."""
         processed = [0]
 
         def stream():
@@ -550,9 +525,6 @@ class TestCallWithStopMarkers(unittest.TestCase):
         return iter([stream_chunk(stream_delta(content=content))])
 
     def test_call_truncates_at_marker(self):
-        """Стоп-маркер обрезает контент и ставит флаг на message_obj.stopped_at_marker —
-        потребляет стрим единый транспорт (раньше это делал не-стриминговый путь,
-        теперь маркер обрабатывается в StreamSession.consume)."""
         with mock.patch("universal_agents.llm_client.LLMClient.open_stream",
                         return_value=self._stream("<tag>\ndata\n</tag>\nanalysis")):
             result, err, usage = LLMClient.call(

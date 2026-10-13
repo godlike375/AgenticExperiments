@@ -1,11 +1,6 @@
-"""Протокол AgentContext — минимальный контракт агента, который используют миксины и хелперы.
 
-Пути для GUI/альтернативных реализаций агента: любая реализация, реализующая этот протокол,
-может быть использована миксинами и хелперами без жёсткой зависимости от LLMAgent.
-Используется только для статической типизации (TYPE_CHECKING); в рантайме — структурная
-совместимость (Protocol).
-"""
-
+"""Протокол AgentContext — минимальный контракт агента для миксинов и хелперов.
+Используется только для статической типизации (TYPE_CHECKING); в рантайме — структурная совместимость."""
 from __future__ import annotations
 
 import threading
@@ -22,11 +17,6 @@ if TYPE_CHECKING:
 
 @runtime_checkable
 class AgentContext(Protocol):
-    """Структурный интерфейс агента для миксинов и хелперов.
-
-    Список полей — это union того, что реально используют agent_mixins/*.py,
-    compressors.py, task_tracker.py, context_builder.py и tools/*.py.
-    """
 
     history: "ChatHistory"
     tools_manager: "ToolManager"
@@ -54,21 +44,16 @@ class AgentContext(Protocol):
     def _per_msg_enabled(self) -> bool: ...
 
     def _on_history_changed(self) -> None:
-        """Вызывается после любой мутации истории (сброс кэша файлов + flush выгрузок)."""
         ...
 
     def service_llm_call(self, *args, **kwargs):
-        """Служебный вызов LLM (саммаризация, компактизация, consistency)."""
         ...
 
     def load_tool(self, name: str) -> str:
-        """Включить ранее отключённый инструмент; возвращает строку-статус."""
         ...
 
     def make_sub_agent(self, *args, **kwargs):
-        """Создать изолированный субагент с подмножеством инструментов и собственной историей."""
         ...
 
     def pop_pending_operation(self) -> Optional[dict]:
-        """Извлечь и удалить отложенную операцию подтверждения модели."""
         ...

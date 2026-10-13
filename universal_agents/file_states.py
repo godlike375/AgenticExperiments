@@ -1,4 +1,3 @@
-"""Реестр состояний прочитанных файлов: при повторном read пропускает чтение, если хэш не изменился и старый результат цел в истории."""
 from __future__ import annotations
 
 import hashlib
@@ -10,12 +9,10 @@ if TYPE_CHECKING:
 
 
 def _content_hash(text: str) -> str:
-    """SHA-256 хэш текстового содержимого."""
     return hashlib.sha256(text.encode('utf-8')).hexdigest()
 
 
 class FileStateTracker:
-    """Хранит маппинг «путь → (хэш, tool_call_id read-результата)» в оперативной памяти; валидирует целостность по истории (если результат стёрт/сжат — следующий read перечитает файл)."""
 
     def __init__(self, history: 'ChatHistory' = None):
         self._history = history
@@ -25,7 +22,6 @@ class FileStateTracker:
         return os.path.abspath(path)
 
     def record(self, path: str, disk_hash: str, content_hash: str) -> None:
-        """Запоминает состояния пути: disk_hash — детекция изменения на диске, content_hash — валидация целостности в истории."""
         self._states[self._key(path)] = {
             "disk_hash": disk_hash,
             "content_hash": content_hash,
@@ -33,13 +29,11 @@ class FileStateTracker:
         }
 
     def mark_tool_call(self, path: str, tool_call_id: str) -> None:
-        """Привязывает запись к tool_call_id соответствующего read-результата."""
         st = self._states.get(self._key(path))
         if st:
             st["tool_call_id"] = tool_call_id
 
     def _find_read_result(self, tool_call_id: str):
-        """Ищет в истории ToolResult инструмента read по tool_call_id."""
         from universal_agents.tools.fs import read as _read_tool
 
         if not self._history or not tool_call_id:
@@ -53,22 +47,18 @@ class FileStateTracker:
         return None
 
     def _is_history_intact(self, entry: dict) -> bool:
-        """True, если read-результат ещё в истории и его контент не менялся."""
         result = self._find_read_result(entry["tool_call_id"])
         if result is None:
             return False
         return _content_hash(result.content) == entry["content_hash"]
 
     def should_skip(self, path: str, disk_hash: str) -> bool:
-        """True, если повторное чтение можно пропустить:
-        хэш на диске совпадает с запомненным, а прошлый результат цел в истории."""
         entry = self._states.get(self._key(path))
         if entry is None or disk_hash != entry["disk_hash"]:
             return False
         return self._is_history_intact(entry)
 
     def prune(self) -> None:
-        """Удаляет записи, чьи read-результаты стёрты из истории или сжаты."""
         stale = [
             k for k, v in self._states.items()
             if v.get("tool_call_id") and not self._is_history_intact(v)

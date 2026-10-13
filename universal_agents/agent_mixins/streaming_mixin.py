@@ -1,4 +1,3 @@
-"""Mixin потоковой генерации LLMAgent: сбор чанков, отслеживание расхождения, достройка."""
 
 from __future__ import annotations
 
@@ -12,16 +11,13 @@ from universal_agents.exceptions import GenerationInterrupted
 
 
 class StreamingMixin:
-    """Реализует streaming-вызов LLM с watch-механизмом против галлюцинаций на высокой температуре."""
 
     @staticmethod
     def _watch_diverged(watch_prefix: str, prefill: str, full_content: str) -> bool:
-        """True, если накопленный текст перестал совпадать с началом прежнего ответа."""
         return bool(watch_prefix) and not watch_prefix.startswith((prefill or "") + full_content)
 
     @staticmethod
     def _watch_match_len(watch_prefix: str, prefill: str, full_content: str) -> int:
-        """Длина общего префикса ответа и watch-таргета."""
         text = (prefill or "") + (full_content or "")
         target = watch_prefix or ""
         matched = 0
@@ -39,15 +35,7 @@ class StreamingMixin:
         stopped: bool,
         stop_check: Callable[[], bool] = None,
     ) -> bool:
-        """Нужна ли спокойная достройка после расхождения.
-
-        Достройка осмысленна, только если стрим оборван на расхождении ПОСЛЕ
-        частичного совпадения с таргетом (модель шла по дублю и свернула —
-        спасаем написанное и дописываем хвост спокойно). Если ответ разошёлся
-        с первого символа — это свежий ответ целиком: достройка выродилась бы
-        в холодный рестарт (лишний вызов, сброс KV-кэша, риск дубля X+X).
-        После пользовательской остановки достройки нет никогда.
-        """
+        """Достройка осмысленна только при частичном совпадении с таргетом (иначе — свежий ответ)."""
         if not stopped or (stop_check and stop_check()):
             return False
         if not self._watch_diverged(watch_prefix, prefill, content):
@@ -77,9 +65,7 @@ class StreamingMixin:
         prefill_shown: int = 0,
         defer_stream_end: bool = False,
     ) -> tuple:
-        """Вызов LLM со streaming (возвращает (message_obj, error, usage, stopped_at_marker)). Если задан watch_prefix, при расхождении с прежним ответом генерация на горячей температуре прерывается и достраивается спокойной температурой (watch_continue_temp) — буст не успевает вызвать галлюцинации. stop_check — вызывается после каждого чанка; True прерывает стрим. stop_markers — стоп-маркеры структурированного вывода: при появлении маркера в контенте стрим обрезается и останавливается, stopped_at_marker=True.
-        prefill_shown — сколько ведущих символов prefill уже показаны в живом выводе (продолжение симуляции reasoning): показывается только хвост prefill[prefill_shown:], чтобы не печатать накопленные мысли дважды, но новую приставку NO COMMENT пользователь видел. on_stream_start/on_stream_end при prefill_shown не вызываются — блок вывода остаётся открытым между вызовами одного сообщения.
-        defer_stream_end — блок вывода открывает вызывающий (первая фаза цепочки): on_stream_end не вызывается, его вызывает агент, когда цепочка фаз дошла до конца."""
+        """Вызов со стримингом: prefill_shown — уже показанное; defer_stream_end — закрывает вызывающий."""
         try:
             session = StreamSession(
                 messages,
@@ -146,7 +132,6 @@ class StreamingMixin:
         reasoning_effort: str = "none",
         stop_check: Callable[[], bool] = None,
     ) -> tuple:
-        """Достраивает прерванный на расхождении ответ спокойной генерацией (тоже со стримингом)."""
         partial_text = (prefill or "") + acc.content
         calm_temp = watch_continue_temp if watch_continue_temp is not None else Config.DUPLICATE_CONTINUATION_TEMP
         calm_params = self._gen_params.with_temp(calm_temp)

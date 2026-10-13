@@ -1,4 +1,3 @@
-"""Mixin выполнения инструментов LLMAgent: валидация, подтверждение, запуск обработчиков."""
 
 from __future__ import annotations
 
@@ -20,7 +19,6 @@ from universal_agents.tools.fs import read as _read_tool
 
 
 class ExecuteMixin:
-    """Выполняет ToolCall'ы: защита от дубликатов, контроль порядка have_done, запуск."""
 
     def _execute_tools(self, tool_calls: list[ToolCall]) -> list[ToolResult]:
         results = []
@@ -238,7 +236,6 @@ class ExecuteMixin:
         return results
 
     def rebuild_tool_usage(self):
-        """Пересчитывает статистику использования инструментов по успешным результатам истории."""
         self._tool_usage.clear()
         for msg in self.history.get_all():
             if isinstance(msg, ToolResult) and not msg.is_error and not msg.is_user_denied:

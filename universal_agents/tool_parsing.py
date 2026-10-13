@@ -1,4 +1,3 @@
-"""Чистые функции работы с tool call: извлечение имени/аргументов, распознавание сломанных вызовов, парсинг и нормализация JSON-аргументов. Без зависимости от LLMAgent (нет циклических импортов)."""
 
 from __future__ import annotations
 
@@ -9,7 +8,6 @@ from universal_agents.constants import ENVIRONMENT_PREFIX
 
 
 def tc_name(tc) -> str:
-    """Имя tool call независимо от формата (OpenAI/Responses-парсинг)."""
     func = getattr(tc, 'function', None)
     if func is not None:
         return getattr(func, 'name', None) or ""
@@ -17,7 +15,6 @@ def tc_name(tc) -> str:
 
 
 def tc_args(tc) -> str:
-    """Аргументы tool call независимо от формата (OpenAI/Responses-парсинг)."""
     func = getattr(tc, 'function', None)
     if func is not None:
         return getattr(func, 'arguments', None) or ""
@@ -25,7 +22,6 @@ def tc_args(tc) -> str:
 
 
 def is_error_content(content: str) -> bool:
-    """True, если вывод инструмента — ошибка (по конвенции начинается с 'Error')."""
     s = content.strip()
     while s.startswith(ENVIRONMENT_PREFIX):
         s = s[len(ENVIRONMENT_PREFIX):].strip()
@@ -41,8 +37,6 @@ _OPEN_TAG_RE = re.compile(rf'<\s*{_XML_NAME}(?=[\s/>]|$)')
 
 
 def _has_tag(content: str, tag: str | None = None) -> bool:
-    """True, если в content есть валидный открывающий XML-тег.
-    Если tag задан — ищем именно этот тег (полное совпадение имени)."""
     if tag is None:
         return _OPEN_TAG_RE.search(content) is not None
     return re.search(
@@ -51,12 +45,7 @@ def _has_tag(content: str, tag: str | None = None) -> bool:
 
 
 def _is_standalone_call(content: str, tool_names) -> bool:
-    """True, если весь ответ — один вызов известного инструмента: 'read({"path": "x"})'.
-
-    Для скана, где гейт «есть XML-тег» снят (тело ответа при симуляции reasoning),
-    упоминание инструмента в прозе — норма, а не сломанный вызов: «read() выполнен:
-    показана структура…», «Вызываю read() для просмотра…». Ловим только заведомо
-    сломанный синтаксис — когда вызов занимает ВЕСЬ ответ."""
+    """True, если весь ответ — один вызов известного инструмента (заведомо сломанный синтаксис)."""
     stripped = content.strip()
     if not stripped:
         return False
@@ -68,14 +57,7 @@ def _is_standalone_call(content: str, tool_names) -> bool:
 
 
 def detect_broken_call(content: str, tool_names: set[str], require_tag: bool = True) -> bool:
-    """True, если ответ похож на нераспарсенный вызов инструмента.
-    Базовый гейт — наличие валидного XML-тега; далее: известные теги
-    (<tool_call>/<tool>/<function>/<call>) либо тег + вызов известного
-    инструмента (напр. read({...})). Без тега не детектится.
-    require_tag=False снимает базовый гейт (он уже выполнен «извне» — сканируется
-    тело ответа, а не весь документ): остаются только теги ВНУТРИ этого тела и
-    «голый» вызов на весь ответ. Без этого проза вида «read() выполнен» давала бы
-    ложные срабатывания на каждом нормальном ответе."""
+    """True, если ответ похож на нераспарсенный вызов. require_tag=False снимает базовый гейт (симуляция reasoning)."""
     if not content or not content.strip():
         return False
 
@@ -97,7 +79,6 @@ def detect_broken_call(content: str, tool_names: set[str], require_tag: bool = T
 
 
 def build_tool_calls(tool_calls_data: dict) -> list:
-    """Собирает ToolCall'ы из накопленных данных стрима."""
     from universal_agents.models import ToolCall
 
     return [
@@ -111,7 +92,6 @@ def build_tool_calls(tool_calls_data: dict) -> list:
 
 
 def try_parse_tool_args(args_str: str):
-    """Парсит строку JSON-аргументов. Возвращает dict или None при пустых/невалидных значениях."""
     if not args_str or args_str.strip() in ("{}", "", "null"):
         return None
     try:
@@ -122,13 +102,11 @@ def try_parse_tool_args(args_str: str):
 
 
 def parse_tool_args(args_str: str) -> dict:
-    """Парсит строку JSON-аргументов в словарь. Пустые/невалидные значения дают {}."""
     parsed = try_parse_tool_args(args_str)
     return parsed if parsed is not None else {}
 
 
 def args_are_valid(args_str: str) -> bool:
-    """True, если аргументы можно передать инструменту: пустые/`{}`/`null` или валидный JSON-объект."""
     s = (args_str or "").strip()
     if not s or s in ("{}", "null"):
         return True
@@ -140,10 +118,6 @@ def args_are_valid(args_str: str) -> bool:
 
 
 def normalize_args(args_str: str) -> str:
-    """Канонизирует аргументы для сравнения на дубликаты (порядок ключей и пробелы не важны).
-
-    Принимает строку JSON или dict (на случай, если ToolCall.arguments — dict).
-    """
     if not args_str or (isinstance(args_str, str) and args_str.strip() in ("{}", "", "null")):
         return ""
     try:

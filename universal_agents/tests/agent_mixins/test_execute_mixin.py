@@ -23,16 +23,11 @@ line_range_edit_tool_name = line_range_edit.__name__
 
 
 def nag_contents(msgs) -> list:
-    """Контент нагов guard'а (UserMessage «You can't continue...») в истории.
-    Превью edit-инструмента содержит «You can't continue with common prose», но это
-    ToolResult, а не наг — поэтому смотрим только на UserMessage."""
     return [m.content for m in msgs
             if isinstance(m, UserMessage) and _GUARD_NAG_PREFIX in (m.content or "")]
 
 
 class TestAnswerRequiredGuard(unittest.TestCase):
-    """Если после edit-инструмента модель ответила текстом без вызова 'respond_to_system',
-    цикл должен вколоть ошибку и продолжить, пока answer не будет вызван."""
 
     def setUp(self):
         self._tmp = tempfile.mkdtemp()
@@ -47,18 +42,6 @@ class TestAnswerRequiredGuard(unittest.TestCase):
         return agent
 
     def test_repeated_text_answer_is_guard_violation_not_duplicate(self):
-        """Пока висит операция, повторная реплика — не «дубль качества текста», а
-        невыполненный протокол подтверждения. Приоритет у guard'а (§1.11): он даёт наг и
-        лестницу ANSWER_GUARD_MAX_RETRIES. Прежний приоритет детектора дублей сжигал все
-        MAX_LOOP_RETRIES попытки молча и заканчивался сдачей хода — модель так и не видела,
-        чего от неё ждут, а пользователь — почему всё молчит.
-
-        Сценарий из живой сессии: в истории уже есть текстовый ответ «Подтверждаю.» из
-        предыдущего хода, затем line_range_edit ставит pending, и модель повторяет ту же
-        фразу — сначала просто текстом, потом уже с правильным вызовом respond_to_system.
-        Второй случай и был затыком: текст проверяется детектором дублей ПЕРВЫМ (в т.ч. для
-        сообщений с вызовами), поэтому правильный вызов подтверждения выбрасывался вместе
-        с «пластинкой»-шапкой, и подтверждение не наступало никогда."""
         path = os.path.join(self._tmp, "hello.txt")
         with open(path, "w", encoding="utf-8") as f:
             f.write("hello\n")
@@ -153,8 +136,6 @@ class TestAnswerRequiredGuard(unittest.TestCase):
                          "После успешного respond_to_system наг должен быть вычищен из истории")
 
     def test_text_answer_without_answer_tool_then_text_again_no_message(self):
-        """Если модель упорно не вызывает answer, цикл продолжается (не обрывается),
-        пока она наконец не вызовет answer — здесь respond_to_system('no'), правка отменяется."""
         path = os.path.join(self._tmp, "x.txt")
         with open(path, "w", encoding="utf-8") as f:
             f.write("a\n")
@@ -201,9 +182,6 @@ class TestAnswerRequiredGuard(unittest.TestCase):
         self.assertEqual(nag_contents(msgs), [])
 
     def test_bare_answer_is_regenerated_until_model_adds_comment(self):
-        """Модель ОБЯЗАНА написать текст перед вызовом answer (ответ системе —
-        осознанный). Голый answer перегенерируется с 'Assistant:', а исполняется
-        только тот, что сопровождается реальным текстом."""
         path = os.path.join(self._tmp, "k.txt")
         with open(path, "w", encoding="utf-8") as f:
             f.write("a\n")
@@ -249,9 +227,6 @@ class TestAnswerRequiredGuard(unittest.TestCase):
         self.assertTrue(any("Подтверждаю правку" in t for t in texts))
 
     def test_rerun_prefill_survives_pending_operation(self):
-        """Перегенерация [NO COMMENT] с 'Assistant:' не должна съедаться guard'ом
-        pending-операции: prefill обязан дойти до следующего вызова LLM, и только
-        потом guard напомнит про answer (если модель так и не ответила)."""
         path = os.path.join(self._tmp, "l.txt")
         with open(path, "w", encoding="utf-8") as f:
             f.write("a\n")
@@ -301,9 +276,6 @@ class TestAnswerRequiredGuard(unittest.TestCase):
         self.assertEqual(nag_contents(msgs), [])
 
     def test_prefill_marker_alone_is_not_an_explanation(self):
-        """Впрыснутый 'Assistant:' сам по себе не считается пояснением: если модель
-        после prefill снова выдаёт голый answer (content='Assistant:'), вызов снова
-        отвергается — исполняется только answer с настоящим текстом."""
         path = os.path.join(self._tmp, "m.txt")
         with open(path, "w", encoding="utf-8") as f:
             f.write("a\n")
@@ -350,8 +322,6 @@ class TestAnswerRequiredGuard(unittest.TestCase):
         self.assertEqual(len(answers), 1)
 
     def test_answer_without_pending_returns_error(self):
-        """respond_to_system() без вопроса от системы — ошибка, а не молчаливое 'Recorded'.
-        Модель должна видеть явный отказ и ответить текстом."""
         agent = LLMAgent(
             system_prompt="You are helpful.",
             external_plugins={answer_tool_name: respond_to_system},
@@ -377,10 +347,6 @@ class TestAnswerRequiredGuard(unittest.TestCase):
         self.assertTrue(all("Recorded" not in c for c in tool_results))
 
     def test_bare_answer_without_pending_does_not_loop(self):
-        """Голый respond_to_system() без pending-операции перегенерируется через
-        [NO COMMENT] не больше NO_COMMENT_RETRIES раз, затем принимается как есть:
-        инструмент возвращает ошибку, и цикл завершается текстовым ответом — без
-        бесконечного зацикливания."""
         agent = LLMAgent(
             system_prompt="You are helpful.",
             external_plugins={answer_tool_name: respond_to_system},
@@ -416,7 +382,6 @@ class TestAnswerRequiredGuard(unittest.TestCase):
         self.assertTrue(any("requires a pending" in m.content for m in answers))
 
     def test_answer_with_pending_still_works(self):
-        """respond_to_system() после вопроса системы (pending) работает как раньше."""
         path = os.path.join(self._tmp, "p.txt")
         with open(path, "w", encoding="utf-8") as f:
             f.write("a\n")
@@ -448,9 +413,6 @@ class TestAnswerRequiredGuard(unittest.TestCase):
         self.assertFalse(any("requires a pending" in m.content for m in answers))
 
     def test_answer_guard_gives_up_after_max_retries(self):
-        """Guard без лимита зацикливал ход вечно (текст → наг → текст → ... до max_iter).
-        Теперь после ANSWER_GUARD_MAX_RETRIES срабатываний ход сдаётся пользователю:
-        result == '', лишних вызовов LLM нет (ровно edit + MAX_RETRIES+1 текстов)."""
         path = os.path.join(self._tmp, "g.txt")
         with open(path, "w", encoding="utf-8") as f:
             f.write("a\n")
@@ -484,9 +446,6 @@ class TestAnswerRequiredGuard(unittest.TestCase):
         self.assertEqual(len(nags), 1)
 
     def test_wrong_attempt_scrubbed_after_success(self):
-        """Неверная попытка (чужой инструмент при висящем pending) и наг вычищаются после
-        успешного respond_to_system: в истории остаётся только правильный путь подтверждения
-        (превью edit → answer → результат), а не чередование ошибок (§1.11)."""
         path = os.path.join(self._tmp, "w.txt")
         with open(path, "w", encoding="utf-8") as f:
             f.write("a\n")
@@ -527,10 +486,6 @@ class TestAnswerRequiredGuard(unittest.TestCase):
         self.assertEqual(nag_contents(msgs), [])
 
     def test_guard_nag_is_byte_stable_between_llm_calls(self):
-        """Повторные срабатывания guard'а переиспользуют ОДИН объект нага: user-часть
-        префикса байт-идентична между вызовами LLM (header-кэш не сбрасывается, ложных
-        [PREFIX-HASH] нет). Прежний _drop_guard_nags плодил новый UserMessage со свежим
-        timestamp — содержимое user-сообщений между вызовами расходилось."""
         path = os.path.join(self._tmp, "s.txt")
         with open(path, "w", encoding="utf-8") as f:
             f.write("a\n")
@@ -575,12 +530,6 @@ class TestAnswerRequiredGuard(unittest.TestCase):
             self.assertLessEqual(len(nags), 1, "Наг не должен накапливаться")
 
     def test_scrub_after_answer_keeps_prefix_byte_stable(self):
-        """Вычистка после успешного answer не сдвигает префикс: наг и мусор — временная
-        вставка, шапки уцелевших сообщений не трогаются, потому что их собственные байта
-        не менялись (mutation-only, §1.2). Раньше remove_at считал сменившимся последним
-        сообщение, стоящее в начале префикса, и пересобирал его шапку с новым токен-бюджетом
-        → [PREFIX-HASH] и сброс всего KV-кэша. usage в фейке растёт: если бы шапку всё же
-        пересобирали, предупреждение всплыло бы — тест ловит регрессию обратно."""
         path = os.path.join(self._tmp, "p.txt")
         with open(path, "w", encoding="utf-8") as f:
             f.write("a\n")
@@ -629,8 +578,6 @@ class TestAnswerRequiredGuard(unittest.TestCase):
         self.assertEqual(nag_contents(agent.history.get_all()), [])
 
     def test_guard_nag_flag_roundtrip_through_save_load(self):
-        """Флаг _is_guard_nag не уходит в API, но переживает save/load — скраб находит
-        наг и после перезагрузки (объекты пересозданы, identity-проверка бы не сработала)."""
         from universal_agents.history import ChatHistory
 
         hist = ChatHistory("sys")
@@ -674,7 +621,6 @@ def plain_tool() -> str:
 
 
 class TestToolOutputExecution(unittest.TestCase):
-    """ExecuteMixin: unwrap ToolOutput → текст в content, картинки в side-field."""
 
     def _agent(self):
         return make_test_agent(

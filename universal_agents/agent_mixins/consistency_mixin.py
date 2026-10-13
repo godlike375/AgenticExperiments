@@ -1,4 +1,3 @@
-"""Mixin self-consistency генерации LLMAgent: несколько черновиков + синтез."""
 
 from __future__ import annotations
 
@@ -9,7 +8,6 @@ from universal_agents.tool_parsing import tc_name
 
 
 class ConsistencyMixin:
-    """Режим self-consistency: генерирует несколько черновиков и синтезирует итог."""
 
     def _generate_draft_with_tool_suggestions(self, draft_messages, prefill, draft_temp):
         prefill_val = get_effective_prefill(prefill)
