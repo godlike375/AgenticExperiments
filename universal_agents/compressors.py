@@ -64,9 +64,6 @@ _REQUIRED_SECTION_IDS_WITH_73 = _REQUIRED_SECTION_IDS + (
 )
 
 
-# ============================================================
-# Автокомпрессия длинных результатов инструментов
-# ============================================================
 
 
 def is_summary_message(msg) -> bool:
@@ -339,9 +336,6 @@ def chunk_and_summarize_large_text(agent: AgentContext, text: str, tool_name: st
     return raw_accumulated_findings
 
 
-# ============================================================
-# Транскрипция истории + single-shot session summary (7 разделов)
-# ============================================================
 
 
 def summarize_history_plain(
@@ -371,9 +365,6 @@ def summarize_history_plain(
     return msg_obj.content.strip()
 
 
-# ============================================================
-# SummaryService — единая точка для всех видов суммаризации
-# ============================================================
 
 
 def _raw_summary(content: str) -> str:
@@ -471,11 +462,11 @@ class SummaryService:
             return False
 
         # --- Точка срабатывания: только на «безопасных» границах (force — сжимаем в любом месте) ---
-        popped_calls = agent.history.pop_pending_tool_calls()
-
         # Безопасные границы: ToolResult, UserMessage и завершённый текстовый ответ ассистента
         # (после pop_pending_tool_calls его хвост гарантированно без tool_calls; последнее
         # сообщение всё равно сохраняется через preserve_last).
+        popped_calls = agent.history.pop_pending_tool_calls()
+
         last = agent.history.get_last_message()
         safe_tail = isinstance(last, ToolResult) or isinstance(last, UserMessage)
         if isinstance(last, AssistantMessage) and not last.has_tool_calls():

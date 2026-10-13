@@ -701,9 +701,6 @@ class TestCompressionResetsCounters(unittest.TestCase):
         # фиксируем callback системных сообщений, чтобы проверить отсутствие LIMIT
         agent.on_system_msg = calls.append
         fail = _error_tool_call(_failing_tool.__name__, '{"message": "boom"}')
-        # 6 одинаковых ошибок + успех. Без сброса лимит наступил бы на 5-й.
-        # Компакция на 4-й итерации стирает старое — к моменту успеха ни одна
-        # сигнатура не набрала MAX.
         responses = [(fail, None, None)] * 6
         responses.append((AssistantMessage(content="итог"), None, None))
         with mock.patch(

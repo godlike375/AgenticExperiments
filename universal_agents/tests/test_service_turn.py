@@ -125,13 +125,6 @@ class TestServiceTurn(unittest.TestCase):
         summ.assert_not_called()
 
     def test_rollback_preserves_last_user_header_cache(self):
-        # Регрессия [PREFIX-HASH]: откат служебного хода через history.remove_at
-        # раньше сбрасывал кэш-заголовок последнего user-сообщения (инвалидация по
-        # «смене последности», хотя история вернулась байт-идентично), и следующий
-        # prepare_messages_for_api пересобирал шапку с новым токен-бюджетом
-        # → hash сообщения менялся → KV-кэш пересобирался. Теперь шапка
-        # инвалидируется только правкой собственных байт (§1.2), поэтому откату
-        # ничего восстанавливать не нужно.
         agent = make_agent()
         self._base_history(agent)
         # Тёплый кэш: последний user («вопрос») уже получил шапку (момент А).

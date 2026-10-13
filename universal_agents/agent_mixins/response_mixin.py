@@ -54,6 +54,10 @@ class SimReasoningGroup:
     (обычные параметры). Если модель дописала ответ или вызвала инструмент уже
     в фазе размышлений — принимается как есть, лишний вызов не нужен."""
 
+    # ── Симуляция reasoning (Config.SIMULATED_REASONING_*) ────────────────
+    # Имя секции берётся из Config.SIMULATED_REASONING_TAGS (единственный источник
+    # истины): ответ начинается с неё, а после её закрытия идёт свободный ответ.
+
     def __init__(self, retries: int):
         self.reset(retries)
 
@@ -72,6 +76,12 @@ class SimReasoningGroup:
         # Сколько ведущих символов self.content уже показано в живом выводе.
         # Растёт по мере стриминга; при продолжении prefill = self.content, а
         # показать надо только хвост после этой отметки (приставку NO COMMENT).
+        # Шлюз мог приклеить prefill к ответу (apply_prefill это уже учёл) либо обрезать
+        # его — тогда apply_prefill добавит обратно. Оффсеты вставок при этом сохраняются:
+        # приставка всегда в начале контента до этого вызова.
+        # Отметка — всегда длина контента: всё, что после неё, ещё не показано.
+        # Невыведенный \n перед отметкой — ок: срез prefill[_shown:] даёт именно
+        # невыведенный хвост, и продолжение ничего не дублирует.
         self._shown = 0
         # Оффсеты вклиненных нами кусков (приставки _NO_COMMENT_PREFILL) в self.content:
         # это наш prefill, а не текст модели — в ответ и историю он попадать не должен.
@@ -124,9 +134,6 @@ class SimReasoningGroup:
     def absorb(self, message_obj, prefill: str) -> None:
         """Забирает ответ вызова (текст, tool_calls, reasoning) в накопленный контент."""
         raw = apply_prefill(message_obj.content or "", prefill)
-        # Шлюз мог приклеить prefill к ответу (apply_prefill это уже учёл) либо обрезать
-        # его — тогда apply_prefill добавит обратно. Оффсеты вставок при этом сохраняются:
-        # приставка всегда в начале контента до этого вызова.
         self.content = raw
         self.tool_calls.extend(message_obj.tool_calls or [])
         self.reasoning += getattr(message_obj, "reasoning_content", "") or ""
@@ -153,9 +160,6 @@ class SimReasoningGroup:
                 self.content = self.content[:pos] + "\n" + self.content[pos:]
                 if pos == len(self.content) - 1:
                     self.appended += "\n"
-        # Отметка — всегда длина контента: всё, что после неё, ещё не показано.
-        # Невыведенный \n перед отметкой — ок: срез prefill[_shown:] даёт именно
-        # невыведенный хвост, и продолжение ничего не дублирует.
         self._shown = len(self.content)
 
     def take_appended(self) -> str:
@@ -265,9 +269,6 @@ class ResponseMixin:
             self.on_render(tr)
         self._emit_token_info()
 
-    # ── Симуляция reasoning (Config.SIMULATED_REASONING_*) ────────────────
-    # Имя секции берётся из Config.SIMULATED_REASONING_TAGS (единственный источник
-    # истины): ответ начинается с неё, а после её закрытия идёт свободный ответ.
 
     def _sim_verify_phase(self, group: SimReasoningGroup) -> Optional[AssistantMessage]:
         """Доводит ответ до готового сообщения или просит дописать пустой ответ.
@@ -397,18 +398,21 @@ class ResponseMixin:
                 if message_obj.tool_calls:
                     message_obj.tool_calls = [tc for tc in message_obj.tool_calls if tc.id == chosen_tc.id]
 
+        # Голый вызов инструмента без пояснения (reasoning выключен): стираем
+        # (не добавляем) пустой ответ ассистента и перегенерируем следующий ход
+        # с prefill, чтобы модель начала с текстового комментария перед вызовом.
+        # При активном reasoning это не нужено — модель уже прокомментировала ход
+        # в reasoning_content. Лимит ретраев у агента; пока они есть (попытка
+        # считается только когда prefill реально запрошен) — см. NO_COMMENT_RETRIES.
+        # Ретраи исчерпаны (это касается и respond_to_system без pending-задачи):
+        # принимаем голый вызов как есть — инструмент сам вернёт явную ошибку или
+        # выполнится без комментария, и цикл не зациклится.
         if (
             assistant_msg.has_tool_calls()
             and not substantive
             and reasoning_effort == "none"
         ):
             tool_names = [tc.name for tc in assistant_msg.tool_calls]
-            # Голый вызов инструмента без пояснения (reasoning выключен): стираем
-            # (не добавляем) пустой ответ ассистента и перегенерируем следующий ход
-            # с prefill, чтобы модель начала с текстового комментария перед вызовом.
-            # При активном reasoning это не нужно — модель уже прокомментировала ход
-            # в reasoning_content. Лимит ретраев у агента; пока они есть (попытка
-            # считается только когда prefill реально запрошен) — см. NO_COMMENT_RETRIES.
             if no_comment_retry_left > 0:
                 assistant_msg.tool_calls = []
                 if message_obj.tool_calls:
@@ -419,9 +423,6 @@ class ResponseMixin:
                     f"({no_comment_retry_left} retr{'y' if no_comment_retry_left == 1 else 'ies'} left)."
                 )
                 return clean_content, False, False, _NO_COMMENT_PREFILL
-            # Ретраи исчерпаны (это касается и respond_to_system без pending-задачи):
-            # принимаем голый вызов как есть — инструмент сам вернёт явную ошибку или
-            # выполнится без комментария, и цикл не зациклится.
             self.on_system_msg(
                 f"[NO COMMENT] No retries left for bare tool call `{tool_names[0]}`, executing as-is."
             )
@@ -440,12 +441,12 @@ class ResponseMixin:
 
         if not assistant_msg.has_tool_calls():
             scan_text = broken_scan_text if broken_scan_text is not None else clean_content
+            # Ответ при симуляции reasoning идёт без обязательных тегов формата:
+            # базовый гейт «есть XML-тег» неприменим, поэтому сканируем свободный
+            # текст (теги ВНУТРИ него и «голый» вызов на весь ответ).
             if not skip_broken_detection and detect_broken_call(
                 scan_text,
                 self._known_tool_names(),
-                # Ответ при симуляции reasoning идёт без обязательных тегов формата:
-                # базовый гейт «есть XML-тег» неприменим, поэтому сканируем свободный
-                # текст (теги ВНУТРИ него и «голый» вызов на весь ответ).
                 require_tag=broken_scan_text is None,
             ):
                 self.on_system_msg("[BROKEN CALL] Response looks like an unparsed tool call (prose or XML).")
@@ -472,14 +473,6 @@ class ResponseMixin:
             # Подтверждение принято — вычищаем наг и неверные попытки (§1.11).
             self._scrub_confirmation_trail()
 
-        # removed = self.history.remove_failed_call_chains()
-        # if removed:
-        #     self.on_system_msg(
-        #         f"[CLEANUP] Removed {removed} messages "
-        #         f"({removed // 2} failed calls)"
-        #     )
-        #     self.history.normalize()
-        #     self._on_history_changed()
 
         tool_error_occurred = any(tr.is_error and not tr.is_user_denied for tr in tool_results)
         return clean_content, tool_error_occurred, False, None

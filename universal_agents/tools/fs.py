@@ -326,6 +326,7 @@ def _make_diff_preview(old_text: str, new_text: str, path: str,
     sm = difflib.SequenceMatcher(None, old_lines, new_lines)
     changed = False
     rows: list[tuple[str, str]] = []
+
     # Дедупликация ТОЛЬКО подряд идущих контекстных строк одинакового
     # содержимого (граница, общая для двух соседних хунков). Добавленные и
     # удалённые строки НИКОГДА не схлопываются: каждая соответствует реальной
@@ -696,9 +697,6 @@ def read(agent: 'AgentContext', path: str = '.', start_line: int = None, end_lin
             else:
                 structure = _summarize_file(raw, agent)
                 if structure is None:
-                    # Генерация скелета не удалась (например, сбой субагента) — НЕ возвращаем
-                    # ошибку, но и не отдаём файл целиком (он может быть огромным). Вместо
-                    # этого — лёгкая подсказка читать файл диапазонами start_line/end_line.
                     agent.on_system_msg(
                         f"[read] Skeleton generation for '{path}' failed; "
                         f"returning a hint to read it in portions instead of full content."

@@ -15,9 +15,6 @@ class HistoryArchive:
     def __init__(self, entries: list[dict] | None = None):
         self.entries: list[dict] = entries or []
 
-    # ------------------------------------------------------------------
-    # Наполнение
-    # ------------------------------------------------------------------
 
     def append_messages(self, msgs: list["Message"]) -> int:
         added = 0
@@ -54,9 +51,6 @@ class HistoryArchive:
     def from_list(cls, data: list[dict] | None) -> "HistoryArchive":
         return cls(list(data) if data else [])
 
-    # ------------------------------------------------------------------
-    # Поиск и чтение
-    # ------------------------------------------------------------------
 
     def search(
         self,
@@ -148,9 +142,6 @@ class HistoryArchive:
         return header + "\n" + "\n".join(parts) + tail
 
 
-# ---------------------------------------------------------------------------
-# Хелперы
-# ---------------------------------------------------------------------------
 
 
 def _role_of(m) -> str:

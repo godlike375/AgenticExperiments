@@ -76,9 +76,6 @@ class SimReasoningTestCase(unittest.TestCase):
             )
         }
         Config.SIMULATED_REASONING_ENABLED = True
-        # Герметичность: тесты исходят из дефолта (однофазный режим), двухфазные
-        # включают свои настройки явно. Иначе локальный config.py с заданными
-        # SIMULATED_REASONING_* роняет тесты, написанные под один вызов.
         Config.SIMULATED_REASONING_TEMP = None
         Config.SIMULATED_REASONING_TOP_P = None
         Config.SIMULATED_REASONING_MIN_P = None
@@ -215,9 +212,6 @@ class TestSimStreaming(SimReasoningTestCase):
              mock.patch("universal_agents.llm_client.LLMClient.close_stream"):
             result = agent.chat("сколько будет 21*2?")
 
-        # Дописанный закрывающий тег виден в консоли ровно один раз, иначе он выглядит
-        # незакрытым (или задваивается при автозакрытии в следующем вызове).
-        # Перевод строки после закрытия — тоже часть эха.
         self.assertEqual(sum(c.count(CLOSE_T) for c in chunks), 1)
         self.assertTrue(result.startswith(f"{OPEN_T}мысли{CLOSE_T}\n"))
         self.assertIn("теперь скажу", result)
@@ -260,9 +254,6 @@ class TestSimStreaming(SimReasoningTestCase):
              mock.patch("universal_agents.llm_client.LLMClient.close_stream"):
             result = agent.chat("сколько будет 21*2?")
 
-        # Накопленный prefill не перепечатывается (открывающий тег ровно один раз,
-        # блок не переоткрывается), но новая приставка NO COMMENT видна в живом
-        # выводе как часть сообщения модели — в историю она не попадает.
         kinds = [kind for kind, _ in events]
         self.assertEqual(kinds.count("start"), 1)
         self.assertEqual(kinds.count("end"), 1)

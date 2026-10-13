@@ -410,10 +410,6 @@ class TestAnswerRequiredGuard(unittest.TestCase):
         final_reply = AssistantMessage(content="Всё, готово.")
 
         seen = []
-        # Первые (NO_COMMENT_RETRIES+1) сообщений — голый answer: первые N отвергаются
-        # и перегенерируются с prefill, последний исполняется как есть (ретраи исчерпаны)
-        # и возвращает ошибку инструмента. Объекты создаём заново: обработчик мутирует
-        # message_obj (стирает tool_calls) при каждом rerun.
         retries = Config.NO_COMMENT_RETRIES
 
         def fresh_bare_answer():
@@ -595,9 +591,6 @@ class TestAnswerRequiredGuard(unittest.TestCase):
             result = agent.chat("Измени файл", max_iter=10)
 
         self.assertIn("Готово", result)
-        # Вызовы: 1=edit, 2=text1, 3=text2, 4=answer, 5=final. Наг добавлен после вызова 2
-        # (guard №1), переиспользован перед вызовом 4 (guard №2) — user-префикс обязан
-        # быть байт-идентичным между вызовами 3 и 4.
         self.assertEqual(len(user_contents), 5)
         self.assertGreaterEqual(len(user_contents[2]), 1)
         self.assertEqual(user_contents[2], user_contents[3],

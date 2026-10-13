@@ -42,9 +42,6 @@ class ChatHistory:
         if isinstance(value, int) and value > 0:
             self._next_seq = max(self._next_seq, value)
 
-    # --------------------------------------------------------
-    # Рабочая память: плотные саммари отдельных сообщений
-    # --------------------------------------------------------
     def set_per_msg_summary(self, msg: Message, summary: str) -> None:
         self._per_msg_summaries[id(msg)] = summary
 
@@ -187,10 +184,10 @@ class ChatHistory:
                 # (content склеивается, images — side-field, их надо переносить руками).
                 if isinstance(msg, UserMessage) and isinstance(last, UserMessage) and msg.images:
                     last.images = last.images + msg.images
-                if isinstance(last, UserMessage):
                     # Контент склеенного сообщения изменился — его KV и так мёртв,
                     # шапку пересобрать бесплатно. Сообщения, которых normalize не тронул,
                     # сохраняют байт-идентичные заголовки (§1.2).
+                if isinstance(last, UserMessage):
                     last.reset_header_cache()
                 if isinstance(msg, AssistantMessage) and msg.has_tool_calls():
                     last.tool_calls = last.tool_calls + msg.tool_calls
@@ -430,9 +427,6 @@ class ChatHistory:
         if last_idx is not None and start <= last_idx:
             self._resync_last_user_header()
 
-    # --------------------------------------------------------
-    # Гибридная память: блоки STATE / EPISODES
-    # --------------------------------------------------------
 
     def get_session_summary(self) -> Optional[str]:
         """Текст текущего session summary без обёртки (или None); при повторной компакции подаётся модели для слияния."""
@@ -469,8 +463,8 @@ class ChatHistory:
 
         preserved = msgs[safe_end:]
         self._messages = [msgs[0], summary_msg] + preserved
-        self._mark_dirty()
         # Компакция вставила summary в начало — весь префикс после неё и так пересобирается,
         # поэтому честный бюджет на текущем вопросе бесплатен (и обязателен: до-компакционная
         # цифра занижена). Шапки остальных сохранённых сообщений не трогаем — их байты целы.
+        self._mark_dirty()
         self._resync_last_user_header()

@@ -408,9 +408,6 @@ class CLI:
         self._inject_line("\n")
         ConsoleUI.system_msg("⏹ Stop requested — finishing current step…")
 
-    # --------------------------------------------------------
-    # Единый ввод из stdin через очередь (работает в PyCharm и нативных консолях)
-    # --------------------------------------------------------
     def _start_stdin_reader(self):
         self._line_queue: collections.deque = collections.deque()
         self._line_lock = threading.Lock()

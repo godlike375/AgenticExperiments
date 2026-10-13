@@ -46,9 +46,6 @@ class TestStreamInterrupt(unittest.TestCase):
             yield stream_chunk(stream_delta(content=" never seen"))
 
         def stop_check():
-            # останавливаем после накопления "hello world" — третий чанк не должен
-            # попасть в ответ. Критерий по содержимому, а не по числу вызовов: watcher
-            # (закрывающий стрим) и основной цикл зовут stop_check на разных фазах.
             return "hello world" in "".join(seen)
 
         with mock.patch("universal_agents.agent.LLMClient.open_stream", side_effect=stream), \

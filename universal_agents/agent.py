@@ -235,9 +235,6 @@ class LLMAgent(
         self.tools_manager = ToolManager(tools_config, external_plugins)
         if denied_tools:
             self.tools_manager.deny(denied_tools)
-        # Изоляция инструментов (docs/TOOL_ISOLATION_SPEC.md): внешние инструменты уходят
-        # в воркеры групп; состояние групп хранит хост. В тестах isolated=False.
-        # Суб-агент переиспользует менеджер родителя (общие воркеры, сессии, прокси).
         from universal_agents.group_worker import GroupManager
         from universal_agents.project_root import get_project_root_override
         if group_manager is not None:
@@ -282,6 +279,9 @@ class LLMAgent(
         # Авто-сохранение (защита от сбоев): один файл на диалог с меткой времени
         # запуска/сброса; перезаписывается при каждом снимке. Ротация оставляет
         # AUTOSAVE_KEEP последних файлов (по одному на диалог/запуск).
+        # Пользовательский ввод во время генерации (redirect): когда выполняется инструмент,
+        # текст пользователя не прерывает инструмент, а ждёт его завершения, после чего
+        # вставляется в историю и запускается новая генерация (сценарий В).
         self.autosave_enabled = Config.AUTOSAVE_ENABLED if autosave_enabled is None else autosave_enabled
         self.autosave_dir = Config.AUTOSAVE_DIR if autosave_dir is None else autosave_dir
         self.autosave_keep = Config.AUTOSAVE_KEEP if autosave_keep is None else autosave_keep
@@ -291,9 +291,6 @@ class LLMAgent(
         self.stop_event = threading.Event()
         self.on_interrupt_check = on_interrupt_check if on_interrupt_check is not None else (lambda: False)
         self._stop_check = lambda: self.stop_event.is_set() or bool(self.on_interrupt_check())
-        # Пользовательский ввод во время генерации (redirect): когда выполняется инструмент,
-        # текст пользователя не прерывает инструмент, а ждёт его завершения, после чего
-        # вставляется в историю и запускается новая генерация (сценарий В).
         self.pending_interrupt: Optional[str] = None
         # True, пока поток генерации исполняет инструменты (нужно UI для выбора поведения).
         self._in_tool_execution = False
@@ -394,9 +391,6 @@ class LLMAgent(
         if usage:
             self.token_tracker.update_from_usage(usage)
 
-    # --------------------------------------------------------
-    # Pending operations (для requires_model_confirmation)
-    # --------------------------------------------------------
     def set_pending_operation(self, op: dict) -> None:
         """Сохраняет отложенную операцию (handler + args) для подтверждения моделью."""
         self._pending_operation = op
@@ -425,9 +419,6 @@ class LLMAgent(
         self.history.add(nag)
         self.on_render(self.history.get_all()[-1])
 
-    # --------------------------------------------------------
-    # Авто-сохранение (защита от сбоев)
-    # --------------------------------------------------------
     def _build_save_extras(self) -> dict:
         """Собирает служебные данные верхнего уровня для сохранения (архив, план, cwd и т.п.)."""
         from universal_agents.task_tracker import plan_state_to_dict
@@ -540,9 +531,6 @@ class LLMAgent(
             raise ValueError(f"method '{method}' is not allowed via plugin proxy")
         return handler(self, *args, **(kwargs or {}))
 
-    # --------------------------------------------------------
-    # Прерывание генерации (передача управления пользователю)
-    # --------------------------------------------------------
     def request_stop(self) -> None:
         """Запрашивает остановку текущей генерации (проверяется между шагами и внутри стрима)."""
         self.stop_event.set()
@@ -746,9 +734,6 @@ class LLMAgent(
         self.history.add(UserMessage(content=prompt))
         self.clear_stop()
 
-    # --------------------------------------------------------
-    # Главный цикл
-    # --------------------------------------------------------
     def _get_prior_text_hashes(self) -> tuple[set[str], set[str]]:
         """Хэши текстов и reasoning-блоков всех AssistantMessage истории.
 
@@ -784,18 +769,11 @@ class LLMAgent(
         reasoning = (getattr(message_obj, 'reasoning_content', '') or '').strip()
         pending = self._pending_operation is not None
 
-        # Правильный вызов подтверждения с повторённой шапкой при висящей операции:
-        # текст проверяется детектором дублей ПЕРВЫМ (в т.ч. для сообщений с вызовами),
-        # и без этого ответ выбрасывался бы вместе с вызовом — подтверждение не наступило
-        # бы никогда. Выполнение протокола важнее лестницы дублей.
         if pending and message_obj.tool_calls and any(
             tc_name(tc) == respond_to_system.__name__ for tc in message_obj.tool_calls
         ):
             return None
 
-        # Точный повтор текста или reasoning где угодно в истории, включая сообщения с
-        # вызовами инструментов: модель, вызывающая разные инструменты, обязана менять и
-        # сопроводительный текст (иначе это «пластинка», см. prefill 'LLM:\\n"').
         min_chars = Config.DUPLICATE_TEXT_MIN_CHARS
         if content or reasoning:
             prior_text, prior_reasoning = self._get_prior_text_hashes()
@@ -909,6 +887,13 @@ class LLMAgent(
                 api_error_occurred = True
                 break
 
+            # Правильный вызов подтверждения с повторённой шапкой при висящей операции:
+            # текст проверяется детектором дублей ПЕРВЫМ (в т.ч. для сообщений с вызовами),
+            # и без этого ответ выбрасывался бы вместе с вызовом — подтверждение не наступило
+            # бы никогда. Выполнение протокола важнее лестницы дублей.
+            # Точный повтор текста или reasoning где угодно в истории, включая сообщения с
+            # вызовами инструментов: модель, вызывающая разные инструменты, обязана менять и
+            # сопроводительный текст (иначе это «пластинка», см. prefill 'LLM:\\n"').
             duplicate = is_duplicate_fn(message_obj)
             if duplicate is not None and duplicate[0] == _CONFIRMATION_GUARD_VERDICT:
                 # Повтор при висящей pending-операции — это не дубль качества текста,
@@ -918,6 +903,9 @@ class LLMAgent(
                 # ANSWER_GUARD_MAX_RETRIES). Тот же приоритет у ответа, который протокол
                 # уже выполняет: «пластинка»-шапка не должна съесть вызов respond_to_system
                 # (для него _detect_duplicate вердиктов не выдаёт вовсе).
+                # Эскалация: первые дубли просто отбрасываются с бустом температуры, NAG
+                # вставляется только после DUPLICATE_NAG_THRESHOLD дублей подряд — чтобы не
+                # тратить токены и не раздражать модель голосом предупреждений при единичных сбоях.
                 duplicate = None
             if duplicate is not None:
                 dup_count += 1
@@ -933,9 +921,6 @@ class LLMAgent(
                 else:
                     dup_watch_target = payload
                     tag, reason = 'DUPLICATE ANSWER DETECTED', 'Model repeated the previous answer verbatim'
-                # Эскалация: первые дубли просто отбрасываются с бустом температуры, NAG
-                # вставляется только после DUPLICATE_NAG_THRESHOLD дублей подряд — чтобы не
-                # тратить токены и не раздражать модель голосом предупреждений при единичных сбоях.
                 if dup_count >= Config.DUPLICATE_NAG_THRESHOLD:
                     last_retry_warning = _REPEAT_ANSWER_NAG if kind != 'tool_call' else self._build_duplicate_warning(dup_name, dup_args)
                 else:
