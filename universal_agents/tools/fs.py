@@ -4,6 +4,7 @@ import datetime
 import difflib
 import os
 import re as _re
+import stat
 import fnmatch as _fnmatch
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
@@ -29,6 +30,28 @@ SEARCH_MAX_OUTPUT_CHARS = Config.MAX_READ_CHARS_PER_CALL # макс. разме�
 SEARCH_BINARY_PROBE = 8192                # размер префикса для детекции бинарника
 
 
+def _is_reparse_point(entry: os.DirEntry) -> bool:
+    """Симлинк/junction (reparse point Windows) — не спускаться, чтобы не уйти в цикл."""
+    try:
+        if entry.is_symlink():
+            return True
+    except OSError:
+        return True
+    isjunction = getattr(os.path, "isjunction", None)
+    if isjunction is not None:
+        try:
+            if isjunction(entry.path):
+                return True
+        except OSError:
+            pass
+    try:
+        st = entry.stat(follow_symlinks=False)
+    except OSError:
+        return True
+    flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    return bool(flag and getattr(st, "st_file_attributes", 0) & flag)
+
+
 class FS:
 
     @staticmethod
@@ -42,39 +65,72 @@ class FS:
 
     @staticmethod
     def _count_hidden_size(root_path: str) -> int:
+        """Итеративный подсчёт размера; циклы symlink/junction отсекаются по realpath."""
         total = 0
-        try:
-            for entry in os.scandir(root_path):
-                try:
-                    if entry.is_file(): total += entry.stat().st_size
-                    elif entry.is_dir(): total += FS._count_hidden_size(entry.path)
-                except PermissionError: continue
-        except (PermissionError, FileNotFoundError): pass
+        seen = {os.path.realpath(root_path)}
+        stack = [root_path]
+        while stack:
+            cur = stack.pop()
+            try:
+                entries = os.scandir(cur)
+            except (PermissionError, FileNotFoundError, OSError):
+                continue
+            with entries:
+                for entry in entries:
+                    try:
+                        if _is_reparse_point(entry):
+                            continue
+                        if entry.is_file(follow_symlinks=False):
+                            total += entry.stat(follow_symlinks=False).st_size
+                        elif entry.is_dir(follow_symlinks=False):
+                            real = os.path.realpath(entry.path)
+                            if real in seen:
+                                continue
+                            seen.add(real)
+                            stack.append(entry.path)
+                    except (PermissionError, OSError):
+                        continue
         return total
 
     @staticmethod
-    def _build_tree(root_path: str, depth: int = 0, density: int = 4) -> str:
+    def _build_tree(root_path: str, depth: int = 0, density: int = 4,
+                    seen: Optional[set[str]] = None) -> str:
+        """Построение дерева без лимита глубины; циклы symlink/junction отсекаются по realpath."""
+        if seen is None:
+            seen = set()
+        real = os.path.realpath(root_path)
+        if real in seen:
+            return f"{'  ' * depth}[cycle skipped: {os.path.basename(root_path)}]"
+        seen.add(real)
         try: entries = list(os.scandir(root_path))
         except PermissionError: return f"{'  ' * depth}[Permission Denied]"
-        except FileNotFoundError: return f"{'  ' * depth}[Path Not Found]"
+        except (FileNotFoundError, OSError): return f"{'  ' * depth}[Path Not Found]"
 
         if depth > 0 and len(entries) > density:
             size = FS._format_size(FS._count_hidden_size(root_path))
             return f"{'  ' * depth}[{len(entries)} items TRUNCATED, {size}]"
 
-        dirs = sorted([e for e in entries if e.is_dir()], key=lambda x: x.name.lower())
-        files = sorted([e for e in entries if e.is_file()], key=lambda x: x.name.lower())
+        dirs = sorted([e for e in entries if e.is_dir(follow_symlinks=False) and not _is_reparse_point(e)], key=lambda x: x.name.lower())
+        files = sorted([e for e in entries if e.is_file(follow_symlinks=False) and not _is_reparse_point(e)], key=lambda x: x.name.lower())
 
         lines = []
         for entry in dirs + files:
-            mtime = datetime.datetime.fromtimestamp(entry.stat().st_mtime).strftime("%Y-%m-%d")
+            try:
+                mtime = datetime.datetime.fromtimestamp(entry.stat(follow_symlinks=False).st_mtime).strftime("%Y-%m-%d")
+            except (OSError, PermissionError):
+                mtime = "????-??-??"
             prefix = f"{'  ' * depth}"
-            if entry.is_dir():
+            if entry.is_dir(follow_symlinks=False):
                 lines.append(f"{prefix}{entry.name}/ ({mtime})")
-                if sub := FS._build_tree(entry.path, depth + 1, density):
+                sub = FS._build_tree(entry.path, depth + 1, density, seen)
+                if sub:
                     lines.append(sub)
             else:
-                lines.append(f"{prefix}{entry.name} ({FS._format_size(entry.stat().st_size)})")
+                try:
+                    size_str = FS._format_size(entry.stat(follow_symlinks=False).st_size)
+                except (OSError, PermissionError):
+                    size_str = "?"
+                lines.append(f"{prefix}{entry.name} ({size_str})")
         return "\n".join(lines)
 
 @tool(description="Gets or changes current working dir",
@@ -105,6 +161,12 @@ def _ensure_file_exists(path: str) -> bool:
         raise RuntimeError(f"Failed to create file: {e}")
 
 
+def _preserve_final_newline(original: str, result: str) -> str:
+    if original.endswith("\n") and result and not result.endswith("\n"):
+        return result + "\n"
+    return result
+
+
 def _apply_edit_result(
     path: str,
     content: str,
@@ -122,7 +184,7 @@ def _apply_edit_result(
     replaced: Optional[int] = None,
     added: Optional[int] = None,
 ) -> tuple | str:
-    """Финализация правки: dry_run → (preview, resolve, ask) для подтверждения; иначе пишет файл."""
+    new_content = _preserve_final_newline(content, new_content)
     if new_content == content or new_content == content.rstrip('\n'):
         return f"Nothing changed: {nothing}"
 

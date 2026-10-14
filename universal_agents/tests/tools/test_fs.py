@@ -93,6 +93,18 @@ class TestEditFile(unittest.TestCase):
         self.assertIsInstance(out, str)
         self.assertIn("Nothing changed", out)
 
+    def test_preserves_final_newline(self):
+        f = self._path("nl.txt", "l1\nl2\nl3\n")
+        _preview, resolve, _ask = line_range_edit(f, "L2\n", start_line=2, end_line=2, dry_run=True)
+        resolve(None, "yes")
+        self.assertEqual(open(f, encoding="utf-8").read(), "l1\nL2\nl3\n")
+
+    def test_keeps_absent_final_newline(self):
+        f = self._path("nonl.txt", "l1\nl2\nl3")
+        _preview, resolve, _ask = line_range_edit(f, "L2\n", start_line=2, end_line=2, dry_run=True)
+        resolve(None, "yes")
+        self.assertEqual(open(f, encoding="utf-8").read(), "l1\nL2\nl3")
+
     def test_insert_middle(self):
         f = self._path("mid.txt", "l1\nl2\nl3\nl4\n")
         preview, _resolve, _ask = line_range_edit(f, "X\n", start_line=2, end_line=2, dry_run=True)
@@ -225,7 +237,7 @@ class TestMatchReplaceEdit(unittest.TestCase):
         preview, resolve, _ask = match_replace_edit(f, "", "brand new\n", dry_run=True)
         self.assertIn("+brand new", preview)
         resolve(None, "yes")
-        self.assertEqual(open(f, encoding="utf-8").read(), "brand new")
+        self.assertEqual(open(f, encoding="utf-8").read(), "brand new\n")
 
 
 def _make_fake_agent():
@@ -328,6 +340,34 @@ class TestReadBatchMode(unittest.TestCase):
         self.assertIn("L1-3 class Foo", out)
         self.assertNotIn("Full focus lines", out)
         self.assertNotIn("\n1 line 1 ", out)
+
+
+class TestBuildTreeCycleSafety(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self._tmp, ignore_errors=True)
+
+    def _make_link_cycle(self):
+        sub = os.path.join(self._tmp, "sub")
+        os.makedirs(sub)
+        link = os.path.join(sub, "loop")
+        try:
+            os.symlink(self._tmp, link, target_is_directory=True)
+        except (OSError, NotImplementedError) as e:
+            self.skipTest(f"symlinks unavailable: {e}")
+        return sub
+
+    def test_build_tree_terminates_on_symlink_cycle(self):
+        self._make_link_cycle()
+        out = fs_module.FS._build_tree(self._tmp)
+        self.assertIn("sub/", out)
+        self.assertLess(out.count("loop"), 2)
+
+    def test_count_size_terminates_on_symlink_cycle(self):
+        sub = self._make_link_cycle()
+        with open(os.path.join(sub, "f.txt"), "w", encoding="utf-8") as f:
+            f.write("x" * 100)
+        self.assertGreaterEqual(fs_module.FS._count_hidden_size(self._tmp), 100)
 
 
 class _PendingAgent:

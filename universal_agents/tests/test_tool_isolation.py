@@ -149,7 +149,7 @@ class TestIsolatedWorkspace(unittest.TestCase):
             applied = resolve(None, "yes")
             self.assertIn("L2-2", applied)
             with open(f, encoding="utf-8") as fh:
-                self.assertEqual(fh.read(), "l1\nX\nl3\nl4")
+                self.assertEqual(fh.read(), "l1\nX\nl3\nl4\n")
         finally:
             mgr.close_all()
 
@@ -310,7 +310,7 @@ class TestAgentEndToEndIsolated(unittest.TestCase):
         })
         self.assertIn("Правка внесена", result)
         with open(f, encoding="utf-8") as fh:
-            self.assertEqual(fh.read(), "a\nX\nc")
+            self.assertEqual(fh.read(), "a\nX\nc\n")
 
 
 if __name__ == "__main__":

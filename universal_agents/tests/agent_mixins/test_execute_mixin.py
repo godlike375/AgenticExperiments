@@ -85,7 +85,7 @@ class TestAnswerRequiredGuard(unittest.TestCase):
         self.assertIn("attempt 1/5", notices[0])
         self.assertIsNone(agent._pending_operation)
         with open(path, encoding="utf-8") as f:
-            self.assertEqual(f.read(), "world")
+            self.assertEqual(f.read(), "world\n")
 
     def test_text_answer_without_answer_tool_then_answer_yes(self):
         path = os.path.join(self._tmp, "hello.txt")
@@ -127,7 +127,7 @@ class TestAnswerRequiredGuard(unittest.TestCase):
         self.assertIn("Операция завершена", result)
         self.assertIsNone(agent._pending_operation)
         with open(path, encoding="utf-8") as f:
-            self.assertEqual(f.read(), "world")
+            self.assertEqual(f.read(), "world\n")
 
         self.assertTrue(any(_GUARD_NAG_PREFIX in t for content in seen for t in content),
                         "Модель должна была получить сообщение-ошибку о вызове answer")
@@ -219,7 +219,7 @@ class TestAnswerRequiredGuard(unittest.TestCase):
 
         self.assertIn("Готово", result)
         with open(path, encoding="utf-8") as f:
-            self.assertEqual(f.read(), "b")
+            self.assertEqual(f.read(), "b\n")
         self.assertIsNone(agent._pending_operation)
         self.assertIn(_NO_COMMENT_PREFILL, seen)
         msgs = agent.history.get_all()
@@ -268,7 +268,7 @@ class TestAnswerRequiredGuard(unittest.TestCase):
 
         self.assertIn("Готово", result)
         with open(path, encoding="utf-8") as f:
-            self.assertEqual(f.read(), "b")
+            self.assertEqual(f.read(), "b\n")
         self.assertIsNone(agent._pending_operation)
         self.assertIn(_NO_COMMENT_PREFILL, seen)
         self.assertTrue(any(_GUARD_NAG_PREFIX in t for content in seen_content for t in content))
@@ -316,7 +316,7 @@ class TestAnswerRequiredGuard(unittest.TestCase):
 
         self.assertIn("Готово", result)
         with open(path, encoding="utf-8") as f:
-            self.assertEqual(f.read(), "b")
+            self.assertEqual(f.read(), "b\n")
         msgs = agent.history.get_all()
         answers = [m for m in msgs if m.to_api_dict()["role"] == "tool" and m.name == answer_tool_name]
         self.assertEqual(len(answers), 1)
@@ -406,7 +406,7 @@ class TestAnswerRequiredGuard(unittest.TestCase):
 
         self.assertIn("Готово", result)
         with open(path, encoding="utf-8") as f:
-            self.assertEqual(f.read(), "b")
+            self.assertEqual(f.read(), "b\n")
         msgs = agent.history.get_all()
         answers = [m for m in msgs if m.to_api_dict()["role"] == "tool" and m.name == answer_tool_name]
         self.assertEqual(len(answers), 1)
