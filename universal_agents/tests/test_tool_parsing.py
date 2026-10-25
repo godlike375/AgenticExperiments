@@ -58,6 +58,13 @@ class TestDetectBrokenCall(unittest.TestCase):
         self.assertTrue(detect_broken_call("<custom_tag> read({}) </custom_tag>", {_read_tool.__name__}))
         self.assertFalse(detect_broken_call("<custom_tag> nothing here </custom_tag>", {_read_tool.__name__}))
 
+    def test_quoted_tag_with_prose_tool_mention_is_clean(self):
+        text = "Префикс <SYSTEM>, затем read(path) и search(pattern, path) в обзоре."
+        self.assertFalse(detect_broken_call(text, {_read_tool.__name__, _search_tool.__name__}))
+
+    def test_standalone_call_without_tag_is_broken(self):
+        self.assertTrue(detect_broken_call('read({"path": "a.txt"})', {_read_tool.__name__}))
+
 
 class TestDetectBrokenCallWithoutGate(unittest.TestCase):
 

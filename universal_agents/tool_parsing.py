@@ -44,6 +44,13 @@ def _has_tag(content: str, tag: str | None = None) -> bool:
     ) is not None
 
 
+_ANY_TAG_RE = re.compile(r'<[^>]*>')
+
+
+def _strip_tags(content: str) -> str:
+    return _ANY_TAG_RE.sub(" ", content)
+
+
 def _is_standalone_call(content: str, tool_names) -> bool:
     """True, если весь ответ — один вызов известного инструмента (заведомо сломанный синтаксис)."""
     stripped = content.strip()
@@ -61,21 +68,18 @@ def detect_broken_call(content: str, tool_names: set[str], require_tag: bool = T
     if not content or not content.strip():
         return False
 
-    if require_tag and not _has_tag(content):
-        return False
-
     if any(_has_tag(content, t) for t in _STRONG_TAGS):
         return True
 
-    if require_tag:
-        return any(
-            re.search(rf'\b{re.escape(name)}\s*[\({{]', content)
-            for name in tool_names
-        )
+    if _is_standalone_call(content, tool_names):
+        return True
 
-    # Гейт снят (require_tag=False): reasoning-теги иначе давали ложный BROKEN CALL
-    # на обычной прозе. Ловим только заведомо сломанный синтаксис — вызов на весь ответ.
-    return _is_standalone_call(content, tool_names)
+    # Обычный ответ с процитированным тегом (напр. <SYSTEM>) и упоминанием инструмента
+    # со скобками — не сломанный вызов. Ловим только вызов, обёрнутый в неизвестный тег.
+    if require_tag and _has_tag(content):
+        return _is_standalone_call(_strip_tags(content), tool_names)
+
+    return False
 
 
 def build_tool_calls(tool_calls_data: dict) -> list:

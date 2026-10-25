@@ -121,7 +121,7 @@ class FS:
                 mtime = "????-??-??"
             prefix = f"{'  ' * depth}"
             if entry.is_dir(follow_symlinks=False):
-                lines.append(f"{prefix}{entry.name}/ ({mtime})")
+                lines.append(f"{prefix}{entry.name}/ ({mtime}):")
                 sub = FS._build_tree(entry.path, depth + 1, density, seen)
                 if sub:
                     lines.append(sub)
