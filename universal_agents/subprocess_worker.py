@@ -4,9 +4,25 @@ import argparse
 import json
 import os
 import sys
+from typing import TextIO
+
+
+def _open_protocol_stream() -> TextIO:
+    """Отделяет протокол от stdout воркера: любой print инструмента/плагина и вывод
+    дочерних процессов уходят в stderr и не сдвигают строки протокола."""
+    try:
+        fd = os.dup(sys.stdout.fileno())
+        protocol = os.fdopen(fd, "w", encoding="utf-8", newline="\n")
+        sys.stdout.flush()
+        os.dup2(sys.stderr.fileno(), sys.stdout.fileno())
+        sys.stdout = sys.stderr
+        return protocol
+    except (OSError, AttributeError, ValueError):
+        return sys.stdout
 
 
 def _main() -> None:
+    protocol = _open_protocol_stream()
     parser = argparse.ArgumentParser()
     parser.add_argument("--group", required=True)
     parser.add_argument("--tools-dir", required=True)
@@ -52,8 +68,8 @@ def _main() -> None:
             resp = {"status": "error", "value": f"{type(e).__name__}: {e}", "session": session}
         finally:
             tool_session.reset_session(token)
-        sys.stdout.write(json.dumps(resp, ensure_ascii=False) + "\n")
-        sys.stdout.flush()
+        protocol.write(json.dumps(resp, ensure_ascii=False) + "\n")
+        protocol.flush()
 
 
 if __name__ == "__main__":

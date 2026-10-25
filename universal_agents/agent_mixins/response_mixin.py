@@ -168,6 +168,8 @@ class ResponseMixin:
         )
 
     def _emit_token_info(self):
+        if getattr(self, "_in_service_turn", False):
+            return
         parts = []
         if self.token_tracker.last_usage:
             parts.append(self.token_tracker.format_user_token_info())
@@ -214,12 +216,7 @@ class ResponseMixin:
                 f"'{_NO_COMMENT_PREFILL}' prefill (retries left: {group.retries_left})."
             )
             return None
-        if group.tool_calls:
-            self.on_system_msg(
-                f"[SIM REASONING] No answer text after </{group.tag}>; "
-                f"tool call accepted as-is."
-            )
-        else:
+        if not group.tool_calls:
             self.on_system_msg(
                 "[SIM REASONING] Empty answer; continuation budget exhausted; "
                 "accepting response as-is."

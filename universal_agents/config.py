@@ -17,7 +17,10 @@ class Config:
     MAX_LOOP_RETRIES: int = 3  # попыток перегенерации при повторяющемся вызове/ответе
     DUPLICATE_SIMILARITY_THRESHOLD: float = 0.75
     DUPLICATE_TEXT_MIN_CHARS: int = 0
-    DUPLICATE_NAG_THRESHOLD: int = 3
+    DUPLICATE_REASONING_MIN_CHARS: int = 250  # короткие reasoning-блоки не считаются повтором
+    DUPLICATE_RUN_LENGTH: int = 3             # одинаковый контент N раз подряд = зацикливание (X,X,X)
+    DUPLICATE_REGENERATIONS_BEFORE_SYSTEM: int = 2  # регенераций без системного сообщения
+    DUPLICATE_SYSTEM_WARNINGS: int = 2              # попыток после системного сообщения; далее управление пользователю
     ERROR_RECOVERY_RETRIES: int = 0  # попыток перегенерации после ошибки инструмента
     BROKEN_CALL_REGEN_RETRIES: int = 2  # попыток перегенерации при обнаружении сломанного вызова
     BROKEN_CALL_FIX_RETRIES: int = 2    # попыток «починить» вызов через промпт после неудачной регенерации
@@ -27,11 +30,11 @@ class Config:
     SUMMARY_DUPLICATE_TEMP: float = round(BOOST_TEMP / 2, 2)  # буст при тождественном повторе саммари (мягче полного BOOST_TEMP)
 
     MAX_CONTEXT_TOKENS: int = 110000
-    TEMP: float = 0.5
-    TOP_P: float = 0.925
+    TEMP: float = 0.45
+    TOP_P: float = 0.93
     FREQUENCY_PENALTY: float = 0.0
     PRESENCE_PENALTY: float = 0.0
-    MIN_P: Optional[float] = 0.07
+    MIN_P: Optional[float] = 0.065
     MAX_OUTPUT_TOKENS: int = min(32000, int(MAX_CONTEXT_TOKENS / 1.5))
     TIMEOUT: int = 1800
     MAX_ITER: int = 250
@@ -44,10 +47,10 @@ class Config:
     KEEP_REASONING_CONTENT_IN_HISTORY: bool = True
 
     SIMULATED_REASONING_ENABLED: bool = True
-    SIMULATED_REASONING_TAGS: tuple[str, ...] = ("brief_thinking",)
+    SIMULATED_REASONING_TAGS: tuple[str, ...] = ("reasoning",)
     SIMULATED_REASONING_REPAIRS: int = 3
-    SIMULATED_REASONING_TEMP: Optional[float] = 0.55
-    SIMULATED_REASONING_TOP_P: Optional[float] = 0.92
+    SIMULATED_REASONING_TEMP: Optional[float] = 0.65
+    SIMULATED_REASONING_TOP_P: Optional[float] = 0.93
     SIMULATED_REASONING_MIN_P: Optional[float] = 0.03
     SIMULATED_REASONING_FREQUENCY_PENALTY: Optional[float] = 0.65
     SIMULATED_REASONING_PRESENCE_PENALTY: Optional[float] = 0.15

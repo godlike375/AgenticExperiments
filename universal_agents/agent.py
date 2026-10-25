@@ -580,6 +580,7 @@ class LLMAgent(
         keep = Config.SERVICE_TURN_KEEP_IN_HISTORY if keep_in_history is None else keep_in_history
         max_iter = max_iter if max_iter is not None else Config.SERVICE_TURN_MAX_ITER
         start_len = len(self.history.get_all())
+        usage_before = self.token_tracker.last_usage
         stream_swap = None
         if self.streaming_enabled and self.on_service_stream_chunk:
             stream_swap = (self.on_stream_start, self.on_stream_chunk, self.on_stream_end)
@@ -614,6 +615,7 @@ class LLMAgent(
                     self.history.remove_at(range(start_len, end))
                     self.history.normalize()
                     self._on_history_changed()
+                self.token_tracker.last_usage = usage_before
             self._gen_params = prev_params
             self._auto_summarize_suppressed = prev_suppressed
             self._in_service_turn = False
@@ -629,21 +631,43 @@ class LLMAgent(
         self.history.add(UserMessage(content=prompt))
         self.clear_stop()
 
-    def _get_prior_text_hashes(self) -> tuple[set[str], set[str]]:
-        """Хэши всех AssistantMessage истории: повтор любого текста/reasoning = зацикливание (§1.9)."""
-        min_chars = Config.DUPLICATE_TEXT_MIN_CHARS
-        text_hashes: set[str] = set()
-        reasoning_hashes: set[str] = set()
-        for msg in self.history.get_all():
+    def _consecutive_repeats(self, text: str, *, reasoning: bool) -> int:
+        """Сколько подряд идущих ответов AssistantMessage перед текущим идентичны text (§1.9).
+        Первый немедленный повтор терпим — зацикливание лишь при N-м подряд (DUPLICATE_RUN_LENGTH)."""
+        target = text_hash(text)
+        count = 0
+        for msg in reversed(self.history.get_all()):
             if not isinstance(msg, AssistantMessage):
                 continue
-            content = (msg.content or "").strip()
-            if content and (min_chars <= 0 or len(content) >= min_chars):
-                text_hashes.add(text_hash(content))
-            reasoning = (msg.reasoning_content or "").strip()
-            if reasoning and (min_chars <= 0 or len(reasoning) >= min_chars):
-                reasoning_hashes.add(text_hash(reasoning))
-        return text_hashes, reasoning_hashes
+            value = ((msg.reasoning_content or "") if reasoning else (msg.content or "")).strip()
+            if not value:
+                continue
+            if text_hash(value) != target:
+                break
+            count += 1
+        return count
+
+    def _recent_answer_texts(self, limit: int = 2) -> list[str]:
+        """Последние текстовые ответы ассистента (в обратном порядке) для Jaccard-детекции."""
+        texts: list[str] = []
+        for msg in reversed(self.history.get_all()):
+            if isinstance(msg, AssistantMessage) and (msg.content or "").strip():
+                texts.append(msg.content.strip())
+                if len(texts) == limit:
+                    break
+        return texts
+
+    def _last_assistant_message(self):
+        for msg in reversed(self.history.get_all()):
+            if isinstance(msg, AssistantMessage):
+                return msg
+        return None
+
+    def _call_signature(self, tool_calls) -> tuple:
+        """Сигнатура вызовов: имя + нормализованные аргументы (порядок не важен)."""
+        return tuple(sorted(
+            (tc_name(tc), self.loop_detector.normalize_args(tc_args(tc))) for tc in (tool_calls or [])
+        ))
 
     def _detect_duplicate(self, message_obj) -> Optional[tuple]:
         """Детектор дублей: повтор текста/reasoning/вызова. При живом pending guard решает вердикт (§1.11)."""
@@ -656,21 +680,31 @@ class LLMAgent(
         ):
             return None
 
+        args_changed = False
+        if message_obj.tool_calls:
+            prev = self._last_assistant_message()
+            args_changed = bool(
+                prev is not None
+                and prev.tool_calls
+                and self._call_signature(prev.tool_calls) != self._call_signature(message_obj.tool_calls)
+            )
+
         min_chars = Config.DUPLICATE_TEXT_MIN_CHARS
-        if content or reasoning:
-            prior_text, prior_reasoning = self._get_prior_text_hashes()
+        reasoning_min_chars = Config.DUPLICATE_REASONING_MIN_CHARS
+        required_prior = max(2, Config.DUPLICATE_RUN_LENGTH) - 1 if message_obj.tool_calls else 1
+        if not args_changed and (content or reasoning):
             if (
                 content
                 and (min_chars <= 0 or len(content) >= min_chars)
-                and text_hash(content) in prior_text
+                and self._consecutive_repeats(content, reasoning=False) >= required_prior
             ):
                 if pending and not message_obj.tool_calls:
                     return _CONFIRMATION_GUARD_VERDICT, content
                 return 'answer', content
             if (
                 reasoning
-                and (min_chars <= 0 or len(reasoning) >= min_chars)
-                and text_hash(reasoning) in prior_reasoning
+                and (reasoning_min_chars <= 0 or len(reasoning) >= reasoning_min_chars)
+                and self._consecutive_repeats(reasoning, reasoning=True) >= required_prior
             ):
                 if pending and not message_obj.tool_calls:
                     return _CONFIRMATION_GUARD_VERDICT, reasoning
@@ -690,16 +724,16 @@ class LLMAgent(
             return None
 
         answer_text = content
-        prev_answer = self._get_last_answer_text()
+        recent_answers = self._recent_answer_texts(1)
         if (
             answer_text
-            and prev_answer
-            and jaccard_similarity(answer_text, prev_answer)
+            and recent_answers
+            and jaccard_similarity(answer_text, recent_answers[0])
             >= Config.DUPLICATE_SIMILARITY_THRESHOLD
         ):
             if pending:
-                return _CONFIRMATION_GUARD_VERDICT, prev_answer
-            return 'answer', prev_answer
+                return _CONFIRMATION_GUARD_VERDICT, recent_answers[0]
+            return 'answer', recent_answers[0]
         return None
 
     def call_with_retries(
@@ -720,10 +754,13 @@ class LLMAgent(
         max_generation_attempts = (
             self._max_generation_attempts
             if self._max_generation_attempts is not None
-            else Config.MAX_LOOP_RETRIES
+            else max(
+                Config.MAX_LOOP_RETRIES,
+                Config.DUPLICATE_REGENERATIONS_BEFORE_SYSTEM + Config.DUPLICATE_SYSTEM_WARNINGS + 1,
+            )
         )
         message_obj = None
-        last_retry_warning: Optional[str] = None
+        duplicate_system_warning: Optional[str] = None
         dup_watch_target: Optional[str] = None
         dup_count = 0
         api_error_occurred = False
@@ -737,9 +774,8 @@ class LLMAgent(
                 self._temp_override = None
 
             active_messages = [dict(msg) for msg in messages_to_send]
-            if last_retry_warning and active_messages:
-                last_msg = active_messages[-1]
-                last_msg["content"] = (last_msg.get("content") or "") + last_retry_warning
+            if duplicate_system_warning:
+                active_messages.append({"role": "system", "content": duplicate_system_warning})
 
             message_obj, err, usage, stopped_at_marker = self._call_llm(
                 active_messages,
@@ -784,16 +820,29 @@ class LLMAgent(
                 else:
                     dup_watch_target = payload
                     tag, reason = 'DUPLICATE ANSWER DETECTED', 'Model repeated the previous answer verbatim'
-                if dup_count >= Config.DUPLICATE_NAG_THRESHOLD:
-                    last_retry_warning = _REPEAT_ANSWER_NAG if kind != 'tool_call' else self._build_duplicate_warning(dup_name, dup_args)
-                else:
-                    last_retry_warning = None
+                dup_budget = (
+                    Config.DUPLICATE_REGENERATIONS_BEFORE_SYSTEM + Config.DUPLICATE_SYSTEM_WARNINGS
+                )
+                if dup_count > dup_budget:
+                    message_obj = None
+                    self.on_system_msg(
+                        f"[{tag}] {reason}. Duplicate still present after "
+                        f"{Config.DUPLICATE_REGENERATIONS_BEFORE_SYSTEM} regenerations and "
+                        f"{Config.DUPLICATE_SYSTEM_WARNINGS} attempts with a system warning. "
+                        "Handing control to user."
+                    )
+                    return message_obj, api_error_occurred, stopped_at_marker
+                if dup_count > Config.DUPLICATE_REGENERATIONS_BEFORE_SYSTEM:
+                    duplicate_system_warning = (
+                        self._build_duplicate_warning(dup_name, dup_args)
+                        if kind == 'tool_call' else _REPEAT_ANSWER_NAG
+                    )
                 if boost:
                     self._temp_override = Config.BOOST_TEMP
                 self.on_system_msg(
                     f"[{tag}] {reason}. "
                     f"Discarding response. Activating temperature boost ({Config.BOOST_TEMP})"
-                    + (f" and injecting temporary warning." if last_retry_warning else ".")
+                    + (" and injecting system warning." if duplicate_system_warning else ".")
                     + f" Attempt {attempt + 1}/{max_generation_attempts}."
                 )
                 continue

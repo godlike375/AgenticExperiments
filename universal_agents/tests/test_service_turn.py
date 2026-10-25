@@ -143,6 +143,40 @@ class TestServiceTurn(unittest.TestCase):
         call_kwargs = m.call_args.kwargs
         self.assertEqual(call_kwargs.get("stop_markers"), ("</tag>",))
 
+    def test_rollback_restores_main_usage(self):
+        agent = make_agent()
+        self._base_history(agent)
+        main_usage = {"prompt_tokens": 5000, "completion_tokens": 200, "total_tokens": 5200}
+        agent.token_tracker.update_from_usage(main_usage)
+        service_usage = {"prompt_tokens": 9000, "completion_tokens": 100, "total_tokens": 9100}
+
+        with mock.patch.object(
+            agent,
+            "_call_llm",
+            return_value=(AssistantMessage(content="выжимка"), None, service_usage, False),
+        ):
+            agent.service_llm_call([{"role": "user", "content": "sami"}])
+
+        self.assertEqual(agent.token_tracker.last_usage, main_usage)
+
+    def test_service_turn_does_not_emit_token_info(self):
+        agent = make_agent()
+        self._base_history(agent)
+        agent.token_tracker.update_from_usage(
+            {"prompt_tokens": 5000, "completion_tokens": 200, "total_tokens": 5200}
+        )
+        service_usage = {"prompt_tokens": 9000, "completion_tokens": 100, "total_tokens": 9100}
+
+        with mock.patch.object(
+            agent,
+            "_call_llm",
+            return_value=(AssistantMessage(content="выжимка"), None, service_usage, False),
+        ), mock.patch.object(agent, "on_system_msg") as msg:
+            agent.service_llm_call([{"role": "user", "content": "sami"}])
+
+        emitted = [str(c.args[0]) for c in msg.call_args_list if c.args]
+        self.assertFalse(any("Context size" in text for text in emitted))
+
 
 if __name__ == "__main__":
     unittest.main()

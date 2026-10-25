@@ -5,7 +5,6 @@ from unittest import mock
 from universal_agents.agent import LLMAgent, MAX_CONSECUTIVE_ERRORS, _CONFIRMATION_GUARD_VERDICT, _REPEAT_ANSWER_NAG
 from universal_agents.config import Config
 from universal_agents.constants import INTERRUPT_HEADER, err
-from universal_agents.llm_client import text_hash
 from universal_agents.models import AssistantMessage, ToolCall, ToolResult, UserMessage
 from universal_agents.tool import tool
 from universal_agents.tools.builtin import respond_to_system as _respond_to_system
@@ -129,29 +128,37 @@ class TestAgentTurnLoop(unittest.TestCase):
         self.assertEqual(last.content, "ok done")
 
 
-class TestPriorTextHashes(unittest.TestCase):
+class TestConsecutiveRepeats(unittest.TestCase):
     def test_empty_history(self):
         agent = LLMAgent(system_prompt="sys")
-        t, r = agent._get_prior_text_hashes()
-        self.assertEqual(t, set())
-        self.assertEqual(r, set())
+        self.assertEqual(agent._consecutive_repeats("ans", reasoning=False), 0)
 
-    def test_includes_only_assistant_messages(self):
+    def test_counts_identical_answers_across_tool_results_and_users(self):
         agent = LLMAgent(system_prompt="sys")
         agent.history.add(UserMessage("q"))
-        agent.history.add(AssistantMessage(content="ans", reasoning_content="think"))
+        agent.history.add(AssistantMessage(content="ans", tool_calls=[ToolCall(id="t1", name=_read_tool.__name__, arguments='{"path": "x"}')]))
         agent.history.add(ToolResult.success("t1", _read_tool.__name__, "ok"))
-        t, r = agent._get_prior_text_hashes()
-        self.assertEqual(t, {text_hash("ans")})
-        self.assertEqual(r, {text_hash("think")})
+        agent.history.add(UserMessage("q2"))
+        agent.history.add(AssistantMessage(content="ans"))
+        self.assertEqual(agent._consecutive_repeats("ans", reasoning=False), 2)
 
-    def test_ignores_empty_content_and_reasoning(self):
+    def test_different_answer_breaks_the_run(self):
         agent = LLMAgent(system_prompt="sys")
         agent.history.add(UserMessage("q"))
-        agent.history.add(AssistantMessage(content="", reasoning_content=""))
-        t, r = agent._get_prior_text_hashes()
-        self.assertEqual(t, set())
-        self.assertEqual(r, set())
+        agent.history.add(AssistantMessage(content="ans"))
+        agent.history.add(ToolResult.success("t1", _read_tool.__name__, "ok"))
+        agent.history.add(AssistantMessage(content="other"))
+        self.assertEqual(agent._consecutive_repeats("ans", reasoning=False), 0)
+        self.assertEqual(agent._consecutive_repeats("other", reasoning=False), 1)
+
+    def test_reasoning_counted_separately(self):
+        agent = LLMAgent(system_prompt="sys")
+        agent.history.add(UserMessage("q"))
+        agent.history.add(AssistantMessage(content="a", reasoning_content="think"))
+        agent.history.add(ToolResult.success("t1", _read_tool.__name__, "ok"))
+        agent.history.add(AssistantMessage(content="b", reasoning_content="think"))
+        self.assertEqual(agent._consecutive_repeats("think", reasoning=True), 2)
+        self.assertEqual(agent._consecutive_repeats("think", reasoning=False), 0)
 
 
 class TestConfirmationGuardVerdict(unittest.TestCase):
@@ -159,6 +166,8 @@ class TestConfirmationGuardVerdict(unittest.TestCase):
     def setUp(self):
         self.agent = LLMAgent(system_prompt="sys")
         self.agent.history.add(UserMessage("q"))
+        self.agent.history.add(AssistantMessage(content="Подтверждаю."))
+        self.agent.history.add(ToolResult.success("t0", _read_tool.__name__, "ok"))
         self.agent.history.add(AssistantMessage(content="Подтверждаю."))
         self.agent.set_pending_operation({"_type": "test"})
 
@@ -170,11 +179,13 @@ class TestConfirmationGuardVerdict(unittest.TestCase):
 
     def test_answer_duplicate_from_jaccard_while_pending_is_confirmation_guard_verdict(self):
         prior = AssistantMessage(content="Я подтверждаю правку файла")
-        close = AssistantMessage(content="Я подтверждаю правку файла полностью")
         agent = LLMAgent(system_prompt="sys")
         agent.history.add(UserMessage("q"))
         agent.history.add(prior)
+        agent.history.add(ToolResult.success("t1", _read_tool.__name__, "ok"))
+        agent.history.add(AssistantMessage(content="Я подтверждаю правку файла"))
         agent.set_pending_operation({"op": 1})
+        close = AssistantMessage(content="Я подтверждаю правку файла полностью")
         verdict = agent._detect_duplicate(close)
         self.assertIsNotNone(verdict)
         self.assertEqual(verdict[0], _CONFIRMATION_GUARD_VERDICT)
@@ -203,14 +214,86 @@ class TestConfirmationGuardVerdict(unittest.TestCase):
         agent = LLMAgent(system_prompt="sys")
         agent.history.add(UserMessage("q"))
         agent.history.add(AssistantMessage(content="Подтверждаю."))
+        agent.history.add(ToolResult.success("t0", _read_tool.__name__, "ok"))
+        agent.history.add(AssistantMessage(content="Подтверждаю."))
         verdict = agent._detect_duplicate(AssistantMessage(content="Подтверждаю."))
         self.assertIsNotNone(verdict)
         self.assertEqual(verdict[0], 'answer')
 
+    def test_immediate_answer_repeat_is_duplicate(self):
+        agent = LLMAgent(system_prompt="sys")
+        agent.history.add(UserMessage("q"))
+        agent.history.add(AssistantMessage(content="Подтверждаю."))
+        verdict = agent._detect_duplicate(AssistantMessage(content="Подтверждаю."))
+        self.assertIsNotNone(verdict)
+        self.assertEqual(verdict[0], 'answer')
+
+    def test_short_reasoning_repeat_is_tolerated(self):
+        agent = LLMAgent(system_prompt="sys")
+        agent.history.add(UserMessage("q"))
+        agent.history.add(AssistantMessage(content="a", reasoning_content="короткая мысль"))
+        agent.history.add(ToolResult.success("t0", _read_tool.__name__, "ok"))
+        agent.history.add(AssistantMessage(content="b", reasoning_content="короткая мысль"))
+        msg = AssistantMessage(content="c", reasoning_content="короткая мысль")
+        self.assertIsNone(agent._detect_duplicate(msg))
+
+
+class TestToolArgsDetermineDuplicate(unittest.TestCase):
+
+    def _agent(self):
+        return LLMAgent(
+            system_prompt="sys",
+            tools_config=["double_me"],
+            external_plugins={"double_me": double_me},
+            autosave_enabled=False,
+        )
+
+    def test_same_text_different_tool_args_is_not_duplicate(self):
+        agent = self._agent()
+        agent.history.add(UserMessage("q"))
+        agent.history.add(AssistantMessage(
+            content="I will double the value.",
+            tool_calls=[ToolCall(id="t1", name="double_me", arguments='{"value": 2}')],
+        ))
+        agent.history.add(ToolResult.success("t1", "double_me", "4"))
+        msg = AssistantMessage(
+            content="I will double the value.",
+            tool_calls=[ToolCall(id="t2", name="double_me", arguments='{"value": 3}')],
+        )
+        self.assertIsNone(agent._detect_duplicate(msg))
+
+    def test_same_reasoning_different_tool_args_is_not_duplicate(self):
+        agent = self._agent()
+        reasoning = "I need to double the value before answering. " * 8
+        agent.history.add(UserMessage("q"))
+        agent.history.add(AssistantMessage(
+            content="step one",
+            reasoning_content=reasoning,
+            tool_calls=[ToolCall(id="t1", name="double_me", arguments='{"value": 2}')],
+        ))
+        agent.history.add(ToolResult.success("t1", "double_me", "4"))
+        msg = AssistantMessage(
+            content="step two",
+            reasoning_content=reasoning,
+            tool_calls=[ToolCall(id="t2", name="double_me", arguments='{"value": 5}')],
+        )
+        self.assertIsNone(agent._detect_duplicate(msg))
+
+    def test_same_text_same_tool_args_stays_duplicate(self):
+        agent = self._agent()
+        call = ToolCall(id="t1", name="double_me", arguments='{"value": 2}')
+        agent.history.add(UserMessage("q"))
+        agent.history.add(AssistantMessage(content="I will double the value.", tool_calls=[call]))
+        agent.history.add(ToolResult.success("t1", "double_me", "4"))
+        agent.history.add(AssistantMessage(content="I will double the value.", tool_calls=[call]))
+        agent.history.add(ToolResult.success("t1", "double_me", "4"))
+        msg = AssistantMessage(content="I will double the value.", tool_calls=[call])
+        self.assertIsNotNone(agent._detect_duplicate(msg))
+
 
 class TestDuplicateTextAcrossHistory(unittest.TestCase):
 
-    def test_repeated_comment_with_different_tool_call_triggers_regen(self):
+    def test_repeated_comment_with_same_tool_call_triggers_regen(self):
         agent = LLMAgent(
             system_prompt="sys",
             tools_config=["double_me"],
@@ -232,7 +315,7 @@ class TestDuplicateTextAcrossHistory(unittest.TestCase):
         fresh = AssistantMessage(content="6")
         with mock.patch(
             "universal_agents.agent.LLMClient.call",
-            side_effect=[(dup, None, None), (fresh, None, None)],
+            side_effect=[(dup, None, None), (dup, None, None), (fresh, None, None)],
         ):
             result = agent.chat("more")
         self.assertEqual(result, "6")
@@ -243,11 +326,12 @@ class TestDuplicateTextAcrossHistory(unittest.TestCase):
             max_generation_attempts=3,
             autosave_enabled=False,
         )
-        old_reasoning = "I should double-check the value before answering."
+        old_reasoning = "I should double-check the value before answering. " * 8
         agent.history.add(UserMessage("first"))
-        agent.history.add(AssistantMessage(content="something", reasoning_content=old_reasoning))
-        agent.history.add(UserMessage("second"))
-        agent.history.add(AssistantMessage(content="other", reasoning_content="different"))
+        agent.history.add(AssistantMessage(content="step one", reasoning_content=old_reasoning,
+                                           tool_calls=[ToolCall(id="t1", name="double_me", arguments='{"value": 2}')]))
+        agent.history.add(ToolResult.success("t1", "double_me", "4"))
+        agent.history.add(AssistantMessage(content="step two", reasoning_content=old_reasoning))
         dup = AssistantMessage(content="entirely new text", reasoning_content=old_reasoning)
         fresh = AssistantMessage(content="final")
         with mock.patch(
@@ -260,7 +344,7 @@ class TestDuplicateTextAcrossHistory(unittest.TestCase):
             1 for m in agent.history.get_all()
             if getattr(m, "reasoning_content", "") == old_reasoning
         )
-        self.assertEqual(count, 1)
+        self.assertEqual(count, 2)
 
     def test_different_continuation_same_prefill_not_blocked(self):
         agent = LLMAgent(
@@ -290,6 +374,8 @@ class TestDuplicateEscalation(unittest.TestCase):
             autosave_enabled=False,
         )
         agent.history.add(UserMessage("q"))
+        agent.history.add(AssistantMessage(content="same", tool_calls=[ToolCall(id="t1", name=_read_tool.__name__, arguments='{"path": "x"}')]))
+        agent.history.add(ToolResult.success("t1", _read_tool.__name__, "ok"))
         agent.history.add(AssistantMessage(content="same"))
         agent.history.add(UserMessage("q2"))
         dup = AssistantMessage(content="same")
@@ -308,13 +394,15 @@ class TestDuplicateEscalation(unittest.TestCase):
         for msgs in captured:
             self.assertNotIn(_REPEAT_ANSWER_NAG, msgs[-1][1])
 
-    def test_nag_injected_only_after_threshold(self):
+    def test_system_warning_after_two_regenerations_then_give_up(self):
         agent = LLMAgent(
             system_prompt="sys",
-            max_generation_attempts=4,
+            max_generation_attempts=6,
             autosave_enabled=False,
         )
         agent.history.add(UserMessage("q"))
+        agent.history.add(AssistantMessage(content="same", tool_calls=[ToolCall(id="t1", name=_read_tool.__name__, arguments='{"path": "x"}')]))
+        agent.history.add(ToolResult.success("t1", _read_tool.__name__, "ok"))
         agent.history.add(AssistantMessage(content="same"))
         dup = AssistantMessage(content="same")
         captured: list[tuple] = []
@@ -324,15 +412,20 @@ class TestDuplicateEscalation(unittest.TestCase):
             return (dup, None, None)
 
         with mock.patch("universal_agents.agent.LLMClient.call", side_effect=fake_call):
-            agent.chat("q2")
+            result = agent.chat("q2")
 
-        def _has_nag(msgs):
-            return _REPEAT_ANSWER_NAG in msgs[-1][1]
+        self.assertEqual(result, "")
+        before = Config.DUPLICATE_REGENERATIONS_BEFORE_SYSTEM
+        warning_calls = Config.DUPLICATE_SYSTEM_WARNINGS
+        self.assertEqual(len(captured), before + warning_calls + 1)
 
-        for i in range(Config.DUPLICATE_NAG_THRESHOLD - 1):
-            self.assertFalse(_has_nag(captured[i]))
-        for i in range(Config.DUPLICATE_NAG_THRESHOLD, len(captured)):
-            self.assertTrue(_has_nag(captured[i]))
+        def _has_system_warning(msgs):
+            return any(role == "system" and _REPEAT_ANSWER_NAG in content for role, content in msgs)
+
+        for msgs in captured[:before + 1]:
+            self.assertFalse(_has_system_warning(msgs))
+        for msgs in captured[before + 1:]:
+            self.assertTrue(_has_system_warning(msgs))
 
     def test_max_retries_hands_control_to_user(self):
         agent = LLMAgent(
@@ -341,6 +434,8 @@ class TestDuplicateEscalation(unittest.TestCase):
             autosave_enabled=False,
         )
         agent.history.add(UserMessage("q"))
+        agent.history.add(AssistantMessage(content="same", tool_calls=[ToolCall(id="t1", name=_read_tool.__name__, arguments='{"path": "x"}')]))
+        agent.history.add(ToolResult.success("t1", _read_tool.__name__, "ok"))
         agent.history.add(AssistantMessage(content="same"))
         dup = AssistantMessage(content="same")
         with mock.patch(
@@ -353,7 +448,7 @@ class TestDuplicateEscalation(unittest.TestCase):
             1 for m in agent.history.get_all()
             if isinstance(m, AssistantMessage) and m.content == "same"
         )
-        self.assertEqual(count, 1)
+        self.assertEqual(count, 2)
 
     def test_duplicate_retry_keeps_prefix_byte_identical(self):
         agent = LLMAgent(
@@ -364,6 +459,8 @@ class TestDuplicateEscalation(unittest.TestCase):
             on_stream_chunk=lambda _: None,
         )
         agent.history.add(UserMessage("q"))
+        agent.history.add(AssistantMessage(content="same answer text", tool_calls=[ToolCall(id="t1", name=_read_tool.__name__, arguments='{"path": "x"}')]))
+        agent.history.add(ToolResult.success("t1", _read_tool.__name__, "ok"))
         agent.history.add(AssistantMessage(content="same answer text"))
 
         streamed: list[str] = []

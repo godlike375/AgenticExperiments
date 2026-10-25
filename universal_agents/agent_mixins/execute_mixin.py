@@ -221,7 +221,6 @@ class ExecuteMixin:
                 except GenerationInterrupted:
                     raise
                 except Exception as e:
-                    self.on_system_msg(f"⚠️ [ERROR] Tool '{name}' FAILED: {e}")
                     results.append(ToolResult.error(tc.id, name, str(e)))
 
                 try:

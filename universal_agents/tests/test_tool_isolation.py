@@ -216,6 +216,29 @@ class TestSpawnFailureFallback(unittest.TestCase):
 
 
 class TestPluginProxy(unittest.TestCase):
+    def test_tool_stdout_does_not_corrupt_protocol(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        with open(os.path.join(tmp, "noisy_plugin.py"), "w", encoding="utf-8") as f:
+            f.write(textwrap.dedent('''
+                from universal_agents.tool import tool
+
+                @tool(description="prints to stdout", group="plugin")
+                def noisy(value: str) -> str:
+                    print("noise on stdout")
+                    return f"echo={value}"
+            '''))
+        mgr = GroupManager(isolated=True, tools_dir=tmp)
+        try:
+            first = mgr.call("plugin", "noisy", {"value": "a"})
+            second = mgr.call("plugin", "noisy", {"value": "b"})
+        finally:
+            mgr.close_all()
+        self.assertEqual(first.status, "ok")
+        self.assertEqual(first.value, "echo=a")
+        self.assertEqual(second.status, "ok")
+        self.assertEqual(second.value, "echo=b")
+
     def test_plugin_calls_host_via_proxy(self):
         tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)

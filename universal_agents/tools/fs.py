@@ -432,7 +432,10 @@ def _raw_read(agent, path: str) -> tuple:
         )
         if result.status == "error":
             return None, err(f" {result.value}")
-        return result.value
+        value = result.value
+        if isinstance(value, (list, tuple)) and len(value) == 2:
+            return value[0], value[1]
+        return None, err(f": unexpected reader result ({type(value).__name__})")
     return _read_text(path)
 
 

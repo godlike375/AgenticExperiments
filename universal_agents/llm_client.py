@@ -78,8 +78,8 @@ class TokenUsageTracker:
     def format_user_token_info(self) -> str:
         if not self.last_usage:
             return ""
-        spent = self.last_usage.get("total_tokens", 0)
-        remaining = self.max_context_tokens - (self.last_usage.get("prompt_tokens", 0) or 0)
+        spent = self.last_usage.get("prompt_tokens", 0) or 0
+        remaining = self.max_context_tokens - spent
         return f"Context size: {spent} (Remaining: {remaining})"
 
 class LoopDetector:
