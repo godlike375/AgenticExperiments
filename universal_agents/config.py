@@ -54,7 +54,7 @@ class Config:
     SUMMARY_DUPLICATE_TEMP: float = round(BOOST_TEMP / 2, 2)  # буст при тождественном повторе саммари (мягче полного BOOST_TEMP)
 
     MAX_CONTEXT_TOKENS: int = 120000
-    TEMP: float = 0.45
+    TEMP: float = 0.6
     TOP_P: float = 0.93
     FREQUENCY_PENALTY: float = 0.0
     PRESENCE_PENALTY: float = 0.0

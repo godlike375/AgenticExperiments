@@ -316,17 +316,7 @@ class ResponseMixin:
             self.on_system_msg("[EMPTY RESPONSE] Model returned no content. Discarding and retrying...")
             return clean_content, True, False, None
 
-        pending_before = self._pending_operation is not None
         self._append_assistant(assistant_msg)
-        if pending_before and not any(
-            tc.name == respond_to_system.__name__
-            or (
-                tc.name in (DISPATCH_TOOL_NAME, "call_tool")
-                and parse_tool_args(tc.arguments).get("function_name", parse_tool_args(tc.arguments).get("name")) == respond_to_system.__name__
-            )
-            for tc in assistant_msg.tool_calls
-        ):
-            self._mark_confirmation_junk(assistant_msg)
 
         if not assistant_msg.has_tool_calls():
             scan_text = broken_scan_text if broken_scan_text is not None else clean_content
@@ -340,28 +330,7 @@ class ResponseMixin:
             return clean_content, False, False, None
 
         tool_results = self._execute_tools(assistant_msg.tool_calls)
-        name_by_id = {tc.id: tc.name for tc in assistant_msg.tool_calls}
-        for tr in tool_results:
-            tname = name_by_id.get(tr.tool_call_id, "")
-            call = next((tc for tc in assistant_msg.tool_calls if tc.id == tr.tool_call_id), None)
-            dispatched_name = (
-                parse_tool_args(call.arguments).get("name")
-                if call is not None and call.name in (DISPATCH_TOOL_NAME, "call_tool")
-                else tname
-            )
-            if dispatched_name == respond_to_system.__name__:
-                if pending_before and tr.is_error and not tr.is_user_denied:
-                    self._mark_confirmation_junk(assistant_msg)
-                    self._mark_confirmation_junk(tr)
-            elif pending_before:
-                self._mark_confirmation_junk(tr)
         self._append_tool_results(tool_results)
-        if any(
-                tr.name == respond_to_system.__name__ and not tr.is_error and not tr.is_user_denied
-            for tr in tool_results
-        ):
-            self._scrub_confirmation_trail()
-
 
         tool_error_occurred = any(tr.is_error and not tr.is_user_denied for tr in tool_results)
         return clean_content, tool_error_occurred, False, None

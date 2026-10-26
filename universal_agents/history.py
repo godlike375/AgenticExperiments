@@ -358,6 +358,45 @@ class ChatHistory:
         if last_idx is not None and any(i <= last_idx for i in idx_list):
             self._resync_last_user_header()
 
+    def repair_tail(self) -> bool:
+        msgs = self._messages
+        if len(msgs) <= Config.AFTER_SYSTEM_PROMPT:
+            return False
+        last = msgs[-1]
+        if isinstance(last, AssistantMessage) and last.has_tool_calls():
+            self._messages.pop()
+            self._mark_dirty()
+            return True
+        if not isinstance(last, UserMessage) or last.is_auxiliary():
+            return False
+        prev_idx = len(msgs) - 2
+        if prev_idx < Config.AFTER_SYSTEM_PROMPT or not isinstance(msgs[prev_idx], (AssistantMessage, ToolResult)):
+            return False
+
+        user_msg = msgs.pop()
+        results: list[ToolResult] = []
+        while msgs and isinstance(msgs[-1], ToolResult):
+            results.insert(0, msgs.pop())
+
+        if msgs and isinstance(msgs[-1], AssistantMessage) and msgs[-1].has_tool_calls():
+            assistant = msgs[-1]
+            call_ids = {tc.id for tc in assistant.tool_calls}
+            results = [r for r in results if r.tool_call_id in call_ids]
+            answered = {r.tool_call_id for r in results}
+            if answered:
+                assistant.tool_calls = [tc for tc in assistant.tool_calls if tc.id in answered]
+            else:
+                msgs.pop()
+
+        if results:
+            target = results[-1]
+            target.content = (target.content or "") + "\n\n" + (user_msg.content or "")
+            msgs.extend(results)
+        else:
+            msgs.append(user_msg)
+        self._mark_dirty()
+        return True
+
     def pop_pending_tool_calls(self) -> int:
         popped = 0
         while (

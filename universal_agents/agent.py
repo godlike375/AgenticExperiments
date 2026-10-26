@@ -241,7 +241,6 @@ class LLMAgent(
         self.task_plan_map: dict = {}
         self._pending_operation: Optional[dict] = None
         self._guard_nag_message: Optional[UserMessage] = None
-        self._confirmation_junk: dict[int, object] = {}
 
         self.autosave_enabled = Config.AUTOSAVE_ENABLED if autosave_enabled is None else autosave_enabled
         self.autosave_dir = Config.AUTOSAVE_DIR if autosave_dir is None else autosave_dir
@@ -357,7 +356,7 @@ class LLMAgent(
         if nag is None:
             nag = UserMessage(
                 f"{ENVIRONMENT_PREFIX} {_GUARD_NAG_PREFIX} unless you answer to the system question using '{respond_to_system.__name__}' tool. "
-                "Call it ritgh now!"
+                "Call it right now!"
                 f"{ENVIRONMENT_PREFIX_END}"
             )
             nag._is_guard_nag = True
@@ -438,7 +437,6 @@ class LLMAgent(
         self._compacted_task_ids = set()
         self._pending_operation = None
         self._guard_nag_message = None
-        self._confirmation_junk.clear()
         self.reset_autosave_path()
         self._on_history_changed()
 
@@ -1049,6 +1047,7 @@ class LLMAgent(
                 else:
                     effective_markers = ()
 
+                self.history.repair_tail()
                 all_messages = prepare_messages_for_api(
                     self, debug_hash_check=Config.DEBUG_PREFIX_HASH_CHECK
                 )

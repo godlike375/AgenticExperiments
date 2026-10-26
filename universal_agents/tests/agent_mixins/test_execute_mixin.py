@@ -132,8 +132,8 @@ class TestAnswerRequiredGuard(unittest.TestCase):
         self.assertTrue(any(_GUARD_NAG_PREFIX in t for content in seen for t in content),
                         "Модель должна была получить сообщение-ошибку о вызове answer")
         msgs = agent.history.get_all()
-        self.assertEqual(nag_contents(msgs), [],
-                         "После успешного respond_to_system наг должен быть вычищен из истории")
+        self.assertEqual(len(nag_contents(msgs)), 1,
+                         "Наг остаётся в истории до сжатия: отдельной вычистки нет")
 
     def test_text_answer_without_answer_tool_then_text_again_no_message(self):
         path = os.path.join(self._tmp, "x.txt")
@@ -179,7 +179,7 @@ class TestAnswerRequiredGuard(unittest.TestCase):
         self.assertIsNone(agent._pending_operation)
         self.assertTrue(any(_GUARD_NAG_PREFIX in t for content in seen for t in content))
         msgs = agent.history.get_all()
-        self.assertEqual(nag_contents(msgs), [])
+        self.assertEqual(len(nag_contents(msgs)), 1, "Наг остаётся в истории до сжатия")
 
     def test_bare_answer_is_regenerated_until_model_adds_comment(self):
         path = os.path.join(self._tmp, "k.txt")
@@ -273,7 +273,7 @@ class TestAnswerRequiredGuard(unittest.TestCase):
         self.assertIn(_NO_COMMENT_PREFILL, seen)
         self.assertTrue(any(_GUARD_NAG_PREFIX in t for content in seen_content for t in content))
         msgs = agent.history.get_all()
-        self.assertEqual(nag_contents(msgs), [])
+        self.assertEqual(len(nag_contents(msgs)), 1, "Наг остаётся в истории до сжатия")
 
     def test_prefill_marker_alone_is_not_an_explanation(self):
         path = os.path.join(self._tmp, "m.txt")
@@ -445,7 +445,7 @@ class TestAnswerRequiredGuard(unittest.TestCase):
         nags = [m for m in msgs if isinstance(m, UserMessage) and _GUARD_NAG_PREFIX in (m.content or "")]
         self.assertEqual(len(nags), 1)
 
-    def test_wrong_attempt_scrubbed_after_success(self):
+    def test_wrong_attempt_kept_in_history_after_success(self):
         path = os.path.join(self._tmp, "w.txt")
         with open(path, "w", encoding="utf-8") as f:
             f.write("a\n")
@@ -480,10 +480,10 @@ class TestAnswerRequiredGuard(unittest.TestCase):
         self.assertTrue(any("Подтверждаю" in c for c in contents))
         wrong_assistant = [m for m in msgs
                            if isinstance(m, AssistantMessage) and any(tc.name == _read_tool.__name__ for tc in m.tool_calls)]
-        wrong_results = [m for m in msgs if isinstance(m, ToolResult) and m.name in (_read_tool.__name__,)]
-        self.assertEqual(wrong_assistant, [], "Вызов чужого инструмента при pending должен быть вычищен")
-        self.assertEqual(wrong_results, [], "Результат чужого инструмента при pending должен быть вычищен")
-        self.assertEqual(nag_contents(msgs), [])
+        wrong_ids = {tc.id for m in wrong_assistant for tc in m.tool_calls}
+        wrong_results = [m for m in msgs if isinstance(m, ToolResult) and m.tool_call_id in wrong_ids]
+        self.assertEqual(len(wrong_results), len(wrong_ids),
+                         "Каждый вызов должен сохранить свой результат: история не чистится")
 
     def test_guard_nag_is_byte_stable_between_llm_calls(self):
         path = os.path.join(self._tmp, "s.txt")
@@ -529,7 +529,7 @@ class TestAnswerRequiredGuard(unittest.TestCase):
             nags = [t for t in content if _GUARD_NAG_PREFIX in t]
             self.assertLessEqual(len(nags), 1, "Наг не должен накапливаться")
 
-    def test_scrub_after_answer_keeps_prefix_byte_stable(self):
+    def test_answer_keeps_prefix_byte_stable(self):
         path = os.path.join(self._tmp, "p.txt")
         with open(path, "w", encoding="utf-8") as f:
             f.write("a\n")
@@ -570,12 +570,11 @@ class TestAnswerRequiredGuard(unittest.TestCase):
 
         self.assertIn("Готово", result)
         self.assertEqual([m for m in system_msgs if "[PREFIX-HASH]" in m], [],
-                         "Вычистка нага не должна сдвигать префикс")
+                         "Подтверждение не должно сдвигать префикс")
         self.assertEqual(len(user_contents), 4)
         self.assertEqual(user_contents[0], user_contents[1])
         self.assertEqual(user_contents[1][0], user_contents[3][0],
-                         "User-сообщение задачи должно вернуться байт-в-байт после вычистки нага")
-        self.assertEqual(nag_contents(agent.history.get_all()), [])
+                         "User-сообщение задачи должно оставаться байт-в-байт в префиксе")
 
     def test_guard_nag_flag_roundtrip_through_save_load(self):
         from universal_agents.history import ChatHistory
@@ -598,15 +597,6 @@ class TestAnswerRequiredGuard(unittest.TestCase):
         self.assertTrue(
             any(isinstance(m, UserMessage) and m._is_guard_nag for m in hist2.get_all()),
             "Флаг нага должен пережить /load",
-        )
-
-        agent = self.make_agent()
-        agent.history.load_from_payload(payload)
-        removed = agent._scrub_confirmation_trail()
-        self.assertGreater(removed, 0)
-        self.assertFalse(
-            any(isinstance(m, UserMessage) and m._is_guard_nag for m in agent.history.get_all()),
-            "После успешного answer скраб удаляет загруженный наг",
         )
 
 

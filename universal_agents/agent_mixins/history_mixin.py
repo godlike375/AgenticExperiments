@@ -60,26 +60,6 @@ class HistoryMixin:
             self._on_history_changed()
         return len(removed)
 
-    def _mark_confirmation_junk(self, obj) -> None:
-        """Помечает мусор подтверждения для скраба (§1.11): id→obj, т.к. Message неhashable."""
-        self._confirmation_junk[id(obj)] = obj
-
-    def _scrub_confirmation_trail(self) -> int:
-        """После успешного respond_to_system убирает наги и мусор — остаётся только правильный путь."""
-        removed: set[int] = set()
-        for i, m in enumerate(self.history.get_all()):
-            if id(m) in self._confirmation_junk and self._confirmation_junk[id(m)] is m:
-                removed.add(i)
-            elif isinstance(m, UserMessage) and m._is_guard_nag:
-                removed.add(i)
-        self._confirmation_junk.clear()
-        if not removed:
-            return 0
-        self.history.remove_at(removed)
-        self.history.normalize()
-        self._on_history_changed()
-        return len(removed)
-
     def _get_last_answer_text(self) -> Optional[str]:
         for msg in reversed(self.history.get_all()):
             if isinstance(msg, AssistantMessage) and (msg.content or "").strip():
