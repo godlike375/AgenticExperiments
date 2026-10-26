@@ -20,6 +20,86 @@ from universal_agents.file_states import _content_hash
 from universal_agents.tool import tool
 from universal_agents.tools import builtin as _builtin
 from universal_agents import tool_session
+from universal_agents.project_root import find_project_root
+
+_PROTECTED_NAMES = {'.env', '.npmrc', '.pypirc', '.netrc', '.git-credentials', '.pgpass', '.my.cnf', '.htpasswd', '.authinfo', 'credentials', 'config', 'kubeconfig', 'sealedsecret.yaml', 'sealed-secrets', 'docker-compose.yml', 'secret.yaml', 'vault.yml', 'bitwarden-export.json', '1password-export.csv', 'passwords.csv', 'id_rsa', 'id_ed25519', 'id_ecdsa'}
+_PROTECTED_EXTS = {'.ini', '.cfg', '.conf', '.config', '.properties', '.yaml', '.yml', '.json', '.toml', '.xml', '.tfvars', '.tfstate', '.pem', '.key', '.p12', '.pfx', '.jks', '.keystore', '.kdbx', '.vault', '.age', '.gpg', '.asc', '.ppk', '.p8'}
+_PROTECTED_GLOBS = ('*.kubeconfig', '*.vault', '*secret*.yaml', '*-secret.yaml', 'credentials.json', 'service-account*.json', 'firebase-adminsdk*.json', 'client_secret*.json', '*.enc.yaml', '*.enc.json', '.sops.yaml')
+
+
+_PROTECTED_HOME_PATHS = (
+    '.aws/credentials', '.kube/config', '.config/gcloud/application_default_credentials.json',
+    '.azure/accessTokens.json', '.config/gh/hosts.yml', '.docker/config.json',
+    '.config/rclone/rclone.conf', '.s3cfg', '.boto', '.npmrc', '.pypirc', '.yarnrc.yml',
+    '.composer/auth.json', '.gem/credentials', '.cargo/credentials.toml', '.m2/settings.xml',
+    '.gradle/gradle.properties', '.my.cnf',
+)
+
+
+def _is_home_protected(p: str) -> bool:
+    home = os.path.expanduser('~')
+    return any(
+        os.path.normcase(p) == os.path.normcase(os.path.join(home, *rel.split('/')))
+        for rel in _PROTECTED_HOME_PATHS
+    )
+
+
+def _gitignore_rules(root: str) -> list[tuple[bool, bool, str]]:
+    try:
+        with open(os.path.join(root, '.gitignore'), encoding='utf-8', errors='ignore') as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return []
+    rules = []
+    for raw in lines:
+        line = raw.strip()
+        if not line or line.startswith('#'):
+            continue
+        negate = line.startswith('!')
+        if negate:
+            line = line[1:]
+        anchored = '/' in line.rstrip('/')
+        pattern = line.strip('/')
+        if pattern:
+            rules.append((negate, anchored, pattern))
+    return rules
+
+
+def _is_gitignored(p: str) -> bool:
+    root = find_project_root(os.path.dirname(p))
+    if not root:
+        return False
+    try:
+        rel = os.path.relpath(p, root)
+    except ValueError:
+        return False
+    if rel == os.pardir or rel.startswith(os.pardir + os.sep):
+        return False
+    parts = rel.replace(os.sep, '/').split('/')
+    prefixes = ['/'.join(parts[:i]) for i in range(1, len(parts) + 1)]
+    ignored = False
+    for negate, anchored, pattern in _gitignore_rules(root):
+        if anchored:
+            hit = any(_fnmatch.fnmatch(pre, pattern) for pre in prefixes)
+        else:
+            hit = any(_fnmatch.fnmatch(part, pattern) for part in parts)
+        if hit:
+            ignored = not negate
+    return ignored
+
+
+def is_protected_path(path: str) -> bool:
+    p = os.path.abspath(os.path.expanduser(path))
+    if os.path.isdir(p):
+        return False
+    name = os.path.basename(p).lower()
+    if _is_home_protected(p) or name in _PROTECTED_NAMES or name.startswith('.env.'):
+        return True
+    if os.path.splitext(name)[1] in _PROTECTED_EXTS:
+        return True
+    if any(_fnmatch.fnmatch(name, pat) for pat in _PROTECTED_GLOBS):
+        return True
+    return _is_gitignored(p)
 
 if TYPE_CHECKING:
     from universal_agents.context import AgentContext
@@ -225,7 +305,7 @@ def _apply_edit_result(
 
 
 @tool(
-    description="Edits a file: the 1-based inclusive lines start_line..end_line are REPLACED with 'new_text'. The range can be one line or several lines — always a replace of that range, never insert/append elsewhere. Lines outside the range stay untouched. Creates file with parent dirs if it doesn't exist",
+    description="Edits a file: the 1-based inclusive lines start_line..end_line are REPLACED with 'new_text'. The range can be one line or several lines — always a replace of that range, never insert/append elsewhere. Lines outside the range stay untouched. Creates file with parent dirs if it doesn't exist. Use it for huge massive edits",
     short_description="edit file text by line range",
     requires_confirmation=True,
     requires_model_confirmation=True,
@@ -276,7 +356,7 @@ def line_range_edit(path: str, new_text: str, start_line: int = None, end_line: 
 
 @tool(
     description="Edits a file by searching the EXACT 'old' text and replacing it with 'new_text'. "
-                "Best for small precise changes when exact line numbers are unknown or shift often. "
+                "Best choice for small precise edits when exact line numbers are unknown or shift often. "
                 "'old' is matched literally (newlines via \\n). mode='one' requires exactly one match; "
                 "mode='all' replaces every occurrence. Pass old='' to set the whole file content "
                 "(creates the file if missing).",
@@ -790,6 +870,9 @@ def search(pattern: str, path: str = ".", include: str = None, exclude: str = No
         if file_count >= SEARCH_MAX_MATCH_FILES:
             truncated = True
             break
+        if is_protected_path(filepath):
+            skipped += 1
+            continue
 
         try:
             size = os.path.getsize(filepath)

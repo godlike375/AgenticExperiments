@@ -47,6 +47,7 @@ class UserMessage(Message):
     content: str
     is_summary: bool = False
     images: list[str] = field(default_factory=list)
+    is_tools_block: bool = False
     _cached_header: Optional[str] = field(default=None, init=False, repr=False)
     _is_guard_nag: bool = field(default=False, init=False, repr=False)
 
@@ -54,7 +55,7 @@ class UserMessage(Message):
         self._cached_header = None
 
     def is_auxiliary(self) -> bool:
-        return self.is_summary or self._is_guard_nag
+        return self.is_summary or self.is_tools_block or self._is_guard_nag
 
     def to_api_dict(self) -> dict[str, Any]:
         return {"role": "user", "content": multimodal_content(self.content, self.images)}
@@ -62,6 +63,7 @@ class UserMessage(Message):
     def to_persist_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {"role": "user", "content": self.content}
         d["_is_summary"] = self.is_summary
+        d["_is_tools_block"] = self.is_tools_block
         d["_is_guard_nag"] = self._is_guard_nag
         d["_ts"] = self.timestamp.isoformat()
         d["_header"] = self._cached_header

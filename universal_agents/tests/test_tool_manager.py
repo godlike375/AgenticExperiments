@@ -50,7 +50,11 @@ class TestToolManagerFilter(unittest.TestCase):
     def test_schemas(self):
         tm = ToolManager(None, external_plugins={"alpha": alpha})
         self.assertEqual(len(tm.schemas), 1)
-        self.assertEqual(tm.schemas[0]["function"]["name"], "alpha")
+        self.assertEqual(tm.schemas[0]["function"]["name"], "invoke_function")
+        parameters = tm.schemas[0]["function"]["parameters"]
+        self.assertEqual(parameters["required"], ["function_name", "args"])
+        self.assertEqual(parameters["properties"]["function_name"]["type"], "string")
+        self.assertEqual(parameters["properties"]["args"]["type"], "object")
 
 
 class TestToolManagerAllowed(unittest.TestCase):
@@ -131,7 +135,7 @@ class TestToolManagerTrust(unittest.TestCase):
     def test_trust_roundtrip(self):
         with tempfile.TemporaryDirectory() as d:
             tm = ToolManager()
-            self.assertIn("not a directory", tm.trust_dir(os.path.join(d, "missing")))
+            self.assertIn("not a directory or file", tm.trust_dir(os.path.join(d, "missing")))
             self.assertFalse(tm.is_path_trusted(os.path.join(d, "missing")))
 
             sub = os.path.join(d, "sub")
@@ -177,6 +181,34 @@ class TestToolManagerListLoaded(unittest.TestCase):
         self.assertNotIn("(alpha", text)
 
 
+class TestLoadReturnsSchema(unittest.TestCase):
+    def test_load_result_contains_tool_schema(self):
+        tm = ToolManager(["alpha"], external_plugins={})
+        with mock.patch("universal_agents.tool_manager.load_external_plugins", return_value={"alpha": alpha}):
+            res = tm.load("alpha")
+        self.assertTrue(res.startswith("'alpha' loaded."))
+        self.assertIn("alpha:", res)
+        self.assertIn("'type': 'object'", res)
+
+    def test_loaded_schemas_block_wraps_active_tools_in_system_tags(self):
+        tm = ToolManager(None, external_plugins={"alpha": alpha, "beta": beta})
+        block = tm.loaded_schemas_block()
+        self.assertTrue(block.startswith("<SYSTEM>"))
+        self.assertTrue(block.endswith("</SYSTEM>"))
+        self.assertIn("alpha:", block)
+        self.assertIn("beta:", block)
+
+    def test_loaded_schemas_block_empty_when_no_tools(self):
+        self.assertEqual(ToolManager().loaded_schemas_block(), "")
+
+    def test_loaded_schemas_block_skips_pending_unload(self):
+        tm = ToolManager(None, external_plugins={"alpha": alpha, "beta": beta})
+        tm.unload("alpha")
+        block = tm.loaded_schemas_block()
+        self.assertNotIn("alpha:", block)
+        self.assertIn("beta:", block)
+
+
 class TestRealUnloadTool(unittest.TestCase):
     def test_unload_tool_delegates_to_agent(self):
         agent = mock.Mock()
@@ -205,7 +237,9 @@ class TestSubAgentToolPermissions(unittest.TestCase):
         sub = parent.make_sub_agent(denied_tools="*", max_iter=1)
         for name in ("alpha", "beta_confirm"):
             self.assertTrue(sub._agent.is_tool_denied(name))
-        results = sub._agent._execute_tools([ToolCall(id="t1", name="alpha", arguments='{"x": 1}')])
+        results = sub._agent._execute_tools([ToolCall(
+            id="t1", name="call_tool", arguments='{"name": "alpha", "arguments": {"x": 1}}'
+        )])
         self.assertTrue(results[0].is_error)
         self.assertIn("forbidden", results[0].content)
 
@@ -215,8 +249,12 @@ class TestSubAgentToolPermissions(unittest.TestCase):
         self.assertTrue(sub._agent.is_tool_denied("alpha"))
         self.assertFalse(sub._agent.is_tool_denied("beta_confirm"))
 
-        denied = sub._agent._execute_tools([ToolCall(id="t1", name="alpha", arguments='{"x": 1}')])[0]
-        allowed = sub._agent._execute_tools([ToolCall(id="t2", name="beta_confirm", arguments='{"y": "z"}')])[0]
+        denied = sub._agent._execute_tools([ToolCall(
+            id="t1", name="call_tool", arguments='{"name": "alpha", "arguments": {"x": 1}}'
+        )])[0]
+        allowed = sub._agent._execute_tools([ToolCall(
+            id="t2", name="call_tool", arguments='{"name": "beta_confirm", "arguments": {"y": "z"}}'
+        )])[0]
         self.assertTrue(denied.is_error)
         self.assertFalse(allowed.is_error)
 
@@ -231,6 +269,22 @@ class TestSubAgentToolPermissions(unittest.TestCase):
         parent = self._make_parent()
         sub = parent.make_sub_agent(safe_only=False, max_iter=1)
         self.assertEqual(sub._agent.tools_manager.denied, set())
+
+    def test_dispatch_runs_named_tool_and_reports_real_tool_name(self):
+        parent = self._make_parent()
+        result = parent._execute_tools([ToolCall(
+            id="t1", name="call_tool", arguments='{"name": "alpha", "arguments": {"x": 7}}'
+        )])[0]
+        self.assertEqual(result.name, "alpha")
+        self.assertEqual(result.content, "7")
+        self.assertFalse(result.is_error)
+
+    def test_dispatch_rejects_invalid_arguments(self):
+        parent = self._make_parent()
+        result = parent._execute_tools([ToolCall(
+            id="t1", name="call_tool", arguments='{"name": "alpha", "arguments": []}'
+        )])[0]
+        self.assertTrue(result.is_error)
 
 
 if __name__ == "__main__":

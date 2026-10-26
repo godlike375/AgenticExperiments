@@ -6,6 +6,7 @@ import os
 from universal_agents.config import Config
 from universal_agents.command_paths import extract_paths
 from universal_agents.project_root import find_project_root, external_paths
+from universal_agents.tools.fs import is_protected_path
 
 
 class ToolsMixin:
@@ -27,6 +28,10 @@ class ToolsMixin:
     def trusted_dirs(self) -> set[str]:
         return self.tools_manager.trusted_dirs
 
+    @property
+    def trusted_files(self) -> set[str]:
+        return self.tools_manager.trusted_files
+
     def load_tool(self, name: str) -> str:
         return self.tools_manager.load(name)
 
@@ -47,6 +52,24 @@ class ToolsMixin:
 
     def is_path_trusted(self, path: str) -> bool:
         return self.tools_manager.is_path_trusted(path)
+
+    def is_file_trusted(self, path: str) -> bool:
+        return os.path.abspath(path) in self.tools_manager.trusted_files
+
+    def _protected_refs(self, name: str, args: dict, tool_info: dict) -> list[str]:
+        """Защищённые файлы, на которые ссылается вызов: явный path или пути из команды."""
+        if not args:
+            return []
+        candidates: list[str] = []
+        if isinstance(args.get("path"), str) and name != "cwd":
+            candidates.append(args["path"])
+        if tool_info.get("path_safety"):
+            for key in ("command", "cmd", "script"):
+                value = args.get(key)
+                if isinstance(value, str) and value.strip():
+                    candidates.extend(extract_paths(value))
+        found = [os.path.abspath(p) for p in candidates if os.path.isfile(p) and is_protected_path(p)]
+        return list(dict.fromkeys(found))
 
     def _auto_trust_git_root(self) -> None:
         """При наличии .git доверяем корень проекта: редакторы внутри него не спрашивают подтверждение."""

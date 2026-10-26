@@ -68,10 +68,16 @@ def detect_broken_call(content: str, tool_names: set[str], require_tag: bool = T
     if not content or not content.strip():
         return False
 
+    if re.search(r'</\s*tool_call\s*>', content, re.IGNORECASE):
+        return True
+
+    if require_tag and not _has_tag(content):
+        return _is_standalone_call(content, tool_names)
+
     if any(_has_tag(content, t) for t in _STRONG_TAGS):
         return True
 
-    if _is_standalone_call(content, tool_names):
+    if not require_tag and _is_standalone_call(content, tool_names):
         return True
 
     # Обычный ответ с процитированным тегом (напр. <SYSTEM>) и упоминанием инструмента

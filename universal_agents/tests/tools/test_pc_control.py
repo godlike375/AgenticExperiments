@@ -17,7 +17,7 @@ from universal_agents.tool import ToolOutput
 from universal_agents.tools import pc_control
 
 _IS_WIN32 = sys.platform == "win32"
-PC_TOOL_NAMES = ["screenshot", "mouse_move", "mouse_click", "scroll", "type_text", "press_key"]
+PC_TOOL_NAMES = ["screenshot", "mouse_move", "mouse_click", "scroll", "press_key"]
 
 
 def _fake_screen(w: int = 1920, h: int = 1080) -> Image.Image:
@@ -344,7 +344,7 @@ class TestAllowListIntegration(unittest.TestCase):
         tm = ToolManager(tools_config=build_allowed_tools(LOADABLE_TOOLS, PRELOADED_TOOLS))
         for name in PC_TOOL_NAMES:
             res = tm.load(name)
-            self.assertTrue(res.endswith("loaded."), f"{name}: {res}")
+            self.assertTrue(res.startswith(f"'{name}' loaded."), f"{name}: {res}")
             self.assertIn(name, tm.tools_map)
 
 

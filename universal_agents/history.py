@@ -8,6 +8,10 @@ from universal_agents.models import (
 )
 
 
+def _is_tools_block(msg: Message) -> bool:
+    return isinstance(msg, UserMessage) and msg.is_tools_block
+
+
 class ChatHistory:
     def __init__(self, system_prompt: str):
         self._messages: list[Message] = [SystemMessage(system_prompt)]
@@ -166,6 +170,8 @@ class ChatHistory:
             if (
                 type(msg) == type(last)
                 and isinstance(msg, (UserMessage, AssistantMessage))
+                and not _is_tools_block(msg)
+                and not _is_tools_block(last)
             ):
                 last.content = (last.content or "") + "\n\n" + (msg.content or "")
                 if isinstance(msg, UserMessage) and isinstance(last, UserMessage) and msg.images:
@@ -263,6 +269,7 @@ class ChatHistory:
                 um = UserMessage(
                     d["content"],
                     is_summary=d.get("_is_summary", False),
+                    is_tools_block=d.get("_is_tools_block", False),
                 )
                 um.images = list(d.get("_images") or [])
                 um._is_guard_nag = d.get("_is_guard_nag", False)
@@ -394,7 +401,7 @@ class ChatHistory:
                 return (m.content)
         return None
 
-    def compress_old_messages(self, summary: str, preserve_last: int = 2) -> None:
+    def compress_old_messages(self, summary: str, preserve_last: int = 2, tools_block: str = "") -> None:
         safe_end = len(self._messages) - preserve_last
 
         if Config.AFTER_SYSTEM_PROMPT > safe_end:
@@ -414,8 +421,13 @@ class ChatHistory:
             is_summary=True,
         )
         self._assign_seq(summary_msg)
+        head = [msgs[0], summary_msg]
+        if tools_block:
+            block_msg = UserMessage(content=tools_block, is_tools_block=True)
+            self._assign_seq(block_msg)
+            head.append(block_msg)
 
-        preserved = msgs[safe_end:]
-        self._messages = [msgs[0], summary_msg] + preserved
+        preserved = [m for m in msgs[safe_end:] if not _is_tools_block(m)]
+        self._messages = head + preserved
         self._mark_dirty()
         self._resync_last_user_header()

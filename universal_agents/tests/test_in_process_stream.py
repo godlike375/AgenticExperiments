@@ -159,6 +159,9 @@ class TestInProcessStreamClose(unittest.TestCase):
         released = threading.Event()
 
         class FakeSocket:
+            def settimeout(self, value):
+                pass
+
             def shutdown(self, how):
                 released.set()
 
@@ -183,8 +186,8 @@ class TestInProcessStreamClose(unittest.TestCase):
             def __init__(self, *args, **kwargs):
                 pass
 
-            def build_request(self, method, url, json=None):
-                return httpx.Request(method, url)
+            def build_request(self, method, url, json=None, headers=None):
+                return httpx.Request(method, url, headers=headers)
 
             def send(self, request, stream=False):
                 return FakeResponse()
@@ -228,8 +231,8 @@ class TestInProcessStreamClose(unittest.TestCase):
             def __init__(self, *args, **kwargs):
                 pass
 
-            def build_request(self, method, url, json=None):
-                return httpx.Request(method, url)
+            def build_request(self, method, url, json=None, headers=None):
+                return httpx.Request(method, url, headers=headers)
 
             def send(self, request, stream=False):
                 return FakeResponse()
@@ -354,6 +357,9 @@ class TestCallEndToEndViaInProcessStream(unittest.TestCase):
         released = threading.Event()
 
         class FakeSocket:
+            def settimeout(self, value):
+                pass
+
             def shutdown(self, how):
                 released.set()
 
@@ -381,8 +387,8 @@ class TestCallEndToEndViaInProcessStream(unittest.TestCase):
             def __init__(self, *args, **kwargs):
                 pass
 
-            def build_request(self, method, url, json=None):
-                return httpx.Request(method, url)
+            def build_request(self, method, url, json=None, headers=None):
+                return httpx.Request(method, url, headers=headers)
 
             def send(self, request, stream=False):
                 return FakeResponse()

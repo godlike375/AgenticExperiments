@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 import threading
+import json
 from dataclasses import dataclass, field, replace as dc_replace
 from datetime import datetime
 from types import SimpleNamespace
@@ -21,6 +22,8 @@ from universal_agents.file_states import FileStateTracker
 from universal_agents.tool_parsing import tc_name, tc_args
 from universal_agents.agent_mixins.response_mixin import SimReasoningGroup
 from universal_agents.tools.builtin import respond_to_system
+from universal_agents.tool_manager import DISPATCH_TOOL_NAME
+from universal_agents.tool_parsing import parse_tool_args
 
 from universal_agents.agent_mixins import (
     ToolsMixin,
@@ -666,8 +669,25 @@ class LLMAgent(
     def _call_signature(self, tool_calls) -> tuple:
         """Сигнатура вызовов: имя + нормализованные аргументы (порядок не важен)."""
         return tuple(sorted(
-            (tc_name(tc), self.loop_detector.normalize_args(tc_args(tc))) for tc in (tool_calls or [])
+            (name, self.loop_detector.normalize_args(args))
+            for name, args in (self._actual_tool_call(tc) for tc in (tool_calls or []))
         ))
+
+    @staticmethod
+    def _actual_tool_call(tc) -> tuple[str, str]:
+        name = tc_name(tc)
+        args = tc_args(tc)
+        if name == DISPATCH_TOOL_NAME:
+            dispatch_args = parse_tool_args(args)
+            name = dispatch_args.get("name", "")
+            args = dispatch_args.get("arguments", "{}")
+            if isinstance(args, dict):
+                args = LLMAgent._normalize_dispatch_arguments(args)
+        return name, args
+
+    @staticmethod
+    def _normalize_dispatch_arguments(args: dict) -> str:
+        return json.dumps(args, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
     def _detect_duplicate(self, message_obj) -> Optional[tuple]:
         """Детектор дублей: повтор текста/reasoning/вызова. При живом pending guard решает вердикт (§1.11)."""
@@ -676,7 +696,12 @@ class LLMAgent(
         pending = self._pending_operation is not None
 
         if pending and message_obj.tool_calls and any(
-            tc_name(tc) == respond_to_system.__name__ for tc in message_obj.tool_calls
+            tc_name(tc) == respond_to_system.__name__
+            or (
+                tc_name(tc) == DISPATCH_TOOL_NAME
+                and parse_tool_args(tc_args(tc)).get("name") == respond_to_system.__name__
+            )
+            for tc in message_obj.tool_calls
         ):
             return None
 
@@ -714,13 +739,14 @@ class LLMAgent(
             current_history = self.history.get_all()
             seen_in_batch: set[str] = set()
             for tc in message_obj.tool_calls:
-                norm = self.loop_detector.normalize_args(tc_args(tc))
-                batch_key = f"{tc_name(tc)}:{norm}"
+                actual_name, actual_args = self._actual_tool_call(tc)
+                norm = self.loop_detector.normalize_args(actual_args)
+                batch_key = f"{actual_name}:{norm}"
                 if batch_key in seen_in_batch:
-                    return 'tool_call', (tc_name(tc), tc_args(tc))
+                    return 'tool_call', (actual_name, actual_args)
                 seen_in_batch.add(batch_key)
-                if self.loop_detector.check_duplicate_in_turn(tc_name(tc), tc_args(tc), current_history):
-                    return 'tool_call', (tc_name(tc), tc_args(tc))
+                if self.loop_detector.check_duplicate_in_turn(actual_name, actual_args, current_history):
+                    return 'tool_call', (actual_name, actual_args)
             return None
 
         answer_text = content

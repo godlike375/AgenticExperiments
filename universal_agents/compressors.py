@@ -519,7 +519,9 @@ class SummaryService:
             )
             return False
 
-        agent.history.compress_old_messages(summary_text, preserve_last)
+        tm = getattr(agent, "tools_manager", None)
+        tools_block = tm.loaded_schemas_block() if tm is not None else ""
+        agent.history.compress_old_messages(summary_text, preserve_last, tools_block=tools_block)
 
         agent._on_history_changed()
         agent.history.prune_per_msg_summaries()

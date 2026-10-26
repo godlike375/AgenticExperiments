@@ -1,6 +1,8 @@
 
 from __future__ import annotations
 
+import json
+
 from universal_agents.config import Config
 from universal_agents.constants import (
     ENVIRONMENT_PREFIX,
@@ -11,6 +13,7 @@ from universal_agents.compressors import auto_compress_tool_result
 from universal_agents.models import ToolCall, ToolResult
 from universal_agents.task_tracker import DONE_TOOL, validate_task_mark_call
 from universal_agents.tool_parsing import parse_tool_args, is_error_content
+from universal_agents.tool_manager import DISPATCH_TOOL_NAME
 from universal_agents.tool import ToolOutput
 from universal_agents.subprocess_utils import set_interrupt_event, clear_interrupt_event
 from universal_agents.exceptions import GenerationInterrupted
@@ -32,13 +35,26 @@ class ExecuteMixin:
                 name = tc.name
                 args_str = tc.arguments or "{}"
 
+                if name in (DISPATCH_TOOL_NAME, "call_tool"):
+                    dispatch_args = parse_tool_args(args_str)
+                    dispatched_name = dispatch_args.get("function_name", dispatch_args.get("name", ""))
+                    nested_args = dispatch_args.get("args", dispatch_args.get("arguments", {}))
+                    if not isinstance(dispatched_name, str) or not dispatched_name or not isinstance(nested_args, dict):
+                        results.append(ToolResult.error(
+                            tc.id, tc.name, err(": invoke_function requires function_name and an args object.")
+                        ))
+                        continue
+                    name = dispatched_name
+                    args_str = json.dumps(nested_args, ensure_ascii=False)
+                result_name = name
+
                 if self.tools_manager.is_denied(name):
                     err_msg = err(
                         f": tool '{name}' is forbidden for this sub-agent. "
                         f"Use other tools or answer yourself."
                     )
                     self.on_system_msg(f"[TOOL DENIED] Model tried to call forbidden tool '{name}'.")
-                    results.append(ToolResult.error(tc.id, name, err_msg))
+                    results.append(ToolResult.error(tc.id, result_name, err_msg))
                     continue
 
                 if self.tools_manager.is_pending_unload(name):
@@ -47,7 +63,7 @@ class ExecuteMixin:
                         f"If you still wanna use it then load_tool('{name}') first."
                     )
                     self.on_system_msg(f"[TOOL UNLOADED] Model tried to call unloaded tool '{name}'.")
-                    results.append(ToolResult.error(tc.id, name, err_msg))
+                    results.append(ToolResult.error(tc.id, result_name, err_msg))
                     continue
 
                 norm = self.loop_detector.normalize_args(args_str)
@@ -61,7 +77,7 @@ class ExecuteMixin:
                         f"{ENVIRONMENT_PREFIX_END}"
                     )
                     self.on_system_msg(f"[LOOP PREVENTED] Blocked repeated call to '{name}' during execution.")
-                    results.append(ToolResult.error(tc.id, name, warning_msg))
+                    results.append(ToolResult.error(tc.id, result_name, warning_msg))
                     continue
                 seen_in_batch.add(batch_key)
 
@@ -74,12 +90,12 @@ class ExecuteMixin:
                         f"{ENVIRONMENT_PREFIX_END}"
                     )
                     self.on_system_msg(f"[LOOP PREVENTED] Blocked repeated call to '{name}' during execution.")
-                    results.append(ToolResult.error(tc.id, name, warning_msg))
+                    results.append(ToolResult.error(tc.id, result_name, warning_msg))
                     continue
 
                 tool_info = self._all_tools.get(name)
                 if not tool_info:
-                    results.append(ToolResult.error(tc.id, name, f"Unknown tool '{name}'. It must be loaded first or probably misspelled."))
+                    results.append(ToolResult.error(tc.id, result_name, f"Unknown tool '{name}'. It must be loaded first or probably misspelled."))
                     continue
 
                 args_dict = parse_tool_args(args_str)
@@ -90,7 +106,7 @@ class ExecuteMixin:
                     )
                     if order_err:
                         self.on_system_msg(f"[TASK ORDER] Rejected out-of-order have_done call: {order_err}")
-                        results.append(ToolResult.error(tc.id, name, f"{ENVIRONMENT_PREFIX} {order_err} {ENVIRONMENT_PREFIX_END}"))
+                        results.append(ToolResult.error(tc.id, result_name, f"{ENVIRONMENT_PREFIX} {order_err} {ENVIRONMENT_PREFIX_END}"))
                         continue
 
                 if tool_info.get('requires_confirmation', False) or tool_info.get('path_safety', False):
@@ -106,8 +122,17 @@ class ExecuteMixin:
                                 f"🚫 Command references path(s) OUTSIDE project root: {', '.join(external)}"
                             )
                         if not self.on_confirm(name, args_dict):
-                            results.append(ToolResult.user_denied(tc.id, name))
+                            results.append(ToolResult.user_denied(tc.id, result_name))
                             continue
+
+                protected = self._protected_refs(name, args_dict, tool_info)
+                if protected and not all(self.is_file_trusted(p) for p in protected):
+                    self.on_system_msg(
+                        f"🔒 Protected path(s) referenced: {', '.join(protected)}"
+                    )
+                    if not self.on_confirm(name, args_dict):
+                        results.append(ToolResult.user_denied(tc.id, result_name))
+                        continue
 
                 if tool_info.get('requires_model_confirmation', False):
                     if tool_info.get('is_external') and self.group_manager.isolated:
@@ -117,14 +142,14 @@ class ExecuteMixin:
                         )
                         if wr.status == "error":
                             self.on_system_msg(f"⚠️ [ERROR] Tool '{name}' dry_run failed: {wr.value}")
-                            results.append(ToolResult.error(tc.id, name, wr.value))
+                            results.append(ToolResult.error(tc.id, result_name, wr.value))
                             continue
                         if wr.status == "ok":
                             text = wr.value
                             if isinstance(text, str) and is_error_content(text):
-                                results.append(ToolResult(tc.id, name, text, is_error=True))
+                                results.append(ToolResult(tc.id, result_name, text, is_error=True))
                             else:
-                                results.append(ToolResult.success(tc.id, name, str(text)))
+                                results.append(ToolResult.success(tc.id, result_name, str(text)))
                             continue
                         preview, ask = wr.value
                         self.set_pending_operation({
@@ -135,7 +160,7 @@ class ExecuteMixin:
                         })
                         confirm_msg = f"{preview}\n\n{ask}"
                         self.on_system_msg(f"[CONFIRM] Tool '{name}' awaits LLM confirmation.")
-                        results.append(ToolResult(tc.id, name, confirm_msg))
+                        results.append(ToolResult(tc.id, result_name, confirm_msg))
                         continue
 
                     handler = tool_info['handler']
@@ -149,19 +174,19 @@ class ExecuteMixin:
                         raise
                     except Exception as e:
                         self.on_system_msg(f"⚠️ [ERROR] Tool '{name}' dry_run failed: {e}")
-                        results.append(ToolResult.error(tc.id, name, str(e)))
+                        results.append(ToolResult.error(tc.id, result_name, str(e)))
                         continue
 
                     if isinstance(result, str):
                         if is_error_content(result):
-                            results.append(ToolResult(tc.id, name, result, is_error=True))
+                            results.append(ToolResult(tc.id, result_name, result, is_error=True))
                         else:
-                            results.append(ToolResult.success(tc.id, name, result))
+                            results.append(ToolResult.success(tc.id, result_name, result))
                         continue
 
                     if not (isinstance(result, tuple) and len(result) == 3):
                         self.on_system_msg(f"⚠️ [ERROR] Tool '{name}' with requires_model_confirmation must return (preview, resolve, ask) from dry_run.")
-                        results.append(ToolResult.error(tc.id, name, "Tool configuration error: dry_run must return (preview, resolve, ask)."))
+                        results.append(ToolResult.error(tc.id, result_name, "Tool configuration error: dry_run must return (preview, resolve, ask)."))
                         continue
                     preview, resolve, ask = result
 
@@ -172,7 +197,7 @@ class ExecuteMixin:
 
                     confirm_msg = f"{preview}\n\n{ask}"
                     self.on_system_msg(f"[CONFIRM] Tool '{name}' awaits LLM confirmation.")
-                    results.append(ToolResult(tc.id, name, confirm_msg))
+                    results.append(ToolResult(tc.id, result_name, confirm_msg))
                     continue
 
                 try:
@@ -193,7 +218,7 @@ class ExecuteMixin:
                         full_result = full_result.text
                     content = str(full_result) if full_result is not None else "Tool executed successfully"
                     if is_error_content(content):
-                        tr = ToolResult(tc.id, name, content, is_error=True)
+                        tr = ToolResult(tc.id, result_name, content, is_error=True)
                     else:
                         self_truncating = bool(
                             self.tools_manager.tools_map.get(name, {}).get("self_truncating")
@@ -204,7 +229,7 @@ class ExecuteMixin:
                                 + f"\n{ENVIRONMENT_PREFIX} Output truncated to {Config.MAX_READ_CHARS_PER_CALL} "
                                 f"chars per tool call — narrow your request/parameters. {ENVIRONMENT_PREFIX_END}"
                             )
-                        tr = ToolResult.success(tc.id, name, content)
+                        tr = ToolResult.success(tc.id, result_name, content)
                         self._tool_usage[name] = self._tool_usage.get(name, 0) + 1
                         if name == _read_tool.__name__ and self._read_registrations:
                             self.file_states.mark_tool_call(self._read_registrations.pop(0), tr.tool_call_id)
@@ -221,7 +246,7 @@ class ExecuteMixin:
                 except GenerationInterrupted:
                     raise
                 except Exception as e:
-                    results.append(ToolResult.error(tc.id, name, str(e)))
+                    results.append(ToolResult.error(tc.id, result_name, str(e)))
 
                 try:
                     self.autosave()

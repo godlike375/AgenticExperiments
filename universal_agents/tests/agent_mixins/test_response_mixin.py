@@ -414,7 +414,10 @@ class TestTwoPhaseReasoning(SimReasoningTestCase):
 
 class TestSimulatedReasoningWithTools(SimReasoningTestCase):
     def _tool_call(self, value=21):
-        return [ToolCall(id="t1", name="double_me", arguments='{"value": %d}' % value)]
+        return [ToolCall(
+            id="t1", name="call_tool",
+            arguments='{"name": "double_me", "arguments": {"value": %d}}' % value,
+        )]
 
     def test_tool_call_keeps_answer_and_group_restarts(self):
         agent = self._agent(tools=True)
@@ -451,7 +454,10 @@ class TestSimulatedReasoningWithTools(SimReasoningTestCase):
 
     def test_one_tool_call_per_message(self):
         agent = self._agent(tools=True)
-        two = self._tool_call() + [ToolCall(id="t2", name="double_me", arguments='{"value": 5}')]
+        two = self._tool_call() + [ToolCall(
+            id="t2", name="call_tool",
+            arguments='{"name": "double_me", "arguments": {"value": 5}}',
+        )]
         fake, _calls = _transport([
             (f"считаю{CLOSE_T}", two),
             (f"готово{CLOSE_T}всё", None),

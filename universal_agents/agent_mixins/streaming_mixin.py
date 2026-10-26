@@ -1,6 +1,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import Callable
 
 from universal_agents.config import Config
@@ -66,33 +67,46 @@ class StreamingMixin:
         defer_stream_end: bool = False,
     ) -> tuple:
         """Вызов со стримингом: prefill_shown — уже показанное; defer_stream_end — закрывает вызывающий."""
-        try:
-            session = StreamSession(
-                messages,
-                tools=tools,
-                prefill=prefill,
-                params=params,
-                reasoning_effort=reasoning_effort,
-                on_stream_chunk=self.on_stream_chunk,
-                on_reasoning_start=self.on_reasoning_start,
-                on_reasoning_chunk=self.on_reasoning_chunk,
-                prefill_shown=prefill_shown,
-            )
-            error, _stopped = session.consume(
-                stop_check=stop_check,
-                stop_on_chunk=(
-                    (lambda: self._watch_diverged(watch_prefix, prefill, session.acc.content))
-                    if watch_prefix else None
-                ),
-                on_stream_start=None if prefill_shown else self.on_stream_start,
-                stop_markers=stop_markers,
-            )
-        except Exception as e:
-            if isinstance(e, GenerationInterrupted):
-                raise
-            if stop_check and stop_check():
-                raise GenerationInterrupted()
-            return None, str(e), None, False
+        error = ""
+        _stopped = False
+        retry_delays = (0, 1, 2, 5, 10)
+        for attempt, delay in enumerate(retry_delays, start=1):
+            if delay:
+                if stop_check and stop_check():
+                    raise GenerationInterrupted()
+                self.on_system_msg(
+                    f"[API Retry] stream creation failed, retry {attempt - 1}/{len(retry_delays) - 1} in {delay}s..."
+                )
+                time.sleep(delay)
+            try:
+                session = StreamSession(
+                    messages,
+                    tools=tools,
+                    prefill=prefill,
+                    params=params,
+                    reasoning_effort=reasoning_effort,
+                    on_stream_chunk=self.on_stream_chunk,
+                    on_reasoning_start=self.on_reasoning_start,
+                    on_reasoning_chunk=self.on_reasoning_chunk,
+                    prefill_shown=prefill_shown,
+                )
+                error, _stopped = session.consume(
+                    stop_check=stop_check,
+                    stop_on_chunk=(
+                        (lambda: self._watch_diverged(watch_prefix, prefill, session.acc.content))
+                        if watch_prefix else None
+                    ),
+                    on_stream_start=None if prefill_shown else self.on_stream_start,
+                    stop_markers=stop_markers,
+                )
+            except Exception as e:
+                if isinstance(e, GenerationInterrupted):
+                    raise
+                if stop_check and stop_check():
+                    raise GenerationInterrupted()
+                return None, str(e), None, False
+            if not (error and error.startswith("stream creation failed")):
+                break
 
         if error:
             if stop_check and stop_check():

@@ -2,6 +2,8 @@
 import os
 from typing import Callable, Iterable, Union, Optional
 
+from universal_agents.constants import ENVIRONMENT_PREFIX, ENVIRONMENT_PREFIX_END
+from universal_agents.tool import tool
 from universal_agents.tool_registry import load_external_plugins, build_tool_dict
 from universal_agents.tools.builtin import (
     have_done as _have_done_tool,
@@ -17,6 +19,21 @@ def _tools_directory() -> str:
 
 
 MANAGED_TOOLS = {_have_done_tool.__name__}
+DISPATCH_TOOL_NAME = "invoke_function"
+
+
+@tool(
+    description="Invoke one loaded function by name. Put its original parameters in args.",
+    function_name=("str", "Name of the function to invoke"),
+    args=("dict", "Arguments to pass to the named function"),
+)
+def _dispatch_tool(function_name: str, args: dict) -> str:
+    return ""
+
+
+_DISPATCH_SCHEMA = _dispatch_tool._tool_schema.copy()
+_DISPATCH_SCHEMA["function"] = _dispatch_tool._tool_schema["function"].copy()
+_DISPATCH_SCHEMA["function"]["name"] = DISPATCH_TOOL_NAME
 
 
 class ToolManager:
@@ -36,6 +53,7 @@ class ToolManager:
                 self._tools_map[name] = build_tool_dict(func, is_instance_method=False)
         self._filter()
         self.trusted_dirs: set[str] = set()
+        self.trusted_files: set[str] = set()
 
     @property
     def tools_map(self) -> dict[str, dict]:
@@ -52,7 +70,9 @@ class ToolManager:
 
     @property
     def schemas(self) -> list[dict]:
-        return [self._tools_map[n]["schema"] for n in sorted(self._tools_map)]
+        if not self._tools_map:
+            return []
+        return [_DISPATCH_SCHEMA]
 
     @property
     def config(self):
@@ -115,7 +135,7 @@ class ToolManager:
             if len(non_core) >= 1 and unload_name not in self._tools_map and unload_name in external_tools:
                 self._tools_map[unload_name] = build_tool_dict(external_tools[unload_name], is_instance_method=False)
 
-            return f"'{name}' loaded."
+            return f"'{name}' loaded.\n{self._schema_line(name)}"
 
         return f"Error '{name}' not found in loadable tools"
 
@@ -192,6 +212,31 @@ class ToolManager:
             lines.append(f'"{name}" ({desc});' if desc else name)
         return "LOADED TOOLS:\n" + "\n".join(lines)
 
+    def _schema_line(self, name: str) -> str:
+        schema = self._tools_map[name].get("schema", {})
+        function = schema.get("function", {})
+        parameters = function.get("parameters", {"type": "object", "properties": {}})
+        description = function.get("description", "")
+        suffix = f" — {description}" if description else ""
+        return f"{name}: {parameters}{suffix}"
+
+    def loaded_tools_hint(self) -> str:
+        lines = [
+            "Use only invoke_function to call loaded functions.",
+            'Format: {"function_name":"<function>","args":{...}}',
+            "Loaded function schemas:",
+        ]
+        lines.extend(self._schema_line(name) for name in sorted(self._tools_map))
+        return "\n".join(lines)
+
+    def loaded_schemas_block(self) -> str:
+        """Схемы активных загруженных инструментов для блока после саммари (без отложенных на выгрузку)."""
+        names = sorted(n for n in self._tools_map if n not in self._pending_unload)
+        if not names:
+            return ""
+        lines = [self._schema_line(name) for name in names]
+        return f"{ENVIRONMENT_PREFIX} Loaded function schemas:\n" + "\n".join(lines) + f"\n{ENVIRONMENT_PREFIX_END}"
+
     def list_available(self) -> str:
         external_tools = load_external_plugins(_tools_directory())
         enabled = set(self._tools_map.keys())
@@ -209,13 +254,19 @@ class ToolManager:
 
     def trust_dir(self, path: str) -> str:
         abs_path = os.path.abspath(path)
+        if os.path.isfile(abs_path):
+            self.trusted_files.add(abs_path)
+            return f"Trusted file: {abs_path}"
         if not os.path.isdir(abs_path):
-            return f"Error '{path}' is not a directory"
+            return f"Error '{path}' is not a directory or file"
         self.trusted_dirs.add(abs_path)
         return f"Trusted: {abs_path}"
 
     def untrust_dir(self, path: str) -> str:
         abs_path = os.path.abspath(path)
+        if abs_path in self.trusted_files:
+            self.trusted_files.discard(abs_path)
+            return f"Untrusted file: {abs_path}"
         if abs_path in self.trusted_dirs:
             self.trusted_dirs.discard(abs_path)
             return f"Untrusted: {abs_path}"

@@ -33,6 +33,48 @@ class TestStreamInterrupt(unittest.TestCase):
             on_stream_chunk=lambda _: None,
         )
 
+    def test_stream_creation_failure_retries_with_notice(self):
+        agent = self.make_streaming_agent()
+        notices = []
+        agent.on_system_msg = notices.append
+        attempts = []
+
+        def stream(*args, **kwargs):
+            attempts.append(1)
+            if len(attempts) < 3:
+                yield {"error": "boom"}
+                return
+            yield stream_chunk(stream_delta(content="ok"))
+
+        with mock.patch("universal_agents.agent.LLMClient.open_stream", side_effect=stream), \
+             mock.patch("universal_agents.llm_client.LLMClient.close_stream"), \
+             mock.patch("universal_agents.agent_mixins.streaming_mixin.time.sleep") as sleep:
+            msg, err, _usage, _stopped = agent._call_with_streaming([])
+
+        self.assertIsNone(err)
+        self.assertEqual(msg.content, "ok")
+        self.assertEqual(len(attempts), 3)
+        self.assertEqual([c.args[0] for c in sleep.call_args_list], [1, 2])
+        self.assertEqual(sum("[API Retry]" in n for n in notices), 2)
+
+    def test_stream_creation_failure_gives_up_after_all_retries(self):
+        agent = self.make_streaming_agent()
+        agent.on_system_msg = lambda _text: None
+        attempts = []
+
+        def stream(*args, **kwargs):
+            attempts.append(1)
+            yield {"error": "boom"}
+
+        with mock.patch("universal_agents.agent.LLMClient.open_stream", side_effect=stream), \
+             mock.patch("universal_agents.llm_client.LLMClient.close_stream"), \
+             mock.patch("universal_agents.agent_mixins.streaming_mixin.time.sleep"):
+            msg, err, _usage, _stopped = agent._call_with_streaming([])
+
+        self.assertIsNone(msg)
+        self.assertTrue(err.startswith("stream creation failed"))
+        self.assertEqual(len(attempts), 5)
+
     def test_stop_check_shortcuts_stream_returns_partial(self):
         agent = self.make_streaming_agent()
         seen = []

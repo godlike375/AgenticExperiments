@@ -85,6 +85,10 @@ class TestDetectBrokenCallWithoutGate(unittest.TestCase):
         self.assertTrue(detect_broken_call('read({"path": "a.txt"})', self.NAMES, require_tag=False))
         self.assertTrue(detect_broken_call("read({}).", self.NAMES, require_tag=False))
 
+    def test_tool_call_closing_tag_is_broken_call(self):
+        content = '<invoke_function>{"function_name":"read","args":{}}</function></tool_call>'
+        self.assertTrue(detect_broken_call(content, self.NAMES, require_tag=False))
+
     def test_strong_tag_inside_is_broken_call(self):
         self.assertTrue(detect_broken_call("<tool>read</tool>", self.NAMES, require_tag=False))
 

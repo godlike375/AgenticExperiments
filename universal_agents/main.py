@@ -20,12 +20,12 @@ try:
 except ImportError:
     _PC_TOOLS = ()
 
-LOADABLE_TOOLS = [run_bash_host.__name__] + [t.__name__ for t in _PC_TOOLS]
+LOADABLE_TOOLS = [t.__name__ for t in _PC_TOOLS]
 
 
 PRELOADED_TOOLS = (load_tool.__name__, read.__name__, line_range_edit.__name__,
                    match_replace_edit.__name__, cwd.__name__, search.__name__,
-                   run_powershell.__name__, respond_to_system.__name__)
+                   run_powershell.__name__, run_bash_host.__name__, respond_to_system.__name__)
 
 def build_allowed_tools(loadable: Iterable[str], preloaded: Iterable[str]) -> list[str]:
     return list(dict.fromkeys(list(loadable) + list(preloaded)))
@@ -88,6 +88,7 @@ if __name__ == "__main__":
         f"* {root_line}\n"
         f"* '{ENVIRONMENT_PREFIX}' prefix means system says something.\n"
         f"* Already loaded tools to use:\n{loaded_tools_text}\n"
+        f"* Function invocation protocol:\n{tools_manager.loaded_tools_hint()}\n"
         f"* Loadable tools (load - '{load_tool.__name__}' + 'name' arg):\n{available_tools_text}\n"
         "* Do NOT repeat identical tool calls with same args. You can call only 1 tool at 1 turn/message. "
         "You must wait for tool results before making next calls.\n"

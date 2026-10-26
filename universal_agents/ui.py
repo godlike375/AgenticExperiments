@@ -358,16 +358,18 @@ class CLI:
 
     def cmd_trust(self, parts: list[str]):
         if len(parts) < 2:
-            if self.agent.trusted_dirs:
-                dirs = "\n".join(f"  {d}" for d in sorted(self.agent.trusted_dirs))
-                ConsoleUI.system_msg(f"Trusted directories:\n{dirs}")
+            if self.agent.trusted_dirs or self.agent.trusted_files:
+                items = sorted(self.agent.trusted_dirs) + sorted(self.agent.trusted_files)
+                dirs = "\n".join(f"  {d}" for d in items)
+                ConsoleUI.system_msg(f"Trusted paths:\n{dirs}")
             else:
-                ConsoleUI.system_msg("No trusted directories. Usage: /trust <directory>")
+                ConsoleUI.system_msg("No trusted paths. Usage: /trust <directory or file>")
             return
         path = parts[1]
         if path == "--clear":
             self.agent.trusted_dirs.clear()
-            ConsoleUI.system_msg("All trusted directories cleared")
+            self.agent.trusted_files.clear()
+            ConsoleUI.system_msg("All trusted paths cleared")
             return
         result = self.agent.trust_dir(path)
         ConsoleUI.system_msg(result)

@@ -9,6 +9,8 @@ from universal_agents.generation import GenerationParams
 from universal_agents.llm_client import apply_prefill
 from universal_agents.models import AssistantMessage, ToolCall, ToolResult
 from universal_agents.tool_parsing import tc_name, tc_args, detect_broken_call, args_are_valid
+from universal_agents.tool_parsing import parse_tool_args
+from universal_agents.tool_manager import DISPATCH_TOOL_NAME
 from universal_agents.tools.builtin import respond_to_system
 
 _NO_COMMENT_PREFILL = 'LLM Agent: "'
@@ -278,7 +280,7 @@ class ResponseMixin:
             fallback_tc = assistant_msg.tool_calls[0]
 
             for tc in assistant_msg.tool_calls:
-                if tc.name in self._all_tools and args_are_valid(tc.arguments):
+                if (tc.name in self._all_tools or tc.name in (DISPATCH_TOOL_NAME, "call_tool")) and args_are_valid(tc.arguments):
                     valid_tc = tc
                     break
 
@@ -316,7 +318,14 @@ class ResponseMixin:
 
         pending_before = self._pending_operation is not None
         self._append_assistant(assistant_msg)
-        if pending_before and respond_to_system.__name__ not in [tc.name for tc in assistant_msg.tool_calls]:
+        if pending_before and not any(
+            tc.name == respond_to_system.__name__
+            or (
+                tc.name in (DISPATCH_TOOL_NAME, "call_tool")
+                and parse_tool_args(tc.arguments).get("function_name", parse_tool_args(tc.arguments).get("name")) == respond_to_system.__name__
+            )
+            for tc in assistant_msg.tool_calls
+        ):
             self._mark_confirmation_junk(assistant_msg)
 
         if not assistant_msg.has_tool_calls():
@@ -334,7 +343,13 @@ class ResponseMixin:
         name_by_id = {tc.id: tc.name for tc in assistant_msg.tool_calls}
         for tr in tool_results:
             tname = name_by_id.get(tr.tool_call_id, "")
-            if tname == respond_to_system.__name__:
+            call = next((tc for tc in assistant_msg.tool_calls if tc.id == tr.tool_call_id), None)
+            dispatched_name = (
+                parse_tool_args(call.arguments).get("name")
+                if call is not None and call.name in (DISPATCH_TOOL_NAME, "call_tool")
+                else tname
+            )
+            if dispatched_name == respond_to_system.__name__:
                 if pending_before and tr.is_error and not tr.is_user_denied:
                     self._mark_confirmation_junk(assistant_msg)
                     self._mark_confirmation_junk(tr)

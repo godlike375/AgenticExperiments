@@ -392,8 +392,9 @@ class InProcessStream:
 
         try:
             self._client = httpx.Client(timeout=http_timeout)
+            headers = {"Authorization": f"Bearer {Config.API_TOKEN}"} if Config.API_TOKEN else None
             self._response = self._client.send(
-                self._client.build_request("POST", url, json=body),
+                self._client.build_request("POST", url, json=body, headers=headers),
                 stream=True,
             )
             self._response.raise_for_status()

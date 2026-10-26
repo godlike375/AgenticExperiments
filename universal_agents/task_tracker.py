@@ -7,6 +7,7 @@ from universal_agents.config import Config
 from universal_agents.constants import ENVIRONMENT_PREFIX, ENVIRONMENT_PREFIX_END, err, ok
 from universal_agents.models import AssistantMessage, UserMessage, ToolResult
 from universal_agents.tool_parsing import parse_tool_args
+from universal_agents.tool_manager import DISPATCH_TOOL_NAME
 from universal_agents.tools.builtin import (
     have_done as _have_done_tool,
     load_tool as _load_tool_tool,
@@ -77,14 +78,24 @@ def mark_task_done(agent: AgentContext, task_id: str) -> str:
 
 
 def _parse_call_args(tc) -> dict:
-    return parse_tool_args(getattr(tc, "arguments", None) or "{}")
+    args = parse_tool_args(getattr(tc, "arguments", None) or "{}")
+    if getattr(tc, "name", None) in (DISPATCH_TOOL_NAME, "call_tool"):
+        nested = args.get("arguments", {})
+        return nested if isinstance(nested, dict) else {}
+    return args
+
+
+def _actual_tool_name(tc) -> str:
+    if getattr(tc, "name", None) not in (DISPATCH_TOOL_NAME, "call_tool"):
+        return getattr(tc, "name", "") or ""
+    return parse_tool_args(getattr(tc, "arguments", None) or "{}").get("name", "")
 
 
 def _last_plan_position(history: list) -> int:
     pos = -1
     for i, msg in enumerate(history):
         if isinstance(msg, AssistantMessage) and msg.has_tool_calls():
-            if any(tc.name == PLAN_TOOL for tc in msg.tool_calls):
+            if any(_actual_tool_name(tc) == PLAN_TOOL for tc in msg.tool_calls):
                 pos = i
     return pos
 
@@ -98,7 +109,7 @@ def _last_real_work_position(history: list, after: int) -> int:
         if i <= after or not isinstance(msg, AssistantMessage) or not msg.has_tool_calls():
             continue
         for tc in msg.tool_calls:
-            if (tc.name or "") not in _META_TOOLS:
+            if _actual_tool_name(tc) not in _META_TOOLS:
                 pos = i
     return pos
 
@@ -109,7 +120,7 @@ def _last_done_position(history: list, after: int) -> int:
     for i, msg in enumerate(history):
         if i <= after or not isinstance(msg, AssistantMessage) or not msg.has_tool_calls():
             continue
-        if any((tc.name or "") == DONE_TOOL and tc.id in ok_results for tc in msg.tool_calls):
+        if any(_actual_tool_name(tc) == DONE_TOOL and tc.id in ok_results for tc in msg.tool_calls):
             pos = i
     return pos
 
@@ -134,7 +145,7 @@ def _done_marker_positions(history: list, leaves: list, after: int = -1) -> dict
         if i <= after or not isinstance(msg, AssistantMessage) or not msg.has_tool_calls():
             continue
         for tc in msg.tool_calls:
-            if tc.name != DONE_TOOL:
+            if _actual_tool_name(tc) != DONE_TOOL:
                 continue
             ridx = result_idx.get(tc.id)
             if ridx is None:
@@ -220,7 +231,7 @@ def _leaf_block(history: list, leaf: str, leaves: list, plan_pos: int) -> tuple:
         m = history[j]
         if (
             isinstance(m, AssistantMessage) and m.has_tool_calls()
-            and any(tc.name == DONE_TOOL and tc.id == call_id for tc in m.tool_calls)
+            and any(_actual_tool_name(tc) == DONE_TOOL and tc.id == call_id for tc in m.tool_calls)
         ):
             hd_call = j
             break
