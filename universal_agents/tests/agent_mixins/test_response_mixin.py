@@ -600,9 +600,9 @@ class TestNoCommentResponse(unittest.TestCase):
             tools_config=["double_me"],
             external_plugins={"double_me": double_me},
         )
-        agent._thinking_enabled = True
         msg = AssistantMessage(
             content="",
+            reasoning_content="Сначала проверю значение, затем вызову двойник.",
             tool_calls=[ToolCall(id="t1", name="double_me", arguments='{"value": 21}')],
         )
         text, tool_err, broken, rerun = agent._process_llm_response(msg)

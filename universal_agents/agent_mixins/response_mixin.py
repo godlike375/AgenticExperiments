@@ -295,7 +295,7 @@ class ResponseMixin:
         if (
             assistant_msg.has_tool_calls()
             and not substantive
-            and reasoning_effort == "none"
+            and not (assistant_msg.reasoning_content or "").strip()
         ):
             tool_names = [tc.name for tc in assistant_msg.tool_calls]
             if no_comment_retry_left > 0:
