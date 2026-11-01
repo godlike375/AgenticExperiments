@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from unittest import mock
 
+from universal_agents.config import Config
 from universal_agents.tools.fs import is_protected_path
 
 
@@ -10,6 +11,9 @@ class TestIsProtectedPath(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.mkdtemp()
         self.addCleanup(lambda: __import__("shutil").rmtree(self._tmp, ignore_errors=True))
+        patcher = mock.patch.object(Config, "API_URL", "https://api.example.com/v1")
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def _touch(self, rel: str) -> str:
         path = os.path.join(self._tmp, *rel.split("/"))
@@ -64,6 +68,39 @@ class TestIsProtectedPath(unittest.TestCase):
         open(keep, "w").close()
         with mock.patch("universal_agents.tools.fs.find_project_root", return_value=root):
             self.assertFalse(is_protected_path(keep))
+
+
+class TestLocalApiDisablesProtection(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(self._tmp, ignore_errors=True))
+        self._env = os.path.join(self._tmp, ".env")
+        open(self._env, "w").close()
+
+    def _check(self, url: str) -> bool:
+        with mock.patch("universal_agents.tools.fs.Config") as cfg:
+            cfg.API_URL = url
+            cfg.LOCAL_API_DISABLES_SECRET_PROTECTION = True
+            return is_protected_path(self._env)
+
+    def test_local_urls_disable_protection(self):
+        for url in ("http://localhost:1234/v1", "http://127.0.0.1:1234/v1",
+                    "http://192.168.50.196:1234/v1", "http://10.0.0.5/v1"):
+            with self.subTest(url=url):
+                self.assertFalse(self._check(url))
+
+    def test_remote_url_keeps_protection(self):
+        self.assertTrue(self._check("https://api.openai.com/v1"))
+
+    def test_flag_off_keeps_protection_for_local(self):
+        with mock.patch("universal_agents.tools.fs.Config") as cfg:
+            cfg.API_URL = "http://localhost:1234/v1"
+            cfg.LOCAL_API_DISABLES_SECRET_PROTECTION = False
+            self.assertTrue(is_protected_path(self._env))
+
+    def test_switching_url_takes_effect_immediately(self):
+        self.assertFalse(self._check("http://localhost:1234/v1"))
+        self.assertTrue(self._check("https://api.openai.com/v1"))
 
 
 if __name__ == "__main__":

@@ -53,12 +53,12 @@ class Config:
     DUPLICATE_CONTINUATION_TEMP: float = round(BOOST_TEMP / 4, 2)  # спокойная достройка после расхождения
     SUMMARY_DUPLICATE_TEMP: float = round(BOOST_TEMP / 2, 2)  # буст при тождественном повторе саммари (мягче полного BOOST_TEMP)
 
-    MAX_CONTEXT_TOKENS: int = 120000
-    TEMP: float = 0.6
-    TOP_P: float = 0.93
+    MAX_CONTEXT_TOKENS: int = 130000
+    TEMP: float = 0.75
+    TOP_P: float = 0.85
     FREQUENCY_PENALTY: float = 0.0
     PRESENCE_PENALTY: float = 0.0
-    MIN_P: Optional[float] = 0.065
+    MIN_P: Optional[float] = 0.0
     MAX_OUTPUT_TOKENS: int = min(32000, int(MAX_CONTEXT_TOKENS / 1.5))
     TIMEOUT: int = 1800
     MAX_ITER: int = 250
@@ -94,6 +94,7 @@ class Config:
     HAVE_DONE_TRIM_THRESHOLD: int = 250
 
     AUTO_TRUST_GIT_ROOT: bool = True
+    LOCAL_API_DISABLES_SECRET_PROTECTION: bool = True
 
     CHARS_PER_TOKEN: float = 2.35
     MIN_TOKENS_TO_SUMMARIZE: int = 180
@@ -107,8 +108,8 @@ class Config:
     PERIPHERAL_SIDE_FACTOR: float = 1.1
     PERIPHERAL_LINE_CONTEXT: int = 1
 
-    MAX_READ_CHARS_PER_CALL: int = 4500
-    MAX_READ_LINES_PER_CALL: int = 80
+    MAX_READ_CHARS_PER_CALL: int = 8000
+    MAX_READ_LINES_PER_CALL: int = 150
 
     DISABLE_TOOL_AUTO_SUMMARIZATION: bool = True
 

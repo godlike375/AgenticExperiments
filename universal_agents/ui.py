@@ -123,6 +123,7 @@ class CLI:
             "/think_off": self.cmd_think_off,
             "/think": self.cmd_think,
             "/compact_history": self.cmd_compact_history,
+            "/max_context": self.cmd_max_context
         }
 
     def cmd_regen(self, parts: list[str]):
@@ -380,6 +381,13 @@ class CLI:
             return
         result = self.agent.untrust_dir(parts[1])
         ConsoleUI.system_msg(result)
+
+    def cmd_max_context(self, parts: list[str]):
+        if len(parts) < 2:
+            ConsoleUI.system_msg("Usage: /max_context <number>")
+            return
+        self.agent.token_tracker.max_context_tokens = int(parts[1])
+        ConsoleUI.system_msg(f"Maximum context size has been set to {parts[1]}")
 
     def _request_stop(self):
         self.agent.request_stop()

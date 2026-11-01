@@ -219,7 +219,7 @@ class LLMAgent(
         self.loop_detector = LoopDetector()
         self._temp_override: Optional[float] = None
         self._original_temp = temp
-        self._thinking_enabled: bool = False
+        self._thinking_enabled: bool = True
         self._thinking_once: bool = False
         self.on_stream_chunk = on_stream_chunk
         self.on_stream_start = on_stream_start

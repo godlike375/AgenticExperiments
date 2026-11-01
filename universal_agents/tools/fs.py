@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import datetime
 import difflib
+import ipaddress
 import os
 import re as _re
 import stat
 import fnmatch as _fnmatch
 from pathlib import Path
+from urllib.parse import urlparse
 from typing import TYPE_CHECKING, Optional
 
 from universal_agents.config import Config
@@ -88,7 +90,24 @@ def _is_gitignored(p: str) -> bool:
     return ignored
 
 
+def _is_local_api_url(url: str) -> bool:
+    host = (urlparse(url).hostname or "").lower()
+    if host == "localhost" or host.endswith((".localhost", ".local")):
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return ip.is_loopback or ip.is_private or ip.is_link_local
+
+
+def _secret_protection_disabled() -> bool:
+    return Config.LOCAL_API_DISABLES_SECRET_PROTECTION and _is_local_api_url(Config.API_URL)
+
+
 def is_protected_path(path: str) -> bool:
+    if _secret_protection_disabled():
+        return False
     p = os.path.abspath(os.path.expanduser(path))
     if os.path.isdir(p):
         return False
