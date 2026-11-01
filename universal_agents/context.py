@@ -10,8 +10,6 @@ if TYPE_CHECKING:
     from universal_agents.history import ChatHistory
     from universal_agents.tool_manager import ToolManager
     from universal_agents.llm_client import TokenUsageTracker, LoopDetector
-    from universal_agents.file_states import FileStateTracker
-    from universal_agents.archive import HistoryArchive
     from universal_agents.generation import GenerationParams
 
 
@@ -22,12 +20,9 @@ class AgentContext(Protocol):
     tools_manager: "ToolManager"
     token_tracker: "TokenUsageTracker"
     loop_detector: "LoopDetector"
-    file_states: "FileStateTracker"
-    archive: "HistoryArchive"
     _gen_params: "GenerationParams"
     _all_tools: dict
     _compacted_task_ids: set
-    _read_registrations: list
     _auto_summarize_suppressed: bool
 
     task_plan: list

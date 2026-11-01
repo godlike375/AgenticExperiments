@@ -459,10 +459,6 @@ class SummaryService:
 
         original_len = agent.history.content_len(start_id, end_id)
 
-        if Config.MEMORY_ARCHIVE_ENABLED and hasattr(agent, "archive"):
-            added = agent.archive.append_messages(messages[start_id:end_id + 1])
-            agent.on_system_msg(f"[ARCHIVE] Stored {added} original message(s) for recall.")
-
         history_msgs = prepare_messages_for_api(agent, normalize=False)
         FORBID_TOOLS_MSG = (
             f"{ENVIRONMENT_PREFIX} Возможно, ты попытался вызвать инструмент, но здесь "
@@ -531,6 +527,6 @@ class SummaryService:
         agent._auto_summarize_suppressed = False
         agent.on_system_msg(
             f"[{tag}] Session summary written "
-            f"(-{final_reduction:.0%}); originals archived for recall."
+            f"(-{final_reduction:.0%})."
         )
         return True

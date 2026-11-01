@@ -14,7 +14,6 @@ from universal_agents.models import (
     ToolResult,
     UserMessage,
 )
-from universal_agents.archive import HistoryArchive
 from universal_agents.tools.fs import read as _read_tool
 from universal_agents.tools.fs import search as _search_tool
 
@@ -32,7 +31,6 @@ SUMMARY_TEXT = (
 class FakeAgent(MemoryMixin):
     def __init__(self):
         self.history = ChatHistory("sys")
-        self.archive = HistoryArchive()
         self.on_system_msg = lambda x: None
         self.token_tracker = TokenUsageTracker("sys", 50000)
         self.task_plan = []
@@ -96,10 +94,6 @@ class TestFirstCompaction(unittest.TestCase):
         self.assertTrue(msgs[1].is_summary)
         self.assertIn(SUMMARY_TEXT, msgs[1].content)
         self.assertEqual(msgs[2].content, "continue please")
-
-    def test_archive_got_originals(self):
-        self._run()
-        self.assertEqual(len(self.agent.archive), 3)
 
     def test_seq_assigned_unique_and_stable(self):
         self._run()
@@ -172,16 +166,6 @@ class TestSecondCompaction(unittest.TestCase):
         )
         self.assertNotIn(f"{SUMMARY_MARKER}:", instruction)
 
-    def test_old_summary_archived_before_rewrite(self):
-        archive_len_before = len(self.agent.archive)
-        with mock.patch(
-            "universal_agents.llm_client.LLMClient.call",
-            side_effect=_compression_router(),
-        ):
-            self.agent._auto_summarize_dialogue()
-        self.assertGreater(len(self.agent.archive), archive_len_before)
-        self.assertIn("latex", self.agent.archive.search("latex"))
-
     def test_failure_leaves_history_untouched(self):
         notes = []
         self.agent.on_system_msg = notes.append
@@ -216,7 +200,6 @@ class TestPersistenceRoundTrip(unittest.TestCase):
         _seed_dialog(agent)
         with mock.patch("universal_agents.llm_client.LLMClient.call", side_effect=_compression_router()):
             agent._auto_summarize_dialogue()
-        agent.archive.append_messages(agent.history.get_all()[1:2])
         agent.task_plan = ["t1"]
         agent.task_plan_map = {"t1": {"title": "audit"}}
         agent._compacted_task_ids = {"t1"}
@@ -225,8 +208,8 @@ class TestPersistenceRoundTrip(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             path = os.path.join(td, "h.json")
             agent.history.save(
-                path, loaded_tools=[_read_tool.__name__], file_states={},
-                extras={"archive": agent.archive.to_list(), "plan_state": plan_state_to_dict(agent)},
+                path, loaded_tools=[_read_tool.__name__],
+                extras={"plan_state": plan_state_to_dict(agent)},
             )
             fresh = ChatHistory("sys")
             tools, fs, summaries = fresh.load(path)
@@ -235,10 +218,6 @@ class TestPersistenceRoundTrip(unittest.TestCase):
             smry = [m for m in fresh.get_all() if isinstance(m, UserMessage) and m.is_summary]
             self.assertEqual(len(smry), 1)
             self.assertIn(SUMMARY_TEXT, smry[0].content)
-            self.assertEqual(len(extras["archive"]), 4)
-
-            restored = HistoryArchive.from_list(extras["archive"])
-            self.assertIn("dolphins", restored.search("dolphins"))
 
             new_agent = FakeAgent()
             restore_plan_state(new_agent, extras["plan_state"])
@@ -247,22 +226,6 @@ class TestPersistenceRoundTrip(unittest.TestCase):
             nxt = fresh.next_seq
             fresh.add(UserMessage("post-load"))
             self.assertEqual(fresh.get_all()[-1].seq, nxt)
-
-
-class TestRecallTools(unittest.TestCase):
-    def test_recall_tools_end_to_end(self):
-        from universal_agents.tools import memory as mem_tools
-
-        agent = FakeAgent()
-        _seed_dialog(agent)
-        with mock.patch("universal_agents.llm_client.LLMClient.call", side_effect=_compression_router()):
-            agent._auto_summarize_dialogue()
-
-        out = mem_tools.recall_search(agent, query="dolphins")
-        self.assertIn("seq=", out)
-        out_read = mem_tools.recall_read(agent, from_seq=2, to_seq=2)
-        self.assertIn("#2", out_read)
-        self.assertIn("long reasoning", out_read.replace("\n", " "))
 
 
 class TestSummaryHelpers(unittest.TestCase):

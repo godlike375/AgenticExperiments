@@ -218,7 +218,12 @@ class ResponseMixin:
                 f"'{_NO_COMMENT_PREFILL}' prefill (retries left: {group.retries_left})."
             )
             return None
-        if not group.tool_calls:
+        if group.tool_calls:
+            self.on_system_msg(
+                f"[SIM REASONING] No answer text after </{group.tag}>; "
+                f"tool call accepted as-is."
+            )
+        else:
             self.on_system_msg(
                 "[SIM REASONING] Empty answer; continuation budget exhausted; "
                 "accepting response as-is."
@@ -295,6 +300,7 @@ class ResponseMixin:
         if (
             assistant_msg.has_tool_calls()
             and not substantive
+            and reasoning_effort == "none"
             and not (assistant_msg.reasoning_content or "").strip()
         ):
             tool_names = [tc.name for tc in assistant_msg.tool_calls]

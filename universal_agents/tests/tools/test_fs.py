@@ -241,16 +241,9 @@ class TestMatchReplaceEdit(unittest.TestCase):
 
 
 def _make_fake_agent():
-    agent = SimpleNamespace(
-        file_states=SimpleNamespace(
-            _history=[],
-            should_skip=lambda path, disk_hash: False,
-            record=lambda path, disk_hash, content_hash: None,
-        ),
-        _read_registrations=[],
+    return SimpleNamespace(
         on_system_msg=lambda *a, **k: None,
     )
-    return agent
 
 
 class TestReadBatchMode(unittest.TestCase):
@@ -273,6 +266,7 @@ class TestReadBatchMode(unittest.TestCase):
 
     def test_no_range_returns_first_batch_plus_periphery(self):
         Config.BIG_FILE_SKELETON = False
+        Config.MAX_READ_LINES_PER_CALL = 80
         path = self._write("big.py", total_lines=120)
         agent = _make_fake_agent()
         out = _read_tool(agent, path)
@@ -285,7 +279,6 @@ class TestReadBatchMode(unittest.TestCase):
         peri_idx = [int(l.split(" ")[0][1:]) for l in out.splitlines() if l.startswith("~")]
         self.assertTrue(all(i > 80 for i in peri_idx))
         self.assertIn(f"Use start_line=81", out)
-        self.assertEqual(agent._read_registrations, [path])
 
     def test_batch_respects_char_limit(self):
         Config.BIG_FILE_SKELETON = False
@@ -297,25 +290,15 @@ class TestReadBatchMode(unittest.TestCase):
         nums = {int(l.split(" ")[0]) for l in out.splitlines() if l[:1].isdigit()}
         self.assertTrue(all(n <= Config.MAX_READ_LINES_PER_CALL for n in nums))
 
-    def test_reread_same_hash_blocked(self):
+    def test_reread_same_hash_allowed(self):
         Config.BIG_FILE_SKELETON = False
+        Config.MAX_READ_LINES_PER_CALL = 80
         path = self._write("once.py", total_lines=120)
-
-        seen = {}
-        agent = SimpleNamespace(
-            file_states=SimpleNamespace(
-                _seen=seen,
-                should_skip=lambda path, disk_hash: path in seen,
-                record=lambda path, disk_hash, content_hash: seen.update({path: disk_hash}),
-            ),
-            _read_registrations=[],
-            on_system_msg=lambda *a, **k: None,
-        )
+        agent = _make_fake_agent()
         first = _read_tool(agent, path)
         self.assertIn("Full focus lines 1-80/120", first)
         second = _read_tool(agent, path)
-        self.assertNotIn("Full focus lines", second)
-        self.assertIn("re-reading", second)
+        self.assertIn("Full focus lines 1-80/120", second)
 
     def test_range_read_unaffected(self):
         Config.BIG_FILE_SKELETON = False
@@ -433,6 +416,15 @@ class TestEditFileEndToEnd(unittest.TestCase):
         result = respond_to_system(agent, "yes")
         self.assertIn("Replaced", result)
         self.assertEqual(open(f, encoding="utf-8").read(), "hello")
+
+    def test_full_flow_apply_edit_tool(self):
+        from universal_agents.tools.builtin import apply_edit
+        f = self._path("flow_apply.py", "val = 1\n")
+        preview, resolve, _ask = line_range_edit(f, "val = 2\n", start_line=1, end_line=1, dry_run=True)
+        agent = _PendingAgent(resolve)
+        result = apply_edit(agent)
+        self.assertIn("Replaced", result)
+        self.assertEqual(open(f, encoding="utf-8").read(), "val = 2\n")
 
 
     def test_dry_run_error_string_is_not_config_error(self):

@@ -3,16 +3,17 @@ import subprocess
 from universal_agents.tool import tool
 from universal_agents.constants import err
 from universal_agents.subprocess_utils import run_capture
-from universal_agents import tool_session
 
 
 class UnifiedDockerAgent:
     CONTAINER_NAME = "llm-unified-agent"
     IMAGE = "python:3.11-slim"
 
+    _session_data: dict = {}
+
     @classmethod
     def _session(cls) -> dict:
-        return tool_session.get_session()
+        return cls._session_data
 
     @classmethod
     def _container_name(cls) -> str:

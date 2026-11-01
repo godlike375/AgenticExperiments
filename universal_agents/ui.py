@@ -123,7 +123,7 @@ class CLI:
             "/think_off": self.cmd_think_off,
             "/think": self.cmd_think,
             "/compact_history": self.cmd_compact_history,
-            "/max_context": self.cmd_max_context
+            "/max_context": self.cmd_max_context,
         }
 
     def cmd_regen(self, parts: list[str]):
@@ -219,23 +219,9 @@ class CLI:
     def cmd_save(self, parts: list[str]):
         filename = parts[1] if len(parts) > 1 else "default_history.json"
         try:
-            from universal_agents.task_tracker import plan_state_to_dict
-            tool_names = list(self.agent._all_tools.keys())
-            extras = {
-                "archive": self.agent.archive.to_list(),
-                "plan_state": plan_state_to_dict(self.agent),
-                "cwd": os.getcwd(),
-                "project_root": get_project_root_override(),
-            }
-            self.agent.history.save(
-                filename,
-                loaded_tools=tool_names,
-                file_states=self.agent.file_states.to_dict(),
-                extras=extras,
-            )
+            self.agent.save_history(filename)
             ConsoleUI.system_msg(
-                f"History saved to '{filename}' (tools: {tool_names}, "
-                f"file_states: {len(self.agent.file_states)}, archive: {len(self.agent.archive)})"
+                f"History saved to '{filename}' (tools: {list(self.agent._all_tools.keys())})"
             )
         except Exception as e:
             ConsoleUI.system_msg(f"Error saving history: {e}")
@@ -246,12 +232,9 @@ class CLI:
             ConsoleUI.system_msg(f"File '{filename}' not found")
             return
         try:
-            from universal_agents.archive import HistoryArchive
             from universal_agents.task_tracker import restore_plan_state
             loaded_tools, file_states, summaries = self.agent.history.load(filename)
             extras = self.agent.history.last_loaded_extras
-            self.agent.file_states.from_dict(file_states)
-            self.agent.archive = HistoryArchive.from_list(extras.get("archive") or [])
             restore_plan_state(self.agent, extras.get("plan_state"))
             saved_root = extras.get("project_root")
             if saved_root:
@@ -266,7 +249,7 @@ class CLI:
             self.agent._prev_prefix_hashes = {}
             ConsoleUI.system_msg(
                 f"History loaded. Total messages: {len(self.agent.history)}. "
-                f"Tools restored: {loaded_tools}. Archive entries: {len(self.agent.archive)}. "
+                f"Tools restored: {loaded_tools}. "
                 f"CWD: {os.getcwd()}"
             )
             print("\n" + "="*40 + "\n🔄 LOADED HISTORY:\n" + "="*40)

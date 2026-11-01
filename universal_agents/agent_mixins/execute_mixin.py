@@ -17,8 +17,20 @@ from universal_agents.tool_manager import DISPATCH_TOOL_NAME
 from universal_agents.tool import ToolOutput
 from universal_agents.subprocess_utils import set_interrupt_event, clear_interrupt_event
 from universal_agents.exceptions import GenerationInterrupted
-from universal_agents.group_worker import make_worker_resolve
 from universal_agents.tools.fs import read as _read_tool
+
+
+def _make_tool_resolve(worker, name: str, args: dict, stop_check=None):
+    def resolve(agent, text):
+        raw = (text or "").strip().lower()
+        first = "".join(c for c in (raw.split(" ", 1)[0] if raw else "") if c.isalnum())
+        if first in ("yes", "y", "true", "да"):
+            status, val = worker.call(name, args, dry_run=False, stop_check=stop_check)
+            if status == "error":
+                return f"Error: {val}"
+            return val
+        return None
+    return resolve
 
 
 class ExecuteMixin:
@@ -135,26 +147,27 @@ class ExecuteMixin:
                         continue
 
                 if tool_info.get('requires_model_confirmation', False):
-                    if tool_info.get('is_external') and self.group_manager.isolated:
-                        group = tool_info.get('group', 'internal')
-                        wr = self.group_manager.call(
-                            group, name, args_dict, dry_run=True, stop_check=self._stop_check
+                    if tool_info.get('is_external') and getattr(self, "tool_worker", None) and self.tool_worker.isolated:
+                        status, val = self.tool_worker.call(
+                            name, args_dict, dry_run=True, stop_check=self._stop_check
                         )
-                        if wr.status == "error":
-                            self.on_system_msg(f"⚠️ [ERROR] Tool '{name}' dry_run failed: {wr.value}")
-                            results.append(ToolResult.error(tc.id, result_name, wr.value))
+                        if status == "error" and f"Unknown tool '{name}'" in str(val):
+                            status, val = "fallback", None
+                        if status == "error":
+                            self.on_system_msg(f"⚠️ [ERROR] Tool '{name}' dry_run failed: {val}")
+                            results.append(ToolResult.error(tc.id, result_name, val))
                             continue
-                        if wr.status == "ok":
-                            text = wr.value
+                        if status == "ok":
+                            text = val
                             if isinstance(text, str) and is_error_content(text):
                                 results.append(ToolResult(tc.id, result_name, text, is_error=True))
                             else:
                                 results.append(ToolResult.success(tc.id, result_name, str(text)))
                             continue
-                        preview, ask = wr.value
+                        preview, ask = val
                         self.set_pending_operation({
-                            "resolve": make_worker_resolve(
-                                self.group_manager, group, name, args_dict, self._stop_check
+                            "resolve": _make_tool_resolve(
+                                self.tool_worker, name, args_dict, self._stop_check
                             ),
                             "tool_name": name,
                         })
@@ -204,12 +217,14 @@ class ExecuteMixin:
                     handler = tool_info['handler']
                     if tool_info.get('has_agent_param') or tool_info.get('is_instance_method'):
                         full_result = handler(self, **args_dict)
-                    elif tool_info.get('is_external'):
-                        group = tool_info.get('group', 'internal')
-                        wr = self.group_manager.call(group, name, args_dict, stop_check=self._stop_check)
-                        if wr.status == "error":
-                            raise RuntimeError(wr.value)
-                        full_result = wr.value
+                    elif tool_info.get('is_external') and getattr(self, "tool_worker", None) and self.tool_worker.isolated:
+                        status, val = self.tool_worker.call(name, args_dict, stop_check=self._stop_check)
+                        if status == "error" and f"Unknown tool '{name}'" in str(val) and handler:
+                            full_result = handler(**args_dict)
+                        elif status == "error":
+                            raise RuntimeError(val)
+                        else:
+                            full_result = val
                     else:
                         full_result = handler(**args_dict)
                     result_images: list[str] = []
@@ -231,8 +246,6 @@ class ExecuteMixin:
                             )
                         tr = ToolResult.success(tc.id, result_name, content)
                         self._tool_usage[name] = self._tool_usage.get(name, 0) + 1
-                        if name == _read_tool.__name__ and self._read_registrations:
-                            self.file_states.mark_tool_call(self._read_registrations.pop(0), tr.tool_call_id)
                         if name == _read_tool.__name__:
                             tr.skip_summarize = True
 

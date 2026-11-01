@@ -66,5 +66,5 @@ def build_tool_dict(func: Callable, is_instance_method: bool) -> dict:
         "self_truncating": getattr(func, '_self_truncating', False),
         "group": group,
         "hidden": getattr(func, '_tool_hidden', False),
-        "is_external": (not has_agent) and group != "internal",
+        "is_external": not has_agent and not is_instance_method,
     }

@@ -9,7 +9,7 @@ from universal_agents.ui import ConsoleUI, CLI
 from universal_agents.constants import ENVIRONMENT_PREFIX, ENVIRONMENT_PREFIX_END
 from universal_agents.project_root import find_project_root, set_project_root
 from universal_agents.config import Config
-from universal_agents.tools.builtin import respond_to_system, load_tool
+from universal_agents.tools.builtin import respond_to_system, load_tool, apply_edit, complete_milestone
 from universal_agents.tools.fs import cwd, line_range_edit, match_replace_edit, read, search
 from universal_agents.tools.host_shell import run_bash_host, run_powershell
 try:
@@ -25,7 +25,7 @@ LOADABLE_TOOLS = [t.__name__ for t in _PC_TOOLS]
 
 PRELOADED_TOOLS = (load_tool.__name__, read.__name__, line_range_edit.__name__,
                    match_replace_edit.__name__, cwd.__name__, search.__name__,
-                   run_powershell.__name__, run_bash_host.__name__, respond_to_system.__name__)
+                   run_powershell.__name__, run_bash_host.__name__, respond_to_system.__name__, apply_edit.__name__, complete_milestone.__name__)
 
 def build_allowed_tools(loadable: Iterable[str], preloaded: Iterable[str]) -> list[str]:
     return list(dict.fromkeys(list(loadable) + list(preloaded)))

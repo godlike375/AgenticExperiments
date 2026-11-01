@@ -331,3 +331,60 @@ def restore_plan_state(agent: "AgentContext", data: dict | None) -> None:
     agent.task_plan_map = dict(data.get("task_plan_map") or {})
     agent._compacted_task_ids = set(data.get("compacted_task_ids") or [])
 
+
+
+def complete_milestone(
+    agent: AgentContext,
+    stage_name: str,
+    summary_of_work: str,
+    next_goals: str = "",
+) -> str:
+    """Завершает этап работы и сжимает детали предыдущих действий в краткий итог этапа (§3.3)."""
+    stage = (stage_name or "").strip()
+    summary = (summary_of_work or "").strip()
+    goals = (next_goals or "").strip()
+
+    if not stage:
+        return err(": complete_milestone requires a non-empty 'stage_name'.")
+    if not summary:
+        return err(": complete_milestone requires a 'summary_of_work' describing what was accomplished.")
+
+    history = agent.history.get_all()
+    start_idx = 1
+    for i in range(len(history) - 1, 0, -1):
+        msg = history[i]
+        if getattr(msg, "_is_milestone", False):
+            start_idx = i + 1
+            break
+
+    end_idx = len(history) - 1
+    compacted_count = 0
+    if end_idx > start_idx + 1:
+        milestone_text = (
+            f"=== MILESTONE COMPLETED: {stage} ===\n"
+            f"Summary of completed work:\n{summary}\n"
+        )
+        if goals:
+            milestone_text += f"\nNext goals:\n{goals}\n"
+
+        milestone_msg = UserMessage(content=ok(milestone_text))
+        milestone_msg._is_milestone = True
+
+        agent.history.replace_range(start_idx, end_idx, [milestone_msg])
+        agent._on_history_changed()
+        compacted_count = (end_idx - start_idx)
+
+    plan_map = getattr(agent, "task_plan_map", None) or {}
+    matched_task = None
+    if plan_map:
+        for tid, meta in plan_map.items():
+            if tid == stage or meta.get("title", "").lower() == stage.lower():
+                matched_task = tid
+                break
+        if matched_task:
+            agent._compacted_task_ids.add(matched_task)
+
+    agent.on_system_msg(
+        f"[MILESTONE] Stage '{stage}' completed. Compacted {compacted_count} intermediate messages into summary."
+    )
+    return ok(f" Milestone '{stage}' completed and history compacted for next stage.")

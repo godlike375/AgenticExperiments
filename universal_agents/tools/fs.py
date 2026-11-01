@@ -18,10 +18,8 @@ from universal_agents.constants import (
     err,
     ok,
 )
-from universal_agents.file_states import _content_hash
 from universal_agents.tool import tool
 from universal_agents.tools import builtin as _builtin
-from universal_agents import tool_session
 from universal_agents.project_root import find_project_root
 
 _PROTECTED_NAMES = {'.env', '.npmrc', '.pypirc', '.netrc', '.git-credentials', '.pgpass', '.my.cnf', '.htpasswd', '.authinfo', 'credentials', 'config', 'kubeconfig', 'sealedsecret.yaml', 'sealed-secrets', 'docker-compose.yml', 'secret.yaml', 'vault.yml', 'bitwarden-export.json', '1password-export.csv', 'passwords.csv', 'id_rsa', 'id_ed25519', 'id_ecdsa'}
@@ -237,15 +235,13 @@ class FS:
       group="workspace",
       path=("str", "Optional new working dir. Use '..' to go to the parent dir"))
 def cwd(path: str = None):
-    session = tool_session.get_session()
     if path:
         try:
             path = os.path.abspath(path)
             os.chdir(path)
-            session["cwd"] = os.getcwd()
             return ok(f"Has set cwd to {os.getcwd()}")
         except Exception as e:
-            raise RuntimeError(f"Error changing cwd: {e}")  # Было return, стало raise
+            raise RuntimeError(f"Error changing cwd: {e}")
     return os.getcwd()
 
 def _ensure_file_exists(path: str) -> bool:
@@ -299,28 +295,23 @@ def _apply_edit_result(
         def resolve(agent, text):
             raw = (text or "").strip().lower()
             first = _re.sub(r"[^\w]+", "", raw.split(" ", 1)[0]) if raw else ""
-            if first in ("yes", "y", "true", "да"):
+            if first in ("yes", "y", "true", "да", ""):
                 with open(path, "w", encoding="utf-8") as f:
                     f.write(new_content)
                 return f"Replaced {label} in {Path(path).name}"
             return None
 
         ask = (
-            f"{ENVIRONMENT_PREFIX} ATTENTION: this needs assistant's (AI) confirmation. Call '{_builtin.respond_to_system.__name__}' "
-            f"with text='yes' to apply it or text='no' to cancel. You can't continue with common prose {ENVIRONMENT_PREFIX_END}"
+            f"{ENVIRONMENT_PREFIX} ATTENTION: this needs assistant's (AI) confirmation. "
+            f"Call 'apply_edit' (or '{_builtin.respond_to_system.__name__}') with text='yes' to apply it "
+            f"or text='no' to cancel. You can't continue with common prose {ENVIRONMENT_PREFIX_END}"
         )
         return preview, resolve, ask
 
     with open(path, "w", encoding="utf-8") as f:
         f.write(new_content)
 
-    if report_text:
-        return report_text
-    new_lines = new_clean.splitlines()
-    result = [f"{label} → {len(new_lines)} lines:"]
-    for i, line in enumerate(new_lines):
-        result.append(f"+ L{report_start + i}: {line}")
-    return "\n".join(result)
+    return f"Replaced {label} in {Path(path).name}"
 
 
 @tool(
@@ -460,10 +451,8 @@ def _make_diff_preview(old_text: str, new_text: str, path: str,
     new_lines = new_text.splitlines()
     sm = difflib.SequenceMatcher(None, old_lines, new_lines)
     changed = False
-    rows: list[tuple[str, str]] = []
+    rows: list[tuple[str, str, int | None]] = []
 
-    # Дедуп только подряд идущих контекстных строк; добавленные/удалённые
-    # строки не схлопываются — каждая соответствует реальной строке файла.
     for tag, i1, i2, j1, j2 in sm.get_opcodes():
         if tag == "equal":
             continue
@@ -471,32 +460,37 @@ def _make_diff_preview(old_text: str, new_text: str, path: str,
         old_context_before = i1 - 1 if i1 > 0 else None
         new_context_after = j2 if j2 < len(new_lines) else None
 
-        def _add_ctx(line: str):
-            if rows and rows[-1] == (" ", line):
+        def _add_ctx(line: str, no: int | None):
+            if rows and rows[-1][:2] == (" ", line):
                 return
-            rows.append((" ", line))
+            rows.append((" ", line, no))
 
         if context_before:
-            _add_ctx(context_before)
+            _add_ctx(context_before, j1 if j1 > 0 else None)
         elif old_context_before is not None:
-            _add_ctx(old_lines[old_context_before])
+            _add_ctx(old_lines[old_context_before], j1 if j1 > 0 else None)
+
         for line in old_lines[i1:i2]:
-            rows.append(("-", line))
-        for line in new_lines[j1:j2]:
-            rows.append(("+", line))
+            rows.append(("-", line, None))
+
+        for idx, line in enumerate(new_lines[j1:j2]):
+            rows.append(("+", line, j1 + 1 + idx))
+
         if context_after and new_context_after is None:
-            _add_ctx(context_after)
+            _add_ctx(context_after, j2 + 1 if j2 < len(new_lines) else None)
         elif new_context_after is not None:
-            _add_ctx(new_lines[new_context_after])
+            _add_ctx(new_lines[new_context_after], new_context_after + 1)
 
     if not changed:
-        return f"--- {path}: -{replaced}+{added}"
-    parts = [f"--- {path}: -{replaced}+{added}"]
+        return f"--- {path}: -{replaced}+{added} (new length: {len(new_lines)} lines)"
+
+    parts = [f"--- {path}: -{replaced}+{added} (new length: {len(new_lines)} lines)"]
     MAX_PREVIEW_LINES = 60
     if len(rows) > MAX_PREVIEW_LINES:
-        rows = rows[:MAX_PREVIEW_LINES] + [(" ", f"... truncated ({len(rows)} lines total)")]
-    for mark, line in rows:
-        parts.append(f"{mark}{line}")
+        rows = rows[:MAX_PREVIEW_LINES] + [(" ", f"... truncated ({len(rows)} lines total)", None)]
+    for mark, line, no in rows:
+        lineno_str = f"L{no:4d}: " if no is not None else "       "
+        parts.append(f"{lineno_str}{mark}{line}")
     return "\n".join(parts)
 
 
@@ -512,30 +506,6 @@ def _read_text(path: str) -> tuple:
         return None, err(": Cannot read binary files (failed UTF-8 decode)")
 
 
-@tool(description="internal low-level raw file read (workspace worker)",
-      short_description="raw file read",
-      group="workspace",
-      hidden=True,
-      path=("str", "File path"))
-def _read_file_raw(path: str) -> tuple:
-    """Низкоуровневое чтение для read (§4): скрытый инструмент, вызов только от хоста."""
-    return _read_text(path)
-
-
-def _raw_read(agent, path: str) -> tuple:
-    manager = getattr(agent, "group_manager", None)
-    if manager is not None and getattr(manager, "isolated", False):
-        result = manager.call(
-            "workspace", _read_file_raw.__name__, {"path": path},
-            stop_check=getattr(agent, "_stop_check", None),
-        )
-        if result.status == "error":
-            return None, err(f" {result.value}")
-        value = result.value
-        if isinstance(value, (list, tuple)) and len(value) == 2:
-            return value[0], value[1]
-        return None, err(f": unexpected reader result ({type(value).__name__})")
-    return _read_text(path)
 
 
 def _summarize_file(content: str, agent) -> str:
@@ -750,7 +720,7 @@ def read(agent: 'AgentContext', path: str = '.', start_line: int = None, end_lin
         mtime = datetime.datetime.fromtimestamp(os.stat(path).st_mtime).strftime("%Y-%m-%d %H:%M:%S")
         if os.path.isfile(path):
             if start_line is not None or end_line is not None:
-                raw, read_err = _raw_read(agent, path)
+                raw, read_err = _read_text(path)
                 if read_err:
                     return read_err
                 lines = raw.splitlines()
@@ -763,23 +733,19 @@ def read(agent: 'AgentContext', path: str = '.', start_line: int = None, end_lin
                 selected, truncated = _limit_read_chunk(lines[start - 1:end])
                 actual_end = start + len(selected) - 1
                 return _build_portion_content(path, mtime, lines, total, start, actual_end, truncated)
-            raw, read_err = _raw_read(agent, path)
+            raw, read_err = _read_text(path)
             if read_err:
                 return read_err
             lines = raw.splitlines()
             total = len(lines)
-            disk_hash = _content_hash(raw)
             header = f"{ENVIRONMENT_PREFIX} File: {path}\nModified: {mtime} {ENVIRONMENT_PREFIX_END}\n"
             if len(raw) <= _SUMMARY_THRESHOLD:
                 numbered = [f"{i+1} {line}" for i, line in enumerate(lines)]
-                content = header + "Content:\n---\n" + ("\n".join(numbered) if numbered else "") + f"\n"
-                return _finish_read(agent, path, raw, content, disk_hash)
-            if agent.file_states.should_skip(path, disk_hash):
-                return _reread_err(path)
+                return header + "Content:\n---\n" + ("\n".join(numbered) if numbered else "") + f"\n"
             if not Config.BIG_FILE_SKELETON:
                 selected, truncated = _limit_read_chunk(lines)
                 actual_end = len(selected)
-                content = _build_portion_content(path, mtime, lines, total, 1, actual_end, truncated)
+                return _build_portion_content(path, mtime, lines, total, 1, actual_end, truncated)
             else:
                 structure = _summarize_file(raw, agent)
                 if structure is None:
@@ -799,13 +765,10 @@ def read(agent: 'AgentContext', path: str = '.', start_line: int = None, end_lin
                     f"Content structure:\n---\n{structure}\n"
                     if structure else ""
                 )
-                content = (
+                return (
                     header + f"Total lines: {total}\n"
                     f"{structure_block}\n"
                 )
-            agent.file_states.record(path, disk_hash, _content_hash(content))
-            agent._read_registrations.append(path)
-            return content
         elif os.path.isdir(path):
             return f"{ENVIRONMENT_PREFIX} Directory Tree: {os.path.abspath(path)}\nModified: {mtime}\n\n{FS._build_tree(path)}{ENVIRONMENT_PREFIX_END}"
         raise RuntimeError("Unexpected file type")
@@ -813,21 +776,6 @@ def read(agent: 'AgentContext', path: str = '.', start_line: int = None, end_lin
         raise PermissionError(f"Error accessing {path}: {e}")
 
 
-def _reread_err(path: str) -> str:
-    return err(
-        f": re-reading file '{path}' is not allowed - it is unchanged "
-        f"since the last read and its content/structure is already in context. "
-        f"Use start_line/end_line to read specific portions "
-        f"(~{Config.MAX_READ_CHARS_PER_CALL} chars at a time)."
-    )
-
-
-def _finish_read(agent: 'AgentContext', path: str, raw: str, content: str, disk_hash: str) -> str:
-    if agent.file_states.should_skip(path, disk_hash):
-        return _reread_err(path)
-    agent.file_states.record(path, disk_hash, _content_hash(content))
-    agent._read_registrations.append(path)
-    return content
 
 
 _REGEX_CHARS = set(r".*+?()[]|\\^$")

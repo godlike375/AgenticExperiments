@@ -71,7 +71,6 @@ def _make_agent():
         task_plan=[],
         task_plan_map={},
         _compacted_task_ids=set(),
-        file_states=SimpleNamespace(prune=lambda: None),
         tools_manager=SimpleNamespace(flush_pending_unloads=lambda: None),
         _on_history_changed=lambda: None,
         on_system_msg=lambda *a, **k: None,
@@ -297,8 +296,7 @@ class TestCompaction(unittest.TestCase):
             task_plan=[],
             task_plan_map={},
             _compacted_task_ids=set(),
-            file_states=SimpleNamespace(prune=lambda: None),
-            tools_manager=SimpleNamespace(flush_pending_unloads=lambda: None),
+                tools_manager=SimpleNamespace(flush_pending_unloads=lambda: None),
             _on_history_changed=lambda: None,
             on_system_msg=lambda *a, **k: None,
         )
@@ -353,6 +351,52 @@ class TestCompaction(unittest.TestCase):
                 and any(tc.name == PLAN_TOOL for tc in m.tool_calls)
                 for m in msgs)
         )
+
+
+
+
+class TestCompleteMilestone(unittest.TestCase):
+
+    def test_complete_milestone_validates_inputs(self):
+        from universal_agents.task_tracker import complete_milestone
+        agent = _make_agent()
+        err1 = complete_milestone(agent, "", "did work")
+        self.assertIn("requires a non-empty 'stage_name'", err1)
+        err2 = complete_milestone(agent, "Stage 1", "")
+        self.assertIn("requires a 'summary_of_work'", err2)
+
+    def test_complete_milestone_compacts_history_and_adds_summary(self):
+        from universal_agents.task_tracker import complete_milestone
+        agent = _make_agent()
+        # Add intermediate tool actions
+        agent.history.add(_work("file1.py"))
+        agent.history.add(_work_result("file1.py"))
+        agent.history.add(_work("file2.py"))
+        agent.history.add(_work_result("file2.py"))
+        agent.history.add(AssistantMessage(content="Finishing stage 1"))
+
+        initial_len = len(agent.history.get_all())
+        res = complete_milestone(agent, "Phase 1: Research", "Investigated file1 and file2", "Implement feature")
+        self.assertIn("completed and history compacted", res)
+
+        final_history = agent.history.get_all()
+        self.assertLess(len(final_history), initial_len)
+        # Check that milestone summary is present
+        milestone_msgs = [m for m in final_history if getattr(m, "_is_milestone", False)]
+        self.assertEqual(len(milestone_msgs), 1)
+        self.assertIn("Phase 1: Research", milestone_msgs[0].content)
+        self.assertIn("Investigated file1 and file2", milestone_msgs[0].content)
+        self.assertIn("Implement feature", milestone_msgs[0].content)
+
+    def test_complete_milestone_syncs_with_plan(self):
+        from universal_agents.task_tracker import complete_milestone
+        agent = _make_agent()
+        agent.history.add(_work("A1"))
+        agent.history.add(_work_result("A1"))
+        agent.history.add(AssistantMessage(content="Done A1"))
+
+        complete_milestone(agent, "A1", "Finished task A1", "Next A2")
+        self.assertIn("A1", agent._compacted_task_ids)
 
 
 if __name__ == "__main__":

@@ -153,7 +153,7 @@ def make_plan(agent: AgentContext, plan: list) -> str:
     short_description="answers system prompts",
     text=("str", "Your reply text to the system (not to user)"),
 )
-def respond_to_system(agent: AgentContext, text: str) -> str:
+def respond_to_system(agent: AgentContext, text: str = "yes") -> str:
     op = agent.pop_pending_operation()
     if not op:
         return err(
@@ -162,3 +162,34 @@ def respond_to_system(agent: AgentContext, text: str) -> str:
         )
     result = op["resolve"](agent, text)
     return ok(f" {result}") if result else ok(" Done.")
+
+
+@tool(
+    description="Applies pending file edits to disk after reviewing diff preview. Call this tool to confirm and write changes.",
+    short_description="apply pending edits",
+    confirm=("bool", "Whether to confirm applying the changes (default: True)"),
+)
+def apply_edit(agent: AgentContext, confirm: bool = True) -> str:
+    op = agent.pop_pending_operation()
+    if not op:
+        return err(
+            f": {apply_edit.__name__}() requires a pending edit operation. "
+            "There is no pending edit right now."
+        )
+    text = "yes" if confirm else "no"
+    result = op["resolve"](agent, text)
+    return ok(f" {result}") if result else ok(" Done.")
+
+
+@tool(
+    description="Completes a major work stage or milestone and automatically compacts preceding tool interactions "
+                "into a concise summary to save context window tokens for the next stage. "
+                "Call this whenever you finish a logical phase of work (e.g. research done, implementation done, tests passed).",
+    short_description="complete stage and compact context",
+    stage_name=("str", "Name of the completed stage or milestone (e.g. 'Project Audit', 'Backend Implementation')"),
+    summary_of_work=("str", "Clear summary of all decisions, changes made, and facts discovered during this stage"),
+    next_goals=("str", "Optional description of what needs to be done in the next stage"),
+)
+def complete_milestone(agent: AgentContext, stage_name: str, summary_of_work: str, next_goals: str = "") -> str:
+    from universal_agents.task_tracker import complete_milestone as _complete_milestone
+    return _complete_milestone(agent, stage_name, summary_of_work, next_goals)
