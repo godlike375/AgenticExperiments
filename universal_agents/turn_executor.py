@@ -259,7 +259,6 @@ class TurnExecutor:
             if controller_prefill is not None:
                 current_prefill = controller_prefill
         turn_reasoning = self.agent._reasoning_effort
-        self.agent._thinking_once = False
         state = TurnState(prefill=current_prefill, structured_output=structured_output)
 
         sim_group = SimReasoningGroup(Config.SIMULATED_REASONING_REPAIRS) if (

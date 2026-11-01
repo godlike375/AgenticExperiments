@@ -132,8 +132,7 @@ class LLMAgent(
         self.loop_detector = LoopDetector()
         self._temp_override: Optional[float] = None
         self._original_temp = temp
-        self._thinking_enabled: bool = False
-        self._thinking_once: bool = False
+        self._thinking_enabled: bool = True
         self.on_stream_chunk = on_stream_chunk
         self.on_stream_start = on_stream_start
         self.on_stream_end = on_stream_end
@@ -215,7 +214,7 @@ class LLMAgent(
 
     @property
     def _reasoning_effort(self) -> str:
-        if self._thinking_once or self._thinking_enabled:
+        if self._thinking_enabled:
             return "low"
         return "none"
 
