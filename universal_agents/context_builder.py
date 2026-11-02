@@ -90,18 +90,21 @@ def prepare_messages_for_api(agent: AgentContext, normalize: bool = True,
         if isinstance(msg, SystemMessage):
             api_pairs.append((msg, msg.to_api_dict()))
         elif isinstance(msg, UserMessage):
-            if msg._cached_header is None:
-                header = _format_timestamp_header(msg)
-                if msg is last_user_msg:
-                    header += _format_token_header(
-                        agent.token_tracker, agent.history[0].content, msg.content
-                    )
-                header += _format_closing_header()
-                msg._cached_header = header
-            api_pairs.append((msg, {
-                "role": "user",
-                "content": multimodal_content(msg._cached_header + msg.content, msg.images),
-            }))
+            if getattr(msg, "is_auxiliary", lambda: False)():
+                api_pairs.append((msg, msg.to_api_dict()))
+            else:
+                if msg._cached_header is None:
+                    header = _format_timestamp_header(msg)
+                    if msg is last_user_msg:
+                        header += _format_token_header(
+                            agent.token_tracker, agent.history[0].content, msg.content
+                        )
+                    header += _format_closing_header()
+                    msg._cached_header = header
+                api_pairs.append((msg, {
+                    "role": "user",
+                    "content": multimodal_content(msg._cached_header + msg.content, msg.images),
+                }))
         elif isinstance(msg, AssistantMessage):
             api_pairs.append((msg, msg.to_api_dict()))
         elif isinstance(msg, ToolResult):

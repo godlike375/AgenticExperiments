@@ -159,3 +159,50 @@ def test_persistence_save_and_load_roundtrip(temp_dir):
     assert len(new_agent.history) == len(agent.history)
     assert new_agent.history.get_all()[1].content == "Remember 42"
     assert new_agent.history.get_all()[2].content == "Saved 42"
+
+
+def test_compaction_kv_cache_prefix_stability_and_clean_headers():
+    agent = make_agent(tools_config=["double_me"], external_plugins={"double_me": double_me})
+
+    for i in range(1, 4):
+        agent.history.add(UserMessage(f"User turn {i}"))
+        agent.history.add(AssistantMessage(content=f"Assistant answer {i}"))
+
+    summary_content = (
+        "* 1.1 Context: test\n"
+        "* 1.2 Terms: none\n"
+        "* 1.3 Main task: checklist\n"
+        "* 1.4 Constraints: none\n"
+        "* 1.5 Preferences: none\n"
+        "* 2.1 Completed: did X\n"
+        "* 2.2 Next steps: step Y\n"
+        "* 2.3 Decisions: decision Z\n"
+        "* 3.1 Pending: none\n"
+        "* 4.1 Registry: [C1] fact\n"
+        "* 5.1 Metadata: test\n"
+        "* 6.1 Resources: test.py\n"
+        "* 7.1 Hints: none\n"
+        "* 7.2 Other: none"
+    )
+    summary_mock = AssistantMessage(content=summary_content)
+    with mock.patch("universal_agents.turn_executor.TurnExecutor.service_llm_call", return_value=(summary_mock, None, None)):
+        compacted = agent._auto_summarize_dialogue(force=True)
+
+    assert compacted is True
+
+    api_msgs = prepare_messages_for_api(agent)
+    assert len(api_msgs) >= 3
+    assert api_msgs[0]["role"] == "system"
+
+    # summary_msg at index 1 is auxiliary: no volatile timestamp or memory budget
+    summary_msg = api_msgs[1]
+    assert summary_msg["role"] == "user"
+    assert "PAST-SUMMARY" in summary_msg["content"]
+    assert "Memory:" not in summary_msg["content"]
+    assert "{" not in summary_msg["content"][:10]
+
+    # Subsequent turn retains identical prefix
+    agent._prepare_turn("User turn 4")
+    api_msgs_turn4 = prepare_messages_for_api(agent)
+    assert api_msgs_turn4[0] == api_msgs[0]
+    assert api_msgs_turn4[1] == api_msgs[1]

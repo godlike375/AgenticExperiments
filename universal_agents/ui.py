@@ -9,7 +9,7 @@ from typing import Optional
 from universal_agents.models import Message, SystemMessage, UserMessage, AssistantMessage
 from universal_agents.rendering import render_message
 from universal_agents.agent import LLMAgent
-from universal_agents.agent_mixins.response_mixin import sim_schema_text
+from universal_agents.simulated_reasoning import sim_schema_text
 from universal_agents.config import Config
 from universal_agents.exceptions import GenerationInterrupted
 from universal_agents.project_root import set_project_root, get_project_root_override

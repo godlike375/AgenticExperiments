@@ -1,10 +1,7 @@
-
-"""Центральная конфигурация: единый dataclass, доступ через Config.X (без синглтона).
-Производные константы вычисляются при определении класса."""
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from typing import Optional
 
 from dotenv import dotenv_values
@@ -29,47 +26,23 @@ def parse_env_file(path: str) -> dict[str, str]:
 
 
 @dataclass
-class Config:
+class ModelConfig:
     ENV_FILE: str = _default_env_file()
     USE_ENV: bool = False
     API_URL: str = DEFAULT_API_URL
     API_TOKEN: str = DEFAULT_API_TOKEN
     MODEL_NAME: str = DEFAULT_MODEL_NAME
-    AFTER_SYSTEM_PROMPT: int = 1  # Index after which dialog starts (0 = system)
-    BOOST_TEMP: float = 1.4
-    ERROR_RECOVERY_TEMP: float = 1.2
-    MAX_LOOP_RETRIES: int = 3  # попыток перегенерации при повторяющемся вызове/ответе
-    DUPLICATE_SIMILARITY_THRESHOLD: float = 0.75
-    DUPLICATE_TEXT_MIN_CHARS: int = 0
-    DUPLICATE_REASONING_MIN_CHARS: int = 250  # короткие reasoning-блоки не считаются повтором
-    DUPLICATE_RUN_LENGTH: int = 3             # одинаковый контент N раз подряд = зацикливание (X,X,X)
-    DUPLICATE_REGENERATIONS_BEFORE_SYSTEM: int = 2  # регенераций без системного сообщения
-    DUPLICATE_SYSTEM_WARNINGS: int = 2              # попыток после системного сообщения; далее управление пользователю
-    ERROR_RECOVERY_RETRIES: int = 0  # попыток перегенерации после ошибки инструмента
-    BROKEN_CALL_REGEN_RETRIES: int = 2  # попыток перегенерации при обнаружении сломанного вызова
-    BROKEN_CALL_FIX_RETRIES: int = 2    # попыток «починить» вызов через промпт после неудачной регенерации
-    NO_COMMENT_RETRIES: int = 2         # попыток перегенерации с prefill при вызове инструмента без пояснения; после исчерпания вызов исполняется как есть
-    ANSWER_GUARD_MAX_RETRIES: int = 5   # срабатываний guard'а «ответь через respond_to_system»; после — сдача хода пользователю
-    DUPLICATE_CONTINUATION_TEMP: float = round(BOOST_TEMP / 4, 2)  # спокойная достройка после расхождения
-    SUMMARY_DUPLICATE_TEMP: float = round(BOOST_TEMP / 2, 2)  # буст при тождественном повторе саммари (мягче полного BOOST_TEMP)
-
     MAX_CONTEXT_TOKENS: int = 130000
     TEMP: float = 0.75
     TOP_P: float = 0.85
     FREQUENCY_PENALTY: float = 0.0
     PRESENCE_PENALTY: float = 0.0
     MIN_P: Optional[float] = 0.0
-    MAX_OUTPUT_TOKENS: int = min(32000, int(MAX_CONTEXT_TOKENS / 1.5))
+    MAX_OUTPUT_TOKENS: int = 32000
     TIMEOUT: int = 1800
     MAX_ITER: int = 250
-    SUMMARIZATION_THRESHOLD_DIVIDER: int = 2
-
     STREAM_ENABLED: bool = True
-
-    # Проверено на LM Studio + qwen3: смена reasoning_effort роняет кэш целиком
-    # (сервер вставляет ~40 токенов в начало промпта, префикс расходится от позиции 0).
     KEEP_REASONING_CONTENT_IN_HISTORY: bool = True
-
     SIMULATED_REASONING_ENABLED: bool = False
     SIMULATED_REASONING_TAGS: tuple[str, ...] = ("thinking",)
     SIMULATED_REASONING_REPAIRS: int = 3
@@ -78,69 +51,127 @@ class Config:
     SIMULATED_REASONING_MIN_P: Optional[float] = 0.03
     SIMULATED_REASONING_FREQUENCY_PENALTY: Optional[float] = 0.65
     SIMULATED_REASONING_PRESENCE_PENALTY: Optional[float] = 0.15
-
     DEBUG_PREFIX_HASH_CHECK: bool = True
-
     DEBUG_LLM_CALLS: bool = False
 
-    AUTO_SUMMARY_THRESHOLD: int = 80  # процент занятого контекста для начала авто-суммаризации
-    AUTO_SUMMARY_PRESERVE_LAST: int = 1  # сколько последних сообщений не трогать
-    AUTO_SUMMARY_REVIEW_PASS: bool = True  # отревьювить черновик саммари: подчистить устаревшее + добавить пропущенное
+
+@dataclass
+class RecoveryConfig:
+    AFTER_SYSTEM_PROMPT: int = 1
+    BOOST_TEMP: float = 1.4
+    ERROR_RECOVERY_TEMP: float = 1.2
+    MAX_LOOP_RETRIES: int = 3
+    DUPLICATE_SIMILARITY_THRESHOLD: float = 0.75
+    DUPLICATE_TEXT_MIN_CHARS: int = 0
+    DUPLICATE_REASONING_MIN_CHARS: int = 250
+    DUPLICATE_RUN_LENGTH: int = 3
+    DUPLICATE_REGENERATIONS_BEFORE_SYSTEM: int = 2
+    DUPLICATE_SYSTEM_WARNINGS: int = 2
+    ERROR_RECOVERY_RETRIES: int = 0
+    BROKEN_CALL_REGEN_RETRIES: int = 2
+    BROKEN_CALL_FIX_RETRIES: int = 2
+    NO_COMMENT_RETRIES: int = 2
+    ANSWER_GUARD_MAX_RETRIES: int = 5
+    DUPLICATE_CONTINUATION_TEMP: float = 0.35
+    SUMMARY_DUPLICATE_TEMP: float = 0.7
+
+
+@dataclass
+class CompressionConfig:
+    AUTO_SUMMARY_THRESHOLD: int = 80
+    AUTO_SUMMARY_PRESERVE_LAST: int = 1
+    AUTO_SUMMARY_REVIEW_PASS: bool = True
     AUTO_SUMMARY_MAX_RETRIES: int = 5
-
-    TASK_COMPACTION_ENABLED: bool = True  # сжимать завершённые группы подзадач
-    MAX_TASK_COMPACTION_ROUNDS: int = 20  # макс. число групп за один проход
-
+    TASK_COMPACTION_ENABLED: bool = True
+    MAX_TASK_COMPACTION_ROUNDS: int = 20
     HAVE_DONE_TRIM_THRESHOLD: int = 250
-
-    AUTO_TRUST_GIT_ROOT: bool = True
-    LOCAL_API_DISABLES_SECRET_PROTECTION: bool = True
-
     CHARS_PER_TOKEN: float = 2.35
     MIN_TOKENS_TO_SUMMARIZE: int = 180
+    SUMMARIZATION_THRESHOLD_DIVIDER: int = 2
+    PER_MSG_SUMMARIES_ENABLED: bool = False
+    SERVICE_TURN_KEEP_IN_HISTORY: bool = False
+    SERVICE_TURN_MAX_ITER: int = 2
 
-    BIG_FILE_SKELETON: bool = False
 
-    SKELETON_RANGES_MODE: bool = False
-
-    PERIPHERAL_GAP_GROWTH: float = 1.9
-    PERIPHERAL_MAX_LINE_CHARS: int = 45
-    PERIPHERAL_SIDE_FACTOR: float = 1.1
-    PERIPHERAL_LINE_CONTEXT: int = 1
-
-    MAX_READ_CHARS_PER_CALL: int = 8000
-    MAX_READ_LINES_PER_CALL: int = 150
-
-    DISABLE_TOOL_AUTO_SUMMARIZATION: bool = True
-
+@dataclass
+class SafetyConfig:
+    AUTO_TRUST_GIT_ROOT: bool = True
+    LOCAL_API_DISABLES_SECRET_PROTECTION: bool = True
     TOOL_ISOLATION_ENABLED: bool = True
     TOOL_WORKER_POLL_INTERVAL: float = 0.05
     TOOL_WORKER_TIMEOUT: int = 3600
     TOOL_WORKER_KILL_GRACE: float = 1.0
-
     BASH_BACKEND: str = "auto"
-
     GIT_BASH_PATH: str = ""
-
     PROJECT_ROOT: str = r""
 
-    AUTOSAVE_ENABLED: bool = True
-    AUTOSAVE_DIR: str = "autosave"
-    AUTOSAVE_KEEP: int = 25
 
-    SAVE_IMAGES: bool = False
-
-    SERVICE_TURN_KEEP_IN_HISTORY: bool = False
-    SERVICE_TURN_MAX_ITER: int = 2
-
-    PER_MSG_SUMMARIES_ENABLED: bool = False
-
-
+@dataclass
+class ToolsConfig:
+    BIG_FILE_SKELETON: bool = False
+    SKELETON_RANGES_MODE: bool = False
+    PERIPHERAL_GAP_GROWTH: float = 1.9
+    PERIPHERAL_MAX_LINE_CHARS: int = 45
+    PERIPHERAL_SIDE_FACTOR: float = 1.1
+    PERIPHERAL_LINE_CONTEXT: int = 1
+    MAX_READ_CHARS_PER_CALL: int = 8000
+    MAX_READ_LINES_PER_CALL: int = 150
+    DISABLE_TOOL_AUTO_SUMMARIZATION: bool = True
     SCREENSHOT_MAX_WIDTH: int = 960
     SCREENSHOT_QUALITY: int = 60
     SCREENSHOT_DEBUG_PATH: str = ""
     MOUSE_MOVE_DURATION: float = 0.25
     PYAUTOGUI_PAUSE: float = 0.1
+
+
+@dataclass
+class StorageConfig:
+    AUTOSAVE_ENABLED: bool = True
+    AUTOSAVE_DIR: str = "autosave"
+    AUTOSAVE_KEEP: int = 25
+    SAVE_IMAGES: bool = False
+
+
+_CATEGORY_NAMES = ("model", "recovery", "compression", "safety", "tools", "storage")
+
+
+class ConfigMeta(type):
+    def __new__(mcls, name, bases, namespace):
+        cls = super().__new__(mcls, name, bases, namespace)
+        for cat in _CATEGORY_NAMES:
+            sub = namespace.get(cat)
+            if sub is not None:
+                for f in fields(sub):
+                    setattr(cls, f.name, getattr(sub, f.name))
+        return cls
+
+    def __setattr__(cls, name: str, value):
+        if name in _CATEGORY_NAMES:
+            super().__setattr__(name, value)
+            return
+        for cat in _CATEGORY_NAMES:
+            sub = getattr(cls, cat, None)
+            if sub is not None and hasattr(sub, name):
+                setattr(sub, name, value)
+        super().__setattr__(name, value)
+
+    def __delattr__(cls, name: str):
+        for cat in _CATEGORY_NAMES:
+            sub = getattr(cls, cat, None)
+            if sub is not None and hasattr(sub, name):
+                delattr(sub, name)
+        super().__delattr__(name)
+
+
+class Config(metaclass=ConfigMeta):
+    """Центральная конфигурация: категории доступны через Config.<category>.<param> или Config.<param>."""
+
+    model: ModelConfig = ModelConfig()
+    recovery: RecoveryConfig = RecoveryConfig()
+    compression: CompressionConfig = CompressionConfig()
+    safety: SafetyConfig = SafetyConfig()
+    tools: ToolsConfig = ToolsConfig()
+    storage: StorageConfig = StorageConfig()
 
 
 def _apply_env_file(cfg: type[Config]) -> None:

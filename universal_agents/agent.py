@@ -22,15 +22,11 @@ from universal_agents.generation import GenerationParams, StructuredOutputConfig
 from universal_agents.tool_manager import ToolManager
 from universal_agents.tools.builtin import respond_to_system, apply_edit
 
-from universal_agents.agent_mixins import (
-    ConsistencyMixin,
-    ExecuteMixin,
-    HistoryMixin,
-    MemoryMixin,
-    ResponseMixin,
-    StreamingMixin,
-    ToolsMixin,
-)
+from universal_agents.callbacks import AgentCallbacks
+from universal_agents.tool_pipeline import ToolPipeline
+from universal_agents.compressors import SummaryService
+from universal_agents.task_tracker import compact_completed_tasks
+
 
 from universal_agents.session_storage import SessionStorage
 from universal_agents.recovery_policy import (
@@ -41,15 +37,7 @@ from universal_agents.recovery_policy import (
 from universal_agents.turn_executor import TurnExecutor, TurnState
 
 
-class LLMAgent(
-    ToolsMixin,
-    MemoryMixin,
-    HistoryMixin,
-    StreamingMixin,
-    ResponseMixin,
-    ExecuteMixin,
-    ConsistencyMixin,
-):
+class LLMAgent:
     """Главный фасад агента: оркестрация TurnExecutor, RecoveryPolicy и SessionStorage."""
 
     def __init__(
@@ -58,9 +46,9 @@ class LLMAgent(
         temp: float = None,
         timeout: int = None,
         tools_config: Union[list[str], dict, None] = None,
-        on_render: Callable = lambda x: None,
-        on_confirm: Callable[[str, dict], bool] = lambda n, a: True,
-        on_system_msg: Callable[[str], None] = lambda x: None,
+        on_render: Callable = None,
+        on_confirm: Callable[[str, dict], bool] = None,
+        on_system_msg: Callable[[str], None] = None,
         external_plugins: dict[str, Callable] = None,
         denied_tools: Union[str, Iterable[str], None] = None,
         max_context_tokens: int = None,
@@ -87,6 +75,7 @@ class LLMAgent(
         autosave_keep: int = None,
         on_interrupt_check: Callable[[], bool] = None,
         group_manager=None,
+        callbacks: Optional[AgentCallbacks] = None,
     ):
         self.history = ChatHistory(system_prompt)
         self._gen_params = GenerationParams.from_overrides(
@@ -104,9 +93,21 @@ class LLMAgent(
         self.frequency_penalty = self._gen_params.frequency_penalty
         self.presence_penalty = self._gen_params.presence_penalty
         self.max_tokens = self._gen_params.max_tokens
-        self.on_render = on_render
-        self.on_confirm = on_confirm
-        self.on_system_msg = on_system_msg
+        self.callbacks = callbacks or AgentCallbacks(
+            on_render=on_render if on_render is not None else (lambda x: None),
+            on_confirm=on_confirm if on_confirm is not None else (lambda n, a: True),
+            on_system_msg=on_system_msg if on_system_msg is not None else (lambda x: None),
+            on_stream_chunk=on_stream_chunk,
+            on_stream_start=on_stream_start,
+            on_stream_end=on_stream_end,
+            on_reasoning_chunk=on_reasoning_chunk,
+            on_reasoning_start=on_reasoning_start,
+            on_reasoning_end=on_reasoning_end,
+            on_service_stream_start=on_service_stream_start,
+            on_service_stream_chunk=on_service_stream_chunk,
+            on_service_stream_end=on_service_stream_end,
+            on_interrupt_check=on_interrupt_check if on_interrupt_check is not None else (lambda: False),
+        )
         self.self_consistency_mode = False
         self.sc_samples = 3
         if token_tracker is not None:
@@ -128,20 +129,11 @@ class LLMAgent(
                 isolated=Config.TOOL_ISOLATION_ENABLED,
             )
         self.group_manager = self.tool_worker
-        self._auto_trust_git_root()
+        self.tools_manager.auto_trust_git_root()
         self.loop_detector = LoopDetector()
         self._temp_override: Optional[float] = None
         self._original_temp = temp
         self._thinking_enabled: bool = True
-        self.on_stream_chunk = on_stream_chunk
-        self.on_stream_start = on_stream_start
-        self.on_stream_end = on_stream_end
-        self.on_reasoning_chunk = on_reasoning_chunk
-        self.on_reasoning_start = on_reasoning_start
-        self.on_reasoning_end = on_reasoning_end
-        self.on_service_stream_start = on_service_stream_start
-        self.on_service_stream_chunk = on_service_stream_chunk
-        self.on_service_stream_end = on_service_stream_end
         self.streaming_enabled = (
             streaming_enabled if streaming_enabled is not None else Config.STREAM_ENABLED
         )
@@ -164,13 +156,333 @@ class LLMAgent(
         )
         self.recovery_policy = RecoveryPolicy(self)
         self.turn_executor = TurnExecutor(self)
+        self.tool_pipeline = ToolPipeline(self)
 
         self.stop_event = threading.Event()
-        self.on_interrupt_check = on_interrupt_check if on_interrupt_check is not None else (lambda: False)
-        self._stop_check = lambda: self.stop_event.is_set() or bool(self.on_interrupt_check())
+        self._stop_check = lambda: self.stop_event.is_set() or bool(self.callbacks.on_interrupt_check())
         self.pending_interrupt: Optional[str] = None
         self._in_tool_execution = False
         self._in_service_turn = False
+
+
+    # --- Свойства обратных вызовов (AgentCallbacks) ---
+    @property
+    def on_render(self):
+        return self.callbacks.on_render
+
+    @on_render.setter
+    def on_render(self, val):
+        self.callbacks.on_render = val
+
+    @property
+    def on_confirm(self):
+        return self.callbacks.on_confirm
+
+    @on_confirm.setter
+    def on_confirm(self, val):
+        self.callbacks.on_confirm = val
+
+    @property
+    def on_system_msg(self):
+        return self.callbacks.on_system_msg
+
+    @on_system_msg.setter
+    def on_system_msg(self, val):
+        self.callbacks.on_system_msg = val
+
+    @property
+    def on_stream_chunk(self):
+        return self.callbacks.on_stream_chunk
+
+    @on_stream_chunk.setter
+    def on_stream_chunk(self, val):
+        self.callbacks.on_stream_chunk = val
+
+    @property
+    def on_stream_start(self):
+        return self.callbacks.on_stream_start
+
+    @on_stream_start.setter
+    def on_stream_start(self, val):
+        self.callbacks.on_stream_start = val
+
+    @property
+    def on_stream_end(self):
+        return self.callbacks.on_stream_end
+
+    @on_stream_end.setter
+    def on_stream_end(self, val):
+        self.callbacks.on_stream_end = val
+
+    @property
+    def on_reasoning_chunk(self):
+        return self.callbacks.on_reasoning_chunk
+
+    @on_reasoning_chunk.setter
+    def on_reasoning_chunk(self, val):
+        self.callbacks.on_reasoning_chunk = val
+
+    @property
+    def on_reasoning_start(self):
+        return self.callbacks.on_reasoning_start
+
+    @on_reasoning_start.setter
+    def on_reasoning_start(self, val):
+        self.callbacks.on_reasoning_start = val
+
+    @property
+    def on_reasoning_end(self):
+        return self.callbacks.on_reasoning_end
+
+    @on_reasoning_end.setter
+    def on_reasoning_end(self, val):
+        self.callbacks.on_reasoning_end = val
+
+    @property
+    def on_service_stream_start(self):
+        return self.callbacks.on_service_stream_start
+
+    @on_service_stream_start.setter
+    def on_service_stream_start(self, val):
+        self.callbacks.on_service_stream_start = val
+
+    @property
+    def on_service_stream_chunk(self):
+        return self.callbacks.on_service_stream_chunk
+
+    @on_service_stream_chunk.setter
+    def on_service_stream_chunk(self, val):
+        self.callbacks.on_service_stream_chunk = val
+
+    @property
+    def on_service_stream_end(self):
+        return self.callbacks.on_service_stream_end
+
+    @on_service_stream_end.setter
+    def on_service_stream_end(self, val):
+        self.callbacks.on_service_stream_end = val
+
+    @property
+    def on_interrupt_check(self):
+        return self.callbacks.on_interrupt_check
+
+    @on_interrupt_check.setter
+    def on_interrupt_check(self, val):
+        self.callbacks.on_interrupt_check = val
+
+
+
+    # --- Делегирование сборки сообщений и стриминга (бывшие StreamingMixin и ResponseMixin) ---
+    def _assemble_assistant_message(self, *args, **kwargs):
+        return self.turn_executor.assemble_assistant_message(*args, **kwargs)
+
+    def _build_assistant_msg(self, *args, **kwargs):
+        return self.turn_executor.build_assistant_msg(*args, **kwargs)
+
+    def _append_assistant(self, msg):
+        self.turn_executor.append_assistant(msg)
+
+    def _append_tool_results(self, results):
+        self.turn_executor.append_tool_results(results)
+
+    def _call_with_streaming(self, *args, **kwargs):
+        return self.turn_executor.call_with_streaming(*args, **kwargs)
+
+    def _process_llm_response(self, *args, **kwargs):
+        return self.turn_executor.process_llm_response(*args, **kwargs)
+
+    # --- Self-consistency режим (бывший ConsistencyMixin) ---
+    def _generate_draft_with_tool_suggestions(self, draft_messages, prefill, draft_temp):
+        from universal_agents.context_builder import get_effective_prefill
+        prefill_val = get_effective_prefill(prefill)
+        params = self._gen_params.with_temp(draft_temp)
+        for _ in range(3):
+            msg_obj, err, _ = self.service_llm_call(
+                draft_messages,
+                prefill=prefill_val,
+                params=params,
+            )
+            if msg_obj and not err:
+                return msg_obj
+        return None
+
+    def _chat_self_consistent(self, message: str, prefill: str = None) -> str:
+        from universal_agents.context_builder import prepare_messages_for_api, get_effective_prefill
+        from universal_agents.tool_parsing import tc_name
+        user_message = UserMessage(content=message)
+        self.history.add(user_message)
+        if self._per_msg_enabled:
+            self._maybe_summarize_user_message(user_message)
+        messages_base = prepare_messages_for_api(self)
+
+        self.on_system_msg(f"Generating {self.sc_samples} drafts...")
+        drafts = []
+        for _ in range(self.sc_samples):
+            draft = self._generate_draft_with_tool_suggestions(messages_base, prefill, 0.7)
+            if draft:
+                drafts.append(draft)
+        if not drafts:
+            return "Failed to generate any valid draft"
+
+        draft_texts = []
+        for i, draft in enumerate(drafts, 1):
+            content = draft.content or "(no text)"
+            if draft.tool_calls:
+                tc_names = [f"{tc_name(tc)}(...)" for tc in draft.tool_calls]
+                content += f"\n[Suggested tools: {', '.join(tc_names)}]"
+            draft_texts.append(f"--- Draft {i} ---\n{content}")
+
+        synthesis_prompt = (
+            f"{ENVIRONMENT_PREFIX} Here are drafts from multiple reasoning paths:\n"
+            + "\n".join(draft_texts)
+            + "\n\n Analyse them and synthesize the finishing correct answer, paying attention to suggested tools. Output only the final synthesized answer."
+            + f"\n{ENVIRONMENT_PREFIX_END}"
+        )
+        synthesis_messages = messages_base + [{"role": "user", "content": synthesis_prompt}]
+        current_prefill = get_effective_prefill(prefill)
+        msg_obj, err, usage = self.service_llm_call(
+            synthesis_messages,
+            prefill=current_prefill,
+            params=self._gen_params.with_temp(0.2),
+        )
+        if usage:
+            self.record_usage(usage)
+        if err or not msg_obj:
+            error = f"⚠️ API Error during synthesis: {err}"
+            self.on_system_msg(error)
+            return error
+
+        assistant_msg = self._build_assistant_msg(msg_obj, msg_obj.content)
+        if not msg_obj.tool_calls:
+            self._append_assistant(assistant_msg)
+            return msg_obj.content
+
+        tool_results = self._execute_tools(assistant_msg.tool_calls)
+        self._append_assistant(assistant_msg)
+        self._append_tool_results(tool_results)
+
+        followup_dicts = (
+            synthesis_messages
+            + [assistant_msg.to_api_dict()]
+            + [tr.to_api_dict() for tr in tool_results]
+        )
+        final_obj, final_err, final_usage = self.service_llm_call(
+            followup_dicts,
+            tools=None,
+            params=self._gen_params.with_temp(0.1),
+        )
+        if final_usage:
+            self.record_usage(final_usage)
+        if final_err or not final_obj:
+            return msg_obj.content or "Tool executed successfully"
+
+        final_content = final_obj.content.strip()
+        final_assistant_msg = self._build_assistant_msg(final_obj, final_content)
+        self._append_assistant(final_assistant_msg)
+        return final_content
+
+    def _execute_tools(self, tool_calls: list[ToolCall]) -> list[ToolResult]:
+        return self.tool_pipeline.execute(tool_calls)
+
+    def rebuild_tool_usage(self) -> None:
+        self.tool_pipeline.rebuild_tool_usage()
+
+    # --- Делегирование инструментов (бывший ToolsMixin) ---
+    @property
+    def _all_tools(self) -> dict:
+        return self.tools_manager.tools_map
+
+    @property
+    def tools(self) -> list[dict]:
+        return self.tools_manager.schemas
+
+    @property
+    def _tools_config(self):
+        return self.tools_manager.config
+
+    @property
+    def trusted_dirs(self) -> set[str]:
+        return self.tools_manager.trusted_dirs
+
+    @property
+    def trusted_files(self) -> set[str]:
+        return self.tools_manager.trusted_files
+
+    def load_tool(self, name: str) -> str:
+        return self.tools_manager.load(name)
+
+    def unload_tool(self, name: str) -> str:
+        return self.tools_manager.unload(name)
+
+    def is_tool_denied(self, name: str) -> bool:
+        return self.tools_manager.is_denied(name)
+
+    def list_available_tools(self) -> str:
+        return self.tools_manager.list_available()
+
+    def trust_dir(self, path: str) -> str:
+        return self.tools_manager.trust_dir(path)
+
+    def untrust_dir(self, path: str) -> str:
+        return self.tools_manager.untrust_dir(path)
+
+    def is_path_trusted(self, path: str) -> bool:
+        return self.tools_manager.is_path_trusted(path)
+
+    def is_file_trusted(self, path: str) -> bool:
+        return self.tools_manager.is_file_trusted(path)
+
+    def _protected_refs(self, name: str, args: dict, tool_info: dict) -> list[str]:
+        return self.tools_manager.protected_refs(name, args, tool_info)
+
+    def _auto_trust_git_root(self) -> None:
+        self.tools_manager.auto_trust_git_root()
+
+    def _check_external_paths(self, name: str, args: dict) -> list[str]:
+        return self.tools_manager.check_external_paths(name, args)
+
+    def _known_tool_names(self) -> set[str]:
+        return self.tools_manager.known_tool_names()
+
+    # --- Делегирование истории (бывший HistoryMixin) ---
+    def _erase_last_assistant(self) -> None:
+        if self.history.erase_last_assistant():
+            self._on_history_changed()
+
+    def _erase_last_failed_tool_call(self) -> int:
+        count = self.history.erase_last_failed_tool_call()
+        if count:
+            self._on_history_changed()
+        return count
+
+    def _get_last_answer_text(self) -> Optional[str]:
+        return self.history.get_last_answer_text()
+
+    def _last_failed_tool_signature(self) -> Optional[str]:
+        return self.recovery_policy.last_failed_tool_signature()
+
+    # --- Делегирование памяти и сжатия (бывший MemoryMixin) ---
+    def _summarize_assistant_message(self, msg: AssistantMessage) -> None:
+        SummaryService.summarize_if_long(self, msg)
+
+    def _maybe_summarize_user_message(self, msg: UserMessage) -> None:
+        SummaryService.summarize_if_long(self, msg)
+
+    def _maybe_summarize_tool_result(self, tr: ToolResult) -> None:
+        SummaryService.summarize_if_long(self, tr)
+
+    def _get_context_usage_percent(self) -> float:
+        total = self.token_tracker.get_total_context_tokens()
+        return (total / self.token_tracker.max_context_tokens) * 100
+
+    def _compact_completed_tasks(self) -> int:
+        return compact_completed_tasks(self)
+
+    def _current_summary_threshold(self) -> float:
+        return float(Config.AUTO_SUMMARY_THRESHOLD)
+
+    def _auto_summarize_dialogue(self, force: bool = False) -> bool:
+        return SummaryService.compact_segment(self, force=force)
 
     @property
     def autosave_enabled(self) -> bool:

@@ -6,7 +6,7 @@ from universal_agents.config import Config
 from universal_agents.constants import ENVIRONMENT_PREFIX, ENVIRONMENT_PREFIX_END
 
 _GUARD_NAG_PREFIX = "You can't continue" 
-from universal_agents.models import AssistantMessage, UserMessage
+from universal_agents.models import AssistantMessage, UserMessage, ToolResult
 from universal_agents.llm_client import jaccard_similarity, text_hash
 from universal_agents.tool_parsing import parse_tool_args, tc_name, tc_args
 from universal_agents.tool_manager import DISPATCH_TOOL_NAME
@@ -241,3 +241,55 @@ class RecoveryPolicy:
                 f"and regenerating with temperature {Config.ERROR_RECOVERY_TEMP} "
                 f"(retries left: {retries_left})."
             )
+
+    def last_failed_tool_signature(self) -> Optional[str]:
+        msgs = self.agent.history.get_all()
+        errors: list[ToolResult] = []
+        assistant = None
+        for i in range(len(msgs) - 1, -1, -1):
+            m = msgs[i]
+            if isinstance(m, ToolResult) and m.is_error and not m.is_user_denied:
+                errors.append(m)
+                continue
+            if isinstance(m, AssistantMessage) and m.has_tool_calls():
+                assistant = m
+                break
+            break
+        if assistant is None:
+            return None
+        error_by_id = {tr.tool_call_id: tr.content for tr in errors}
+        parts = []
+        for tc in assistant.tool_calls:
+            norm_args = self.agent.loop_detector.normalize_args(tc_args(tc))
+            err_content = error_by_id.get(tc.id, "")
+            parts.append(f"{tc_name(tc)}|{norm_args}|{text_hash(err_content)}")
+        return ";".join(parts) if parts else None
+
+    def check_tool_loop(
+        self,
+        name: str,
+        args_str: str,
+        seen_in_batch: set[str],
+        history_before: list,
+    ) -> Optional[str]:
+        norm = self.agent.loop_detector.normalize_args(args_str)
+        batch_key = f"{name}:{norm}"
+        if batch_key in seen_in_batch:
+            return (
+                f"{ENVIRONMENT_PREFIX} System rejected duplicate call of tool '{name}'. "
+                f"This tool was just called with the exact same parameters in the previous step. "
+                f"Do NOT call it again in the current moment even if user asked to. Try a different approach, use other parameters, "
+                f"or complete your response with the final answer."
+                f"{ENVIRONMENT_PREFIX_END}"
+            )
+        seen_in_batch.add(batch_key)
+        if self.agent.loop_detector.check_duplicate_in_turn(name, args_str, history_before):
+            return (
+                f"{ENVIRONMENT_PREFIX} System rejected duplicate call of tool '{name}'. "
+                f"This tool was just called with the exact same parameters in the previous step. "
+                f"Do NOT call it again in the current moment even if user asked to. Try a different approach, use other parameters, "
+                f"or complete your response with the final answer."
+                f"{ENVIRONMENT_PREFIX_END}"
+            )
+        return None
+

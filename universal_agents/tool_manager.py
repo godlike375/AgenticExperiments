@@ -5,6 +5,11 @@ from typing import Callable, Iterable, Union, Optional
 from universal_agents.constants import ENVIRONMENT_PREFIX, ENVIRONMENT_PREFIX_END
 from universal_agents.tool import tool
 from universal_agents.tool_registry import load_external_plugins, build_tool_dict
+from universal_agents.config import Config
+from universal_agents.command_paths import extract_paths
+from universal_agents.project_root import find_project_root, external_paths
+from universal_agents.tools.fs import is_protected_path
+
 from universal_agents.tools.builtin import (
     have_done as _have_done_tool,
     load_tool as _load_tool_tool,
@@ -278,3 +283,48 @@ class ToolManager:
             if abs_path.startswith(trusted + os.sep) or abs_path == trusted:
                 return True
         return False
+
+    def is_file_trusted(self, path: str) -> bool:
+        return os.path.abspath(path) in self.trusted_files
+
+    def auto_trust_git_root(self) -> None:
+        if not Config.safety.AUTO_TRUST_GIT_ROOT:
+            return
+        root = find_project_root()
+        if root:
+            self.trusted_dirs.add(os.path.abspath(root))
+
+    def protected_refs(self, name: str, args: dict, tool_info: dict) -> list[str]:
+        if not args:
+            return []
+        candidates: list[str] = []
+        if isinstance(args.get("path"), str) and name != "cwd":
+            candidates.append(args["path"])
+        if tool_info.get("path_safety"):
+            for key in ("command", "cmd", "script"):
+                value = args.get(key)
+                if isinstance(value, str) and value.strip():
+                    candidates.extend(extract_paths(value))
+        found = [os.path.abspath(p) for p in candidates if os.path.isfile(p) and is_protected_path(p)]
+        return list(dict.fromkeys(found))
+
+    def check_external_paths(self, name: str, args: dict) -> list[str]:
+        if not args:
+            return []
+        root = find_project_root()
+        if not root:
+            return []
+        external: list[str] = []
+        for key in ("command", "cmd", "script", "path"):
+            value = args.get(key)
+            if isinstance(value, str) and value.strip():
+                paths = extract_paths(value)
+                existing = [p for p in paths if os.path.exists(p)]
+                external.extend(external_paths(existing, root))
+        return list(dict.fromkeys(external))
+
+    def known_tool_names(self) -> set[str]:
+        names = set(self._tools_map.keys())
+        names |= self.all_known_names
+        return names
+

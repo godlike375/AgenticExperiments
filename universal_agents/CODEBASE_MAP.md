@@ -14,9 +14,10 @@ tool_registry / tool_manager — загрузка, allow/deny, trust_dir
    ▼
 tool_worker.ToolWorker — ЕДИНЫЙ изолированный воркер-процесс для всех инструментов
    ▼
-AGENT = agent.py LLMAgent (фасад)
-   ├── TurnExecutor (turn_executor.py) — цикл ходов, стриминг, ретраи, прерывания
-   ├── RecoveryPolicy (recovery_policy.py) — детекция дублей, эскалация, наги
+AGENT = agent.py LLMAgent (чистый фасад без миксинов)
+   ├── TurnExecutor (turn_executor.py) — цикл ходов, стриминг, ретраи, сборка ответов
+   ├── ToolPipeline (tool_pipeline.py) — конвейер инструментов: безопасность путей, подтверждения, вызов
+   ├── RecoveryPolicy (recovery_policy.py) — детекция дублей текста, аргументов инструментов и ошибок
    └── SessionStorage (session_storage.py) — автосохранения, ротация, сброс диалога
    ▼
 context_builder.prepare_messages_for_api — KV-cache-безопасная сериализация
@@ -42,17 +43,13 @@ ui.py CLI / main.py — точка входа, консоль, подтверж�
 
 Тесты: `tests/test_chat_e2e.py`, `tests/test_resilience_and_loops.py`.
 
-### `agent_mixins/` — миксины агента
+### Сервисы и модули координации (вместо миксинов)
 
 | Файл | Назначение |
 |---|---|
-| `tools_mixin.py` | Поверхность инструментов: `load_tool`/`unload_tool` (помечает, не удаляет — KV), `trust_dir`, проверка внешних путей, авто-доверие git-root |
-| `memory_mixin.py` | Сжатие: per-message саммари (`_summarize_assistant_message`), компакция задач (`_compact_completed_tasks`), авто-суммаризация по порогу (`_auto_summarize_dialogue`) |
-| `history_mixin.py` | Стирание ассистентских сообщений и failed-цепочек, сигнатура последней ошибки |
-| `streaming_mixin.py` | `_call_with_streaming`, callbacks, `_watch_diverged` (расхождение стрима с prefill) и продолжение после него |
-| `response_mixin.py` | `_assemble_assistant_message`, `_append_tool_results`, NO COMMENT flow; `SimReasoningGroup` — симуляция reasoning (`<thinking>`-секция, §2.8) |
-| `execute_mixin.py` | `_execute_tools`: исполнение вызовов через `ToolWorker`, dry_run для `requires_model_confirmation`, подтверждение модели |
-| `consistency_mixin.py` | Self-consistency: несколько драфтов + синтез (`/consistent`) |
+| `tool_pipeline.py` | `ToolPipeline`: линейный конвейер вызовов инструментов (разворачивание dispatch, проверка прав, path safety, dry-run подтверждения, вызов воркера, сжатие) |
+| `callbacks.py` | `AgentCallbacks`: датакласс функций обратного вызова для стриминга, UI-рендера, подтверждений и логов |
+| `simulated_reasoning.py` | `SimReasoningGroup`: двухфазная симуляция рассуждений (`<thinking>`-секция, §2.8), автозакрытие тегов |
 
 Тесты: `tests/test_chat_e2e.py`, `tests/test_compaction_and_memory.py`, `tests/test_tools_and_safety_e2e.py`.
 
@@ -83,7 +80,7 @@ ui.py CLI / main.py — точка входа, консоль, подтверж�
 | `tool_registry.py` | Динамическая загрузка плагинов | `load_external_plugins` (+ кэш `_PLUGIN_CACHE`), `build_tool_dict` (выводит `group`/`is_external`/`hidden`) | `tests/test_chat_e2e.py` (частично) |
 | `tool_manager.py` | `ToolManager` | load/unload (пометить), deny, trust_dir, `flush_pending_unloads`, схемы для префикса; hidden-инструменты скрыты и не грузятся | `tests/test_chat_e2e.py` |
 | `tool_worker.py` | Единый воркер инструментов | `ToolWorker` (один дочерний процесс для всех инструментов, мгновенный kill по стопу/таймауту, синхронизация CWD) | `tests/test_tools_and_safety_e2e.py` |
-| `tools/builtin.py` | Встроенные инструменты | `get_messages`, `edit_message`, `delete_messages`, `delegate_to_subagent`, `load_tool`, `unload_tool`, `make_plan`, `have_done`, `apply_edit` (подтверждение правок), `respond_to_system` (совместимость), `complete_milestone` (вехи) | `tests/test_tools_and_safety_e2e.py`, `tests/agent_mixins/test_execute_mixin.py` |
+| `tools/builtin.py` | Встроенные инструменты | `get_messages`, `edit_message`, `delete_messages`, `delegate_to_subagent`, `load_tool`, `unload_tool`, `make_plan`, `have_done`, `apply_edit` (подтверждение правок), `respond_to_system` (совместимость), `complete_milestone` (вехи) | `tests/test_tools_and_safety_e2e.py`, `tests/test_tools_and_safety_e2e.py` |
 | `tools/fs.py` | Файловая система | `read` (периферийное зрение, саммари), `search`, `line_range_edit`/`match_replace_edit` (diff preview с номерами строк целевого файла `L  13: +code`, подтверждение через `apply_edit`), `cwd` | `tests/test_tools_and_safety_e2e.py` |
 | `tools/host_shell.py` | Shell | `run_powershell` (legacy `fallback_encoding="oem"`) / `run_bash_host` (git-bash) | `tests/test_tools_and_safety_e2e.py` |
 | `tools/sandbox.py` | Docker-песочница | `start_sandbox`/`run_bash`/`run_python`/`stop_sandbox` — `UnifiedDockerAgent` | — |
@@ -118,13 +115,13 @@ PRELOADED_TOOLS (main.py): `load_tool`, `read`, `line_range_edit`, `match_replac
 
 | Механика | Файлы |
 |---|---|
-| KV-cache/стабильный префикс (§1.2) | `models.py` (header-кэш), `context_builder.py`, `history.py` (нормализация, ремувы), `agent_mixins/tools_mixin.py` (unload не удаляет), `recovery_policy.py` (`ensure_guard_nag`) |
-| Компакция/сжатие/вехи (§3) | `compressors.py`, `task_tracker.py` (`complete_milestone`), `history.py` (`compress_old_messages`), `agent_mixins/memory_mixin.py` |
-| Guard подтверждения (§1.11) | `tools/builtin.py` (`apply_edit`, `respond_to_system`), `recovery_policy.py` (`detect_duplicate`, `_CONFIRMATION_GUARD_VERDICT`), `turn_executor.py`, `agent_mixins/execute_mixin.py` (dry_run) |
-| Детекция повторов/ошибок (§1.9-1.10) | `recovery_policy.py` (`detect_duplicate`, `recover`), `turn_executor.py` (`TurnState`), `llm_client.py` (`jaccard_similarity`, `text_hash`, `LoopDetector`), `agent_mixins/history_mixin.py` (`_last_failed_tool_signature`) |
-| Изоляция инструментов (§1.13) | `tool_worker.py` (ToolWorker), `agent_mixins/execute_mixin.py`, `subprocess_utils.py` |
-| Стриминг/прерывание (§1.12) | `llm_client.py` (`LLMClient.call`, `StreamSession`), `agent_mixins/streaming_mixin.py`, `ui.py` (`_call_chat`, `gen.join()`), `tool_worker.py` (`kill()`) |
-| Симуляция reasoning (§2.8) | `agent_mixins/response_mixin.py` (`SimReasoningGroup`), `controllers.py` (`from_sibling_schema`), `config.py` (`SIMULATED_REASONING_*`) |
+| KV-cache/стабильный префикс (§1.2) | `models.py` (header-кэш), `context_builder.py`, `history.py` (нормализация, ремувы), `tool_manager.py` (unload не удаляет), `recovery_policy.py` (`ensure_guard_nag`) |
+| Компакция/сжатие/вехи (§3) | `compressors.py`, `task_tracker.py` (`complete_milestone`), `history.py` (`compress_old_messages`), `compressors.py` (SummaryService) |
+| Guard подтверждения (§1.11) | `tools/builtin.py` (`apply_edit`, `respond_to_system`), `recovery_policy.py` (`detect_duplicate`, `_CONFIRMATION_GUARD_VERDICT`), `turn_executor.py`, `tool_pipeline.py` (dry_run) |
+| Детекция повторов/ошибок (§1.9-1.10) | `recovery_policy.py` (`detect_duplicate`, `recover`), `turn_executor.py` (`TurnState`), `llm_client.py` (`jaccard_similarity`, `text_hash`, `LoopDetector`), `recovery_policy.py` (`last_failed_tool_signature`) |
+| Изоляция инструментов (§1.13) | `tool_worker.py` (ToolWorker), `tool_pipeline.py`, `subprocess_utils.py` |
+| Стриминг/прерывание (§1.12) | `llm_client.py` (`LLMClient.call`, `StreamSession`), `turn_executor.py`, `ui.py` (`_call_chat`, `gen.join()`), `tool_worker.py` (`kill()`) |
+| Симуляция reasoning (§2.8) | `simulated_reasoning.py` (`SimReasoningGroup`), `controllers.py` (`from_sibling_schema`), `config.py` (`SIMULATED_REASONING_*`) |
 | Чтение и правка файлов (§3.4) | `tools/fs.py` (`read`, `line_range_edit`, `match_replace_edit`), `compressors.py` (`chunk_and_summarize_large_text`) |
 
 ## Цепочки вызовов (главные пути)

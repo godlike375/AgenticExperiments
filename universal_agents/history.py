@@ -170,8 +170,8 @@ class ChatHistory:
             if (
                 type(msg) == type(last)
                 and isinstance(msg, (UserMessage, AssistantMessage))
-                and not _is_tools_block(msg)
-                and not _is_tools_block(last)
+                and not getattr(msg, "is_auxiliary", lambda: False)()
+                and not getattr(last, "is_auxiliary", lambda: False)()
             ):
                 last.content = (last.content or "") + "\n\n" + (msg.content or "")
                 if isinstance(msg, UserMessage) and isinstance(last, UserMessage) and msg.images:
@@ -466,7 +466,37 @@ class ChatHistory:
             self._assign_seq(block_msg)
             head.append(block_msg)
 
-        preserved = [m for m in msgs[safe_end:] if not _is_tools_block(m)]
+        preserved = [m for m in msgs[safe_end:] if not getattr(m, "is_auxiliary", lambda: False)()]
         self._messages = head + preserved
         self._mark_dirty()
         self._resync_last_user_header()
+
+    def erase_last_assistant(self) -> bool:
+        if self._messages and isinstance(self._messages[-1], AssistantMessage):
+            self.remove_at({len(self._messages) - 1})
+            self.normalize()
+            return True
+        return False
+
+    def erase_last_failed_tool_call(self) -> int:
+        removed: set[int] = set()
+        for i in range(len(self._messages) - 1, -1, -1):
+            m = self._messages[i]
+            if isinstance(m, ToolResult) and m.is_error and not m.is_user_denied:
+                removed.add(i)
+            elif isinstance(m, AssistantMessage) and m.has_tool_calls():
+                removed.add(i)
+                break
+            else:
+                break
+        if removed:
+            self.remove_at(removed)
+            self.normalize()
+        return len(removed)
+
+    def get_last_answer_text(self) -> Optional[str]:
+        for msg in reversed(self._messages):
+            if isinstance(msg, AssistantMessage) and (msg.content or '').strip():
+                return msg.content.strip()
+        return None
+
