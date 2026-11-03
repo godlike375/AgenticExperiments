@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from typing import Optional
+from typing import Callable, Optional
 
 from universal_agents.config import Config
 from universal_agents.controllers import PhaseController
@@ -36,6 +36,23 @@ class GenerationParams:
 
     def with_temp(self, temp: float) -> "GenerationParams":
         return replace(self, temp=temp)
+
+
+@dataclass
+class LLMCallOptions:
+    params: Optional[GenerationParams] = None
+    prefill: Optional[str] = None
+    tools: Optional[list[dict]] = None
+    watch_prefix: Optional[str] = None
+    watch_continue_temp: Optional[float] = None
+    stop_check: Optional[Callable[[], bool]] = None
+    reasoning_effort: str = "none"
+    stop_markers: tuple[str, ...] = ()
+    prefill_shown: int = 0
+    defer_stream_end: bool = False
+
+    def with_params(self, params: GenerationParams) -> "LLMCallOptions":
+        return replace(self, params=params)
 
 
 def extract_opening_tag(prefill: str) -> Optional[str]:

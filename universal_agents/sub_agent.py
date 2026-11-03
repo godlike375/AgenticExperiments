@@ -34,7 +34,7 @@ def run_subagent_once(agent, prompt: str, temp: float = 0.2, max_iter: int = Non
 
     parent_regs = getattr(agent, '_read_registrations', None)
     if parent_regs is not None:
-        for p in sub._agent._read_registrations:
+        for p in getattr(sub._agent, '_read_registrations', []):
             if p not in parent_regs:
                 parent_regs.append(p)
 

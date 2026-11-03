@@ -19,11 +19,13 @@ from universal_agents.constants import (
 
 MAX_CONSECUTIVE_ERRORS = 10
 from universal_agents.models import UserMessage, AssistantMessage, ToolResult
-from universal_agents.generation import GenerationParams
+from universal_agents.generation import GenerationParams, LLMCallOptions
 from universal_agents.llm_client import LLMClient
 from universal_agents.generation import apply_stop_markers
 from universal_agents.exceptions import GenerationInterrupted
 from universal_agents.simulated_reasoning import SimReasoningGroup, _NO_COMMENT_PREFILL
+from universal_agents.compressors import SummaryService
+from universal_agents.task_tracker import compact_completed_tasks
 from universal_agents.context_builder import prepare_messages_for_api, get_effective_prefill
 from universal_agents.generation import StructuredOutputConfig
 from universal_agents.tools.builtin import respond_to_system, apply_edit
@@ -128,7 +130,7 @@ class TurnExecutor:
             self.agent.history.add(AssistantMessage(content=""))
         self.agent.history.add(user_msg)
         if self.agent._per_msg_enabled:
-            self.agent._maybe_summarize_user_message(user_msg)
+            SummaryService.summarize_if_long(self.agent, user_msg)
         if autosave:
             self.agent.autosave()
         self.agent.clear_stop()
@@ -175,10 +177,9 @@ class TurnExecutor:
             if duplicate_system_warning:
                 active_messages.append({"role": "system", "content": duplicate_system_warning})
 
-            message_obj, err_val, usage, stopped_at_marker = self.agent._call_llm(
-                active_messages,
-                prefill=step_prefill,
+            call_opts = LLMCallOptions(
                 params=attempt_params,
+                prefill=step_prefill,
                 watch_prefix=dup_watch_target,
                 watch_continue_temp=Config.DUPLICATE_CONTINUATION_TEMP if dup_watch_target is not None else None,
                 stop_check=self.agent._stop_check,
@@ -186,6 +187,10 @@ class TurnExecutor:
                 stop_markers=stop_markers,
                 prefill_shown=prefill_shown,
                 defer_stream_end=defer_stream_end,
+            )
+            message_obj, err_val, usage, stopped_at_marker = self.call_llm(
+                active_messages,
+                opts=call_opts,
             )
             dup_watch_target = None
 
@@ -375,7 +380,7 @@ class TurnExecutor:
                         if appended and self.agent.on_stream_chunk:
                             self.agent.on_stream_chunk(appended)
                         if sim_group.tool_calls or sim_group.answer_text().strip():
-                            sim_msg = self.agent._sim_message(sim_group)
+                            sim_msg = self.sim_message(sim_group)
                         else:
                             sim_group.advance_to_answer()
                             continue
@@ -421,7 +426,7 @@ class TurnExecutor:
                     and not message_obj.tool_calls
                     and not tool_error_occurred
                 ):
-                    self.agent._erase_last_assistant()
+                    self.agent.history.erase_last_assistant()
                     if not state.can_retry_answer_guard():
                         self.agent.recovery_policy.recover('answer_guard')
                         return _finish_turn("")
@@ -439,7 +444,7 @@ class TurnExecutor:
 
                 if broken_call:
                     if state.can_retry_broken_regen():
-                        self.agent._erase_last_assistant()
+                        self.agent.history.erase_last_assistant()
                         self.agent.recovery_policy.recover('broken_call', retries_left=state.broken_regen_left)
                         continue
                     if state.can_retry_broken_fix():
@@ -451,7 +456,7 @@ class TurnExecutor:
                     return _finish_turn("")
 
                 if tool_error_occurred and state.can_retry_tool_error():
-                    erased = self.agent._erase_last_failed_tool_call()
+                    erased = self.agent.history.erase_last_failed_tool_call()
                     self.agent.recovery_policy.recover(
                         'tool_error',
                         retries_left=state.tool_error_retries_left,
@@ -461,15 +466,15 @@ class TurnExecutor:
 
                 compacted = False
                 if not service_mode:
-                    compacted = self.agent._compact_completed_tasks() > 0
+                    compacted = compact_completed_tasks(self.agent) > 0
                 if (
                     not service_mode
                     and not getattr(self.agent, '_auto_summarize_suppressed', False)
-                    and self.agent._get_context_usage_percent() >= self.agent._current_summary_threshold()
+                    and self.agent.get_context_usage_percent() >= float(Config.AUTO_SUMMARY_THRESHOLD)
                 ):
                     if getattr(self.agent, '_is_subagent', False):
                         return _finish_turn(result_text)
-                    if self.agent._auto_summarize_dialogue():
+                    if SummaryService.compact_segment(self.agent):
                         compacted = True
                         self.agent._auto_summarize_suppressed = True
 
@@ -477,7 +482,7 @@ class TurnExecutor:
                     state.reset_error_counts()
 
                 if tool_error_occurred:
-                    state.record_tool_error(self.agent._last_failed_tool_signature())
+                    state.record_tool_error(self.agent.recovery_policy.last_failed_tool_signature())
                 else:
                     state.record_tool_success()
 
@@ -629,11 +634,97 @@ class TurnExecutor:
             self.agent.history.add(AssistantMessage(content=""))
         self.agent.history.add(UserMessage(content=prompt))
 
+    def generate_draft_with_tool_suggestions(self, draft_messages, prefill, draft_temp):
+        prefill_val = get_effective_prefill(prefill)
+        params = self.agent._gen_params.with_temp(draft_temp)
+        for _ in range(3):
+            msg_obj, err, _ = self.service_llm_call(
+                draft_messages,
+                prefill=prefill_val,
+                params=params,
+            )
+            if msg_obj and not err:
+                return msg_obj
+        return None
+
+    def chat_self_consistent(self, message: str, prefill: str = None) -> str:
+        user_message = UserMessage(content=message)
+        self.agent.history.add(user_message)
+        if self.agent._per_msg_enabled:
+            SummaryService.maybe_summarize_user_message(self.agent, user_message)
+        messages_base = prepare_messages_for_api(self.agent)
+
+        self.agent.on_system_msg(f"Generating {self.agent.sc_samples} drafts...")
+        drafts = []
+        for _ in range(self.agent.sc_samples):
+            draft = self.generate_draft_with_tool_suggestions(messages_base, prefill, 0.7)
+            if draft:
+                drafts.append(draft)
+        if not drafts:
+            return "Failed to generate any valid draft"
+
+        draft_texts = []
+        for i, draft in enumerate(drafts, 1):
+            content = draft.content or "(no text)"
+            if draft.tool_calls:
+                tc_names = [f"{tc_name(tc)}(...)" for tc in draft.tool_calls]
+                content += f"\n[Suggested tools: {', '.join(tc_names)}]"
+            draft_texts.append(f"--- Draft {i} ---\n{content}")
+
+        synthesis_prompt = (
+            f"{ENVIRONMENT_PREFIX} Here are drafts from multiple reasoning paths:\n"
+            + "\n".join(draft_texts)
+            + "\n\n Analyse them and synthesize the finishing correct answer, paying attention to suggested tools. Output only the final synthesized answer."
+            + f"\n{ENVIRONMENT_PREFIX_END}"
+        )
+        synthesis_messages = messages_base + [{"role": "user", "content": synthesis_prompt}]
+        current_prefill = get_effective_prefill(prefill)
+        msg_obj, err, usage = self.service_llm_call(
+            synthesis_messages,
+            prefill=current_prefill,
+            params=self.agent._gen_params.with_temp(0.2),
+        )
+        if usage:
+            self.agent.record_usage(usage)
+        if err or not msg_obj:
+            error = f"⚠️ API Error during synthesis: {err}"
+            self.agent.on_system_msg(error)
+            return error
+
+        assistant_msg = self.build_assistant_msg(msg_obj, msg_obj.content)
+        if not msg_obj.tool_calls:
+            self.append_assistant(assistant_msg)
+            return msg_obj.content
+
+        tool_results = self.agent.tool_pipeline.execute(assistant_msg.tool_calls)
+        self.append_assistant(assistant_msg)
+        self.append_tool_results(tool_results)
+
+        followup_dicts = (
+            synthesis_messages
+            + [assistant_msg.to_api_dict()]
+            + [tr.to_api_dict() for tr in tool_results]
+        )
+        final_obj, final_err, final_usage = self.service_llm_call(
+            followup_dicts,
+            tools=None,
+            params=self.agent._gen_params.with_temp(0.1),
+        )
+        if final_usage:
+            self.agent.record_usage(final_usage)
+        if final_err or not final_obj:
+            return msg_obj.content or "Tool executed successfully"
+
+        final_content = final_obj.content.strip()
+        final_assistant_msg = self.build_assistant_msg(final_obj, final_content)
+        self.append_assistant(final_assistant_msg)
+        return final_content
+
     def inject_user_interrupt(self, user_text: str, max_iter: int = None) -> str:
         max_iter = max_iter if max_iter is not None else Config.MAX_ITER
         if self.agent.self_consistency_mode:
             self.agent.clear_pending_interrupt()
-            return self.agent._chat_self_consistent(f"{INTERRUPT_HEADER}\n\n{user_text}", None)
+            return self.chat_self_consistent(f"{INTERRUPT_HEADER}\n\n{user_text}", None)
         self.agent.clear_pending_interrupt()
         if not self.append_interrupt_to_tool_result(user_text):
             self.prepare_turn(f"{INTERRUPT_HEADER}\n\n{user_text}")
@@ -680,9 +771,53 @@ class TurnExecutor:
         matched = self._watch_match_len(watch_prefix, prefill, content)
         return 0 < matched < len(watch_prefix or "")
 
+    def call_llm(
+        self,
+        messages: list[dict],
+        opts: Optional[LLMCallOptions] = None,
+        **kwargs,
+    ) -> tuple:
+        if opts is None:
+            opts = LLMCallOptions(
+                params=kwargs.get("params"),
+                prefill=kwargs.get("prefill"),
+                tools=kwargs.get("tools"),
+                watch_prefix=kwargs.get("watch_prefix"),
+                watch_continue_temp=kwargs.get("watch_continue_temp"),
+                stop_check=kwargs.get("stop_check"),
+                reasoning_effort=kwargs.get("reasoning_effort", "none"),
+                stop_markers=kwargs.get("stop_markers", ()),
+                prefill_shown=kwargs.get("prefill_shown", 0),
+                defer_stream_end=kwargs.get("defer_stream_end", False),
+            )
+        tools = opts.tools if opts.tools is not None else (self.agent.tools if self.agent.tools else None)
+        if self.agent.streaming_enabled and self.agent.on_stream_chunk:
+            return self.call_with_streaming(
+                messages,
+                opts=opts,
+                tools=tools,
+            )
+        message_obj, err_val, usage = LLMClient.call(
+            messages,
+            tools=tools,
+            prefill=opts.prefill,
+            params=opts.params,
+            stop_check=opts.stop_check,
+            reasoning_effort=opts.reasoning_effort,
+            stop_markers=opts.stop_markers,
+        )
+        stopped_at_marker = bool(getattr(message_obj, "stopped_at_marker", False))
+        if opts.stop_markers and message_obj is not None and getattr(message_obj, "content", None):
+            content, marker_hit = apply_stop_markers(message_obj.content, opts.stop_markers)
+            if marker_hit:
+                message_obj.content = content
+                stopped_at_marker = True
+        return message_obj, err_val, usage, stopped_at_marker
+
     def call_with_streaming(
         self,
         messages: list[dict],
+        opts: Optional[LLMCallOptions] = None,
         prefill: str = None,
         tools: list[dict] = None,
         params: GenerationParams = None,
@@ -694,6 +829,17 @@ class TurnExecutor:
         prefill_shown: int = 0,
         defer_stream_end: bool = False,
     ) -> tuple:
+        if opts is not None:
+            prefill = opts.prefill if prefill is None else prefill
+            tools = opts.tools if tools is None else tools
+            params = opts.params if params is None else params
+            watch_prefix = opts.watch_prefix if watch_prefix is None else watch_prefix
+            watch_continue_temp = opts.watch_continue_temp if watch_continue_temp is None else watch_continue_temp
+            stop_check = opts.stop_check if stop_check is None else stop_check
+            reasoning_effort = opts.reasoning_effort if reasoning_effort == "none" else reasoning_effort
+            stop_markers = opts.stop_markers if not stop_markers else stop_markers
+            prefill_shown = opts.prefill_shown if not prefill_shown else prefill_shown
+            defer_stream_end = opts.defer_stream_end if not defer_stream_end else defer_stream_end
         error = ""
         _stopped = False
         retry_delays = (0, 1, 2, 5, 10)
@@ -835,7 +981,7 @@ class TurnExecutor:
     def append_assistant(self, msg: AssistantMessage) -> None:
         self.agent.history.add(msg)
         if self.agent._per_msg_enabled:
-            self.agent._summarize_assistant_message(msg)
+            SummaryService.summarize_if_long(self.agent, msg)
         self.agent.on_render(msg)
         self.emit_token_info()
 
@@ -843,7 +989,7 @@ class TurnExecutor:
         for tr in results:
             self.agent.history.add(tr)
             if self.agent._per_msg_enabled:
-                self.agent._maybe_summarize_tool_result(tr)
+                SummaryService.summarize_if_long(self.agent, tr)
             self.agent.on_render(tr)
         self.emit_token_info()
 
@@ -977,7 +1123,7 @@ class TurnExecutor:
             scan_text = broken_scan_text if broken_scan_text is not None else clean_content
             if not skip_broken_detection and detect_broken_call(
                 scan_text,
-                self.agent._known_tool_names(),
+                self.agent.tools_manager.known_tool_names(),
                 require_tag=broken_scan_text is None,
             ):
                 self.agent.on_system_msg("[BROKEN CALL] Response looks like an unparsed tool call (prose or XML).")

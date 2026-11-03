@@ -11,30 +11,17 @@ from universal_agents.constants import (
     ENVIRONMENT_PREFIX_END,
 )
 
-MAX_CONSECUTIVE_ERRORS = 10
-_GUARD_NAG_PREFIX = "You can't continue" 
 from universal_agents.history import ChatHistory
-from universal_agents.llm_client import LLMClient
-from universal_agents.generation import apply_stop_markers
-from universal_agents.llm_client import TokenUsageTracker, LoopDetector
+from universal_agents.llm_client import LLMClient, TokenUsageTracker, LoopDetector
 from universal_agents.models import AssistantMessage, ToolCall, UserMessage
 from universal_agents.generation import GenerationParams, StructuredOutputConfig
 from universal_agents.tool_manager import ToolManager
-from universal_agents.tools.builtin import respond_to_system, apply_edit
-
 from universal_agents.callbacks import AgentCallbacks
 from universal_agents.tool_pipeline import ToolPipeline
 from universal_agents.compressors import SummaryService
-from universal_agents.task_tracker import compact_completed_tasks
-
-
 from universal_agents.session_storage import SessionStorage
-from universal_agents.recovery_policy import (
-    RecoveryPolicy,
-    _CONFIRMATION_GUARD_VERDICT,
-    _REPEAT_ANSWER_NAG,
-)
-from universal_agents.turn_executor import TurnExecutor, TurnState
+from universal_agents.recovery_policy import RecoveryPolicy
+from universal_agents.turn_executor import TurnExecutor
 
 
 class LLMAgent:
@@ -272,117 +259,14 @@ class LLMAgent:
 
 
 
-    # --- Делегирование сборки сообщений и стриминга (бывшие StreamingMixin и ResponseMixin) ---
-    def _assemble_assistant_message(self, *args, **kwargs):
-        return self.turn_executor.assemble_assistant_message(*args, **kwargs)
-
-    def _build_assistant_msg(self, *args, **kwargs):
-        return self.turn_executor.build_assistant_msg(*args, **kwargs)
-
-    def _append_assistant(self, msg):
-        self.turn_executor.append_assistant(msg)
-
-    def _append_tool_results(self, results):
-        self.turn_executor.append_tool_results(results)
-
     def _call_with_streaming(self, *args, **kwargs):
         return self.turn_executor.call_with_streaming(*args, **kwargs)
 
     def _process_llm_response(self, *args, **kwargs):
         return self.turn_executor.process_llm_response(*args, **kwargs)
 
-    # --- Self-consistency режим (бывший ConsistencyMixin) ---
-    def _generate_draft_with_tool_suggestions(self, draft_messages, prefill, draft_temp):
-        from universal_agents.context_builder import get_effective_prefill
-        prefill_val = get_effective_prefill(prefill)
-        params = self._gen_params.with_temp(draft_temp)
-        for _ in range(3):
-            msg_obj, err, _ = self.service_llm_call(
-                draft_messages,
-                prefill=prefill_val,
-                params=params,
-            )
-            if msg_obj and not err:
-                return msg_obj
-        return None
-
     def _chat_self_consistent(self, message: str, prefill: str = None) -> str:
-        from universal_agents.context_builder import prepare_messages_for_api, get_effective_prefill
-        from universal_agents.tool_parsing import tc_name
-        user_message = UserMessage(content=message)
-        self.history.add(user_message)
-        if self._per_msg_enabled:
-            self._maybe_summarize_user_message(user_message)
-        messages_base = prepare_messages_for_api(self)
-
-        self.on_system_msg(f"Generating {self.sc_samples} drafts...")
-        drafts = []
-        for _ in range(self.sc_samples):
-            draft = self._generate_draft_with_tool_suggestions(messages_base, prefill, 0.7)
-            if draft:
-                drafts.append(draft)
-        if not drafts:
-            return "Failed to generate any valid draft"
-
-        draft_texts = []
-        for i, draft in enumerate(drafts, 1):
-            content = draft.content or "(no text)"
-            if draft.tool_calls:
-                tc_names = [f"{tc_name(tc)}(...)" for tc in draft.tool_calls]
-                content += f"\n[Suggested tools: {', '.join(tc_names)}]"
-            draft_texts.append(f"--- Draft {i} ---\n{content}")
-
-        synthesis_prompt = (
-            f"{ENVIRONMENT_PREFIX} Here are drafts from multiple reasoning paths:\n"
-            + "\n".join(draft_texts)
-            + "\n\n Analyse them and synthesize the finishing correct answer, paying attention to suggested tools. Output only the final synthesized answer."
-            + f"\n{ENVIRONMENT_PREFIX_END}"
-        )
-        synthesis_messages = messages_base + [{"role": "user", "content": synthesis_prompt}]
-        current_prefill = get_effective_prefill(prefill)
-        msg_obj, err, usage = self.service_llm_call(
-            synthesis_messages,
-            prefill=current_prefill,
-            params=self._gen_params.with_temp(0.2),
-        )
-        if usage:
-            self.record_usage(usage)
-        if err or not msg_obj:
-            error = f"⚠️ API Error during synthesis: {err}"
-            self.on_system_msg(error)
-            return error
-
-        assistant_msg = self._build_assistant_msg(msg_obj, msg_obj.content)
-        if not msg_obj.tool_calls:
-            self._append_assistant(assistant_msg)
-            return msg_obj.content
-
-        tool_results = self._execute_tools(assistant_msg.tool_calls)
-        self._append_assistant(assistant_msg)
-        self._append_tool_results(tool_results)
-
-        followup_dicts = (
-            synthesis_messages
-            + [assistant_msg.to_api_dict()]
-            + [tr.to_api_dict() for tr in tool_results]
-        )
-        final_obj, final_err, final_usage = self.service_llm_call(
-            followup_dicts,
-            tools=None,
-            params=self._gen_params.with_temp(0.1),
-        )
-        if final_usage:
-            self.record_usage(final_usage)
-        if final_err or not final_obj:
-            return msg_obj.content or "Tool executed successfully"
-
-        final_content = final_obj.content.strip()
-        final_assistant_msg = self._build_assistant_msg(final_obj, final_content)
-        self._append_assistant(final_assistant_msg)
-        return final_content
-
-    def _execute_tools(self, tool_calls: list[ToolCall]) -> list[ToolResult]:
-        return self.tool_pipeline.execute(tool_calls)
+        return self.turn_executor.chat_self_consistent(message, prefill)
 
     def rebuild_tool_usage(self) -> None:
         self.tool_pipeline.rebuild_tool_usage()
@@ -432,54 +316,12 @@ class LLMAgent:
     def is_file_trusted(self, path: str) -> bool:
         return self.tools_manager.is_file_trusted(path)
 
-    def _protected_refs(self, name: str, args: dict, tool_info: dict) -> list[str]:
-        return self.tools_manager.protected_refs(name, args, tool_info)
-
-    def _auto_trust_git_root(self) -> None:
-        self.tools_manager.auto_trust_git_root()
-
-    def _check_external_paths(self, name: str, args: dict) -> list[str]:
-        return self.tools_manager.check_external_paths(name, args)
-
-    def _known_tool_names(self) -> set[str]:
-        return self.tools_manager.known_tool_names()
-
-    # --- Делегирование истории (бывший HistoryMixin) ---
-    def _erase_last_assistant(self) -> None:
-        if self.history.erase_last_assistant():
-            self._on_history_changed()
-
-    def _erase_last_failed_tool_call(self) -> int:
-        count = self.history.erase_last_failed_tool_call()
-        if count:
-            self._on_history_changed()
-        return count
-
-    def _get_last_answer_text(self) -> Optional[str]:
-        return self.history.get_last_answer_text()
-
-    def _last_failed_tool_signature(self) -> Optional[str]:
-        return self.recovery_policy.last_failed_tool_signature()
-
-    # --- Делегирование памяти и сжатия (бывший MemoryMixin) ---
-    def _summarize_assistant_message(self, msg: AssistantMessage) -> None:
-        SummaryService.summarize_if_long(self, msg)
-
-    def _maybe_summarize_user_message(self, msg: UserMessage) -> None:
-        SummaryService.summarize_if_long(self, msg)
-
-    def _maybe_summarize_tool_result(self, tr: ToolResult) -> None:
-        SummaryService.summarize_if_long(self, tr)
-
-    def _get_context_usage_percent(self) -> float:
+    def get_context_usage_percent(self) -> float:
         total = self.token_tracker.get_total_context_tokens()
         return (total / self.token_tracker.max_context_tokens) * 100
 
-    def _compact_completed_tasks(self) -> int:
-        return compact_completed_tasks(self)
-
-    def _current_summary_threshold(self) -> float:
-        return float(Config.AUTO_SUMMARY_THRESHOLD)
+    def _get_context_usage_percent(self) -> float:
+        return self.get_context_usage_percent()
 
     def _auto_summarize_dialogue(self, force: bool = False) -> bool:
         return SummaryService.compact_segment(self, force=force)
@@ -529,12 +371,6 @@ class LLMAgent:
         if self._thinking_enabled:
             return "low"
         return "none"
-
-    def _build_duplicate_warning(self, kind: str, duplicate_target: str) -> str:
-        return self.recovery_policy.build_duplicate_warning(kind, duplicate_target)
-
-    def _build_broken_call_fix(self) -> str:
-        return self.recovery_policy.build_broken_call_fix()
 
     def make_sub_agent(
         self,
@@ -602,17 +438,8 @@ class LLMAgent:
         self._guard_nag_message = None
         return op
 
-    def _ensure_guard_nag(self) -> None:
-        self.recovery_policy.ensure_guard_nag()
-
-    def _build_save_extras(self) -> dict:
-        return self.session_storage.build_save_extras()
-
     def save_history(self, path: str, extras: dict = None) -> None:
         self.session_storage.save_history(path, extras)
-
-    def _rotate_autosaves(self) -> None:
-        self.session_storage.rotate_autosaves()
 
     def reset_autosave_path(self) -> None:
         self.session_storage.reset_autosave_path()
@@ -622,9 +449,6 @@ class LLMAgent:
 
     def reset_dialog(self) -> None:
         self.session_storage.reset_dialog()
-
-    def _autosave(self) -> None:
-        self.session_storage.autosave()
 
     def close_tool_workers(self) -> None:
         try:
@@ -652,50 +476,8 @@ class LLMAgent:
     def clear_pending_interrupt(self) -> None:
         self.pending_interrupt = None
 
-    def _call_llm(
-        self,
-        messages: list[dict],
-        prefill: Optional[str] = None,
-        params: GenerationParams = None,
-        watch_prefix: Optional[str] = None,
-        watch_continue_temp: Optional[float] = None,
-        stop_check: Callable[[], bool] = None,
-        reasoning_effort: str = "none",
-        stop_markers: tuple = (),
-        prefill_shown: int = 0,
-        defer_stream_end: bool = False,
-    ) -> tuple:
-        tools = self.tools if self.tools else None
-        if self.streaming_enabled and self.on_stream_chunk:
-            return self._call_with_streaming(
-                messages,
-                prefill=prefill,
-                tools=tools,
-                params=params,
-                watch_prefix=watch_prefix,
-                watch_continue_temp=watch_continue_temp,
-                stop_check=stop_check,
-                reasoning_effort=reasoning_effort,
-                stop_markers=stop_markers,
-                prefill_shown=prefill_shown,
-                defer_stream_end=defer_stream_end,
-            )
-        message_obj, err_val, usage = LLMClient.call(
-            messages,
-            tools=tools,
-            prefill=prefill,
-            params=params,
-            stop_check=stop_check,
-            reasoning_effort=reasoning_effort,
-            stop_markers=stop_markers,
-        )
-        stopped_at_marker = bool(getattr(message_obj, "stopped_at_marker", False))
-        if stop_markers and message_obj is not None and getattr(message_obj, "content", None):
-            content, marker_hit = apply_stop_markers(message_obj.content, stop_markers)
-            if marker_hit:
-                message_obj.content = content
-                stopped_at_marker = True
-        return message_obj, err_val, usage, stopped_at_marker
+    def _call_llm(self, *args, **kwargs) -> tuple:
+        return self.turn_executor.call_llm(*args, **kwargs)
 
     def service_llm_call(
         self,
@@ -723,34 +505,8 @@ class LLMAgent:
     def _append_service_prompt(self, prompt: str) -> None:
         self.turn_executor.append_service_prompt(prompt)
 
-    def _consecutive_repeats(self, text: str, *, reasoning: bool) -> int:
-        return self.recovery_policy.consecutive_repeats(text, reasoning=reasoning)
-
-    def _recent_answer_texts(self, limit: int = 2) -> list[str]:
-        return self.recovery_policy.recent_answer_texts(limit)
-
-    def _last_assistant_message(self):
-        return self.recovery_policy.last_assistant_message()
-
-    def _call_signature(self, tool_calls) -> tuple:
-        return self.recovery_policy.call_signature(tool_calls)
-
-    @staticmethod
-    def _actual_tool_call(tc) -> tuple[str, str]:
-        return RecoveryPolicy.actual_tool_call(tc)
-
-    @staticmethod
-    def _normalize_dispatch_arguments(args: dict) -> str:
-        return json.dumps(args, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-
-    def _detect_duplicate(self, message_obj) -> Optional[tuple]:
-        return self.recovery_policy.detect_duplicate(message_obj)
-
     def call_with_retries(self, messages_to_send: list[dict], **kwargs) -> tuple:
         return self.turn_executor.call_with_retries(messages_to_send, **kwargs)
-
-    def _recover(self, kind: str, retries_left: int = 0, erased_count: int = 0) -> None:
-        self.recovery_policy.recover(kind, retries_left, erased_count)
 
     def chat(
         self,
