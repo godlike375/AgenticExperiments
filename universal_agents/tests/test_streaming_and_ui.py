@@ -58,10 +58,15 @@ def test_cli_commands():
     agent = make_agent()
     cli = CLI(agent)
 
-    # Проверяем команду /think_on
+    # Проверяем команду /think_on и /think_off
     agent._thinking_enabled = False
     cli.commands["/think_on"](["/think_on"])
     assert agent._thinking_enabled is True
+    assert agent._reasoning_effort == "low"
+
+    cli.commands["/think_off"](["/think_off"])
+    assert agent._thinking_enabled is False
+    assert agent._reasoning_effort == "none"
 
     # Проверяем /clear
     agent.history.add(AssistantMessage(content="hello"))

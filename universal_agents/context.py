@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import threading
-from typing import TYPE_CHECKING, Optional, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Optional, Protocol, runtime_checkable, Callable, Any
 
 if TYPE_CHECKING:
     from universal_agents.history import ChatHistory
@@ -28,8 +28,8 @@ class AgentContext(Protocol):
     task_plan: list
     task_plan_map: dict
 
-    on_system_msg: callable
-    on_render: callable
+    on_system_msg: Callable[..., Any]
+    on_render: Callable[..., Any]
 
     stop_event: threading.Event
     temp: float

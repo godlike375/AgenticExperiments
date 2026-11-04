@@ -53,7 +53,8 @@ def _build_bash_command(command: str) -> list[str]:
     backend = _resolve_bash_backend()
 
     if backend == "gitbash":
-        bash = _git_bash_candidates()[0] if _git_bash_candidates() else None
+        candidates = _git_bash_candidates()
+        bash = candidates[0] if candidates else None
         if not bash:
             raise RuntimeError("Git Bash not found. Install Git or set Config.GIT_BASH_PATH")
         return [bash, "-c", command]

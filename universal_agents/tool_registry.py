@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 import sys
 import importlib.util
@@ -5,7 +7,7 @@ import inspect
 from typing import Callable
 
 
-_PLUGIN_CACHE: dict[str, dict[str, Callable]] = {}
+_PLUGIN_CACHE: dict[str, tuple[float, dict[str, Callable]]] = {}
 
 
 def _load_plugin_module(file_path: str) -> dict[str, Callable]:
@@ -35,9 +37,15 @@ def load_external_plugins(plugins_dir: str = "tools") -> dict[str, Callable]:
             continue
         file_path = os.path.abspath(os.path.join(plugins_dir, filename))
         try:
-            if file_path not in _PLUGIN_CACHE:
-                _PLUGIN_CACHE[file_path] = _load_plugin_module(file_path)
-            for name, obj in _PLUGIN_CACHE[file_path].items():
+            mtime = os.path.getmtime(file_path)
+            cached_mtime, cached_tools = _PLUGIN_CACHE.get(file_path, (0.0, {}))
+            if file_path not in _PLUGIN_CACHE or cached_mtime != mtime:
+                loaded = _load_plugin_module(file_path)
+                _PLUGIN_CACHE[file_path] = (mtime, loaded)
+            else:
+                loaded = cached_tools
+
+            for name, obj in loaded.items():
                 if name in external_tools:
                     print(f"Warning: Duplicate tool name '{name}' in {filename}")
                     continue

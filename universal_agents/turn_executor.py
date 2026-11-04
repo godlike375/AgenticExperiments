@@ -15,6 +15,8 @@ from universal_agents.constants import (
     INTERRUPT_HEADER,
     ENVIRONMENT_PREFIX,
     ENVIRONMENT_PREFIX_END,
+    CONFIRMATION_GUARD_VERDICT,
+    REPEAT_ANSWER_NAG,
 )
 
 MAX_CONSECUTIVE_ERRORS = 10
@@ -34,13 +36,9 @@ if TYPE_CHECKING:
     from universal_agents.agent import LLMAgent
 
 _NO_TOOL_ERROR_SIGNATURE = "<no_tool_call>"
-_CONFIRMATION_GUARD_VERDICT = "confirmation_guard"
+_CONFIRMATION_GUARD_VERDICT = CONFIRMATION_GUARD_VERDICT
 _SYSTEM_HEADER_RE = re.compile(r"^\{<SYSTEM>:.*?\}\n\n", re.DOTALL)
-_REPEAT_ANSWER_NAG = (
-    f"\n\n{ENVIRONMENT_PREFIX} Your previous answer was the same to the latest one. "
-    f"Please do NOT repeat it again and answer differently."
-    f"{ENVIRONMENT_PREFIX_END}"
-)
+_REPEAT_ANSWER_NAG = REPEAT_ANSWER_NAG
 
 
 def _strip_system_header(content: Optional[str]) -> Optional[str]:
@@ -213,7 +211,8 @@ class TurnExecutor:
                 kind, payload = duplicate
                 if kind == 'tool_call':
                     dup_name, dup_args = payload
-                    tag, reason = 'PROACTIVE LOOP DETECTED', f"Intercepted duplicate call to '{dup_name}'"
+                    args_preview = f" with arguments {dup_args}" if dup_args and dup_args != "{}" else ""
+                    tag, reason = 'PROACTIVE LOOP DETECTED', f"Intercepted duplicate call to '{dup_name}'{args_preview}"
                 elif kind == 'reasoning':
                     dup_watch_target = None
                     tag, reason = 'REPEATED REASONING DETECTED', 'Model repeated a reasoning block from history'
@@ -234,7 +233,7 @@ class TurnExecutor:
                     return message_obj, api_error_occurred, stopped_at_marker
                 if dup_count > Config.DUPLICATE_REGENERATIONS_BEFORE_SYSTEM:
                     duplicate_system_warning = (
-                        self.agent.recovery_policy.build_duplicate_warning(dup_name, dup_args)
+                        self.agent.recovery_policy.build_duplicate_warning('tool_call', (dup_name, dup_args))
                         if kind == 'tool_call' else _REPEAT_ANSWER_NAG
                     )
                 if boost:

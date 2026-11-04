@@ -91,14 +91,17 @@ def detect_broken_call(content: str, tool_names: set[str], require_tag: bool = T
 def build_tool_calls(tool_calls_data: dict) -> list:
     from universal_agents.models import ToolCall
 
-    return [
-        ToolCall(
-            id=tc_data["id"],
-            name=tc_data["function"]["name"],
-            arguments=tc_data["function"]["arguments"]
-        )
-        for tc_data in tool_calls_data.values()
-    ]
+    res = []
+    for tc_data in tool_calls_data.values():
+        name = (tc_data.get("function", {}).get("name") or "").strip()
+        if not name:
+            continue
+        res.append(ToolCall(
+            id=tc_data.get("id") or "",
+            name=name,
+            arguments=tc_data.get("function", {}).get("arguments") or ""
+        ))
+    return res
 
 
 def try_parse_tool_args(args_str: str):
@@ -125,6 +128,21 @@ def args_are_valid(args_str: str) -> bool:
         return True
     except Exception:
         return False
+
+
+def unwrap_dispatch_call(name: str, args_str_or_dict: str | dict) -> tuple[str, dict]:
+    """Единая распаковка виртуального вызова диспатчера (invoke_function / call_tool)."""
+    if isinstance(args_str_or_dict, dict):
+        args_dict = args_str_or_dict
+    else:
+        args_dict = parse_tool_args(args_str_or_dict)
+
+    if name in ("invoke_function", "call_tool"):
+        dispatched_name = args_dict.get("function_name", args_dict.get("name", ""))
+        nested_args = args_dict.get("args", args_dict.get("arguments", {}))
+        if isinstance(dispatched_name, str) and dispatched_name and isinstance(nested_args, dict):
+            return dispatched_name, nested_args
+    return name, args_dict
 
 
 def normalize_args(args_str: str) -> str:

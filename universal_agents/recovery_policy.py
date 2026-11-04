@@ -3,25 +3,25 @@ import json
 from typing import TYPE_CHECKING, Optional, Callable
 
 from universal_agents.config import Config
-from universal_agents.constants import ENVIRONMENT_PREFIX, ENVIRONMENT_PREFIX_END
+from universal_agents.constants import (
+    ENVIRONMENT_PREFIX,
+    ENVIRONMENT_PREFIX_END,
+    CONFIRMATION_GUARD_VERDICT,
+    REPEAT_ANSWER_NAG,
+)
 
 _GUARD_NAG_PREFIX = "You can't continue" 
 from universal_agents.models import AssistantMessage, UserMessage, ToolResult
 from universal_agents.llm_client import jaccard_similarity, text_hash
-from universal_agents.tool_parsing import parse_tool_args, tc_name, tc_args
+from universal_agents.tool_parsing import parse_tool_args, tc_name, tc_args, unwrap_dispatch_call
 from universal_agents.tool_manager import DISPATCH_TOOL_NAME
 from universal_agents.tools.builtin import respond_to_system, apply_edit
 
 if TYPE_CHECKING:
     from universal_agents.agent import LLMAgent
 
-_CONFIRMATION_GUARD_VERDICT = "confirmation_guard"
-
-_REPEAT_ANSWER_NAG = (
-    f"\n\n{ENVIRONMENT_PREFIX} Your previous answer was the same to the latest one. "
-    f"Please do NOT repeat it again and answer differently."
-    f"{ENVIRONMENT_PREFIX_END}"
-)
+_CONFIRMATION_GUARD_VERDICT = CONFIRMATION_GUARD_VERDICT
+_REPEAT_ANSWER_NAG = REPEAT_ANSWER_NAG
 
 
 class RecoveryPolicy:
@@ -30,15 +30,21 @@ class RecoveryPolicy:
     def __init__(self, agent: LLMAgent):
         self.agent = agent
 
-    def build_duplicate_warning(self, kind: str, duplicate_target: str) -> str:
+    def build_duplicate_warning(self, kind: str, duplicate_target: Any) -> str:
         prompt_override = getattr(Config, 'DUPLICATE_PROMPT_OVERRIDE', None)
         if prompt_override:
             return prompt_override(kind, duplicate_target)
         if kind == 'tool_call':
-            tool_name = duplicate_target[0] if isinstance(duplicate_target, (list, tuple)) else duplicate_target
+            if isinstance(duplicate_target, (list, tuple)):
+                tool_name = duplicate_target[0] if len(duplicate_target) > 0 else ""
+                tool_args = str(duplicate_target[1]) if len(duplicate_target) > 1 else ""
+            else:
+                tool_name = str(duplicate_target)
+                tool_args = ""
+            args_hint = f" with arguments `{tool_args}`" if tool_args else ""
             return (
-                f"{ENVIRONMENT_PREFIX} SYSTEM ALERT: You have called tool '{tool_name}' "
-                f"with the exact same arguments repeatedly. DO NOT make this exact tool call again. "
+                f"{ENVIRONMENT_PREFIX} SYSTEM ALERT: You have called tool '{tool_name}'{args_hint} "
+                f"repeatedly. DO NOT make this exact tool call again. "
                 f"Change arguments, try another tool, or reply with text. {ENVIRONMENT_PREFIX_END}"
             )
         return (
@@ -107,12 +113,9 @@ class RecoveryPolicy:
     def actual_tool_call(tc) -> tuple[str, str]:
         name = tc_name(tc)
         args = tc_args(tc)
-        if name == DISPATCH_TOOL_NAME:
-            dispatch_args = parse_tool_args(args)
-            name = dispatch_args.get("name", "")
-            args = dispatch_args.get("arguments", "{}")
-            if isinstance(args, dict):
-                args = json.dumps(args, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        if name in (DISPATCH_TOOL_NAME, "call_tool"):
+            name, nested_args = unwrap_dispatch_call(name, args)
+            args = json.dumps(nested_args, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
         return name, args
 
     def detect_duplicate(self, message_obj) -> Optional[tuple]:
@@ -123,8 +126,8 @@ class RecoveryPolicy:
         if pending and message_obj.tool_calls and any(
             tc_name(tc) in (respond_to_system.__name__, apply_edit.__name__)
             or (
-                tc_name(tc) == DISPATCH_TOOL_NAME
-                and parse_tool_args(tc_args(tc)).get("name") in (respond_to_system.__name__, apply_edit.__name__)
+                tc_name(tc) in (DISPATCH_TOOL_NAME, "call_tool")
+                and unwrap_dispatch_call(tc_name(tc), tc_args(tc))[0] in (respond_to_system.__name__, apply_edit.__name__)
             )
             for tc in message_obj.tool_calls
         ):
@@ -165,6 +168,8 @@ class RecoveryPolicy:
             seen_in_batch: set[str] = set()
             for tc in message_obj.tool_calls:
                 actual_name, actual_args = self.actual_tool_call(tc)
+                if not actual_name.strip():
+                    continue
                 norm = self.agent.loop_detector.normalize_args(actual_args)
                 batch_key = f"{actual_name}:{norm}"
                 if batch_key in seen_in_batch:

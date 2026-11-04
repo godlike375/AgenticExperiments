@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import json
 import os
 import shlex
@@ -120,6 +122,7 @@ class CLI:
             "/trust": self.cmd_trust,
             "/untrust": self.cmd_untrust,
             "/think_on": self.cmd_think_on,
+            "/think_off": self.cmd_think_off,
             "/compact_history": self.cmd_compact_history,
             "/max_context": self.cmd_max_context,
         }
@@ -269,6 +272,14 @@ class CLI:
     def cmd_think_on(self, parts: list[str]):
         self.agent._thinking_enabled = True
         ConsoleUI.system_msg("Thinking mode turned ON. LLM will use reasoning_effort='low' for all messages.")
+
+    def cmd_think_off(self, parts: list[str]):
+        self.agent._thinking_enabled = False
+        note = ""
+        if Config.SIMULATED_REASONING_ENABLED:
+            note = (f" Every answer starts with a '{sim_schema_text()}' section "
+                    "followed by free text (simulated reasoning).")
+        ConsoleUI.system_msg(f"Thinking mode turned OFF. LLM will use reasoning_effort='none'.{note}")
 
     def cmd_compact_history(self, parts: list[str]):
         before = self.agent._get_context_usage_percent()

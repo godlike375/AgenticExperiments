@@ -1,3 +1,4 @@
+from __future__ import annotations
 
 """Извлечение файловых путей из командных строк (bash/PowerShell) для безопасности."""
 import os

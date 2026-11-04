@@ -1,3 +1,4 @@
+from __future__ import annotations
 
 from universal_agents.models import Message, SystemMessage, UserMessage, AssistantMessage, ToolResult
 

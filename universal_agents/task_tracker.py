@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Optional
 from universal_agents.config import Config
 from universal_agents.constants import ENVIRONMENT_PREFIX, ENVIRONMENT_PREFIX_END, err, ok
 from universal_agents.models import AssistantMessage, UserMessage, ToolResult
-from universal_agents.tool_parsing import parse_tool_args
+from universal_agents.tool_parsing import parse_tool_args, unwrap_dispatch_call
 from universal_agents.tool_manager import DISPATCH_TOOL_NAME
 from universal_agents.tools.builtin import (
     have_done as _have_done_tool,
@@ -78,17 +78,17 @@ def mark_task_done(agent: AgentContext, task_id: str) -> str:
 
 
 def _parse_call_args(tc) -> dict:
-    args = parse_tool_args(getattr(tc, "arguments", None) or "{}")
-    if getattr(tc, "name", None) in (DISPATCH_TOOL_NAME, "call_tool"):
-        nested = args.get("arguments", {})
-        return nested if isinstance(nested, dict) else {}
-    return args
+    name = getattr(tc, "name", None) or ""
+    args = getattr(tc, "arguments", None) or "{}"
+    _, unwrapped_args = unwrap_dispatch_call(name, args)
+    return unwrapped_args
 
 
 def _actual_tool_name(tc) -> str:
-    if getattr(tc, "name", None) not in (DISPATCH_TOOL_NAME, "call_tool"):
-        return getattr(tc, "name", "") or ""
-    return parse_tool_args(getattr(tc, "arguments", None) or "{}").get("name", "")
+    name = getattr(tc, "name", None) or ""
+    args = getattr(tc, "arguments", None) or "{}"
+    unwrapped_name, _ = unwrap_dispatch_call(name, args)
+    return unwrapped_name
 
 
 def _last_plan_position(history: list) -> int:

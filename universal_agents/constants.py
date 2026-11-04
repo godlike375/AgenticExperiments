@@ -1,3 +1,4 @@
+from __future__ import annotations
 
 """Общие константы фреймворка."""
 ENVIRONMENT_PREFIX = '<SYSTEM>'
@@ -24,3 +25,9 @@ SUMMARY_MARKER = "[PAST-SUMMARY]"
 INTERRUPT_HEADER = (f"{ENVIRONMENT_PREFIX} User interrupted generation and wants to say something more important. "
                     f"Treat it carefully before continuing {ENVIRONMENT_PREFIX_END}")
 
+CONFIRMATION_GUARD_VERDICT = "confirmation_guard"
+REPEAT_ANSWER_NAG = (
+    f"\n\n{ENVIRONMENT_PREFIX} Your previous answer was the same to the latest one. "
+    f"Please do NOT repeat it again and answer differently."
+    f"{ENVIRONMENT_PREFIX_END}"
+)

@@ -12,7 +12,7 @@ from universal_agents.constants import (
 from universal_agents.compressors import auto_compress_tool_result
 from universal_agents.models import ToolCall, ToolResult
 from universal_agents.task_tracker import DONE_TOOL, validate_task_mark_call
-from universal_agents.tool_parsing import parse_tool_args, is_error_content
+from universal_agents.tool_parsing import parse_tool_args, is_error_content, unwrap_dispatch_call
 from universal_agents.tool_manager import DISPATCH_TOOL_NAME
 from universal_agents.tool import ToolOutput
 from universal_agents.subprocess_utils import set_interrupt_event, clear_interrupt_event
@@ -74,14 +74,12 @@ class ToolPipeline:
 
         # 1. Распаковка виртуального диспатчера (invoke_function / call_tool)
         if name in (DISPATCH_TOOL_NAME, "call_tool"):
-            dispatch_args = parse_tool_args(args_str)
-            dispatched_name = dispatch_args.get("function_name", dispatch_args.get("name", ""))
-            nested_args = dispatch_args.get("args", dispatch_args.get("arguments", {}))
-            if not isinstance(dispatched_name, str) or not dispatched_name or not isinstance(nested_args, dict):
+            unwrapped_name, nested_args = unwrap_dispatch_call(name, args_str)
+            if unwrapped_name in (DISPATCH_TOOL_NAME, "call_tool"):
                 return ToolResult.error(
                     tc.id, tc.name, err(": invoke_function requires function_name and an args object.")
                 )
-            name = dispatched_name
+            name = unwrapped_name
             args_str = json.dumps(nested_args, ensure_ascii=False)
         result_name = name
 
@@ -105,7 +103,8 @@ class ToolPipeline:
         # 3. Детекция повторов вызова (§1.9)
         loop_warning = self.agent.recovery_policy.check_tool_loop(name, args_str, seen_in_batch, history_before)
         if loop_warning:
-            self.agent.on_system_msg(f"[LOOP PREVENTED] Blocked repeated call to '{name}' during execution.")
+            args_preview = f" with arguments {args_str}" if args_str and args_str != "{}" else ""
+            self.agent.on_system_msg(f"[LOOP PREVENTED] Blocked repeated call to '{name}'{args_preview} during execution.")
             return ToolResult.error(tc.id, result_name, loop_warning)
 
         # 4. Проверка наличия инструмента в схемах

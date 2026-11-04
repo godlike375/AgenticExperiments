@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 import subprocess
 from universal_agents.tool import tool
