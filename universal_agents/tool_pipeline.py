@@ -168,8 +168,6 @@ class ToolPipeline:
             status, val = self.agent.tool_worker.call(
                 name, args_dict, dry_run=True, stop_check=self.agent._stop_check
             )
-            if status == "error" and f"Unknown tool '{name}'" in str(val):
-                status, val = "fallback", None
             if status == "error":
                 self.agent.on_system_msg(f"⚠️ [ERROR] Tool '{name}' dry_run failed: {val}")
                 return ToolResult.error(tc_id, result_name, val)
@@ -239,9 +237,7 @@ class ToolPipeline:
                 full_result = handler(self.agent, **args_dict)
             elif tool_info.get("is_external") and getattr(self.agent, "tool_worker", None) and self.agent.tool_worker.isolated:
                 status, val = self.agent.tool_worker.call(name, args_dict, stop_check=self.agent._stop_check)
-                if status == "error" and f"Unknown tool '{name}'" in str(val) and handler:
-                    full_result = handler(**args_dict)
-                elif status == "error":
+                if status == "error":
                     raise RuntimeError(val)
                 else:
                     full_result = val

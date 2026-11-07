@@ -33,7 +33,7 @@ COLORS = {
 
 
 
-def take_screenshot() -> tuple[str, int, int, int, int, float]:
+def take_screenshot(agent=None) -> tuple[str, int, int, int, int, float]:
     cursor_x, cursor_y = pyautogui.position()
     img = ImageGrab.grab()
     w, h = img.size
@@ -53,6 +53,8 @@ def take_screenshot() -> tuple[str, int, int, int, int, float]:
     b64 = base64.b64encode(buf.getvalue()).decode()
     img_w, img_h = img.size
     screen_state.set_last_scale(scale)
+    if agent is not None:
+        setattr(agent, "_screen_scale", scale)
     return b64, w, h, img_w, img_h, scale
 
 
@@ -140,8 +142,10 @@ def draw_grid(img: Image.Image, cursor_x=None, cursor_y=None) -> None:
 
 
 
-def _current_scale() -> float:
-    """Масштаб image→screen: приоритет у последнего скриншота; до него — эвристика."""
+def _current_scale(agent=None) -> float:
+    """Масштаб image→screen: приоритет у агента, затем screen_state, затем эвристика."""
+    if agent is not None and getattr(agent, "_screen_scale", None) is not None:
+        return agent._screen_scale
     s = screen_state.get_last_scale()
     if s is not None and s > 0:
         return s
@@ -149,8 +153,8 @@ def _current_scale() -> float:
     return Config.SCREENSHOT_MAX_WIDTH / w if w > Config.SCREENSHOT_MAX_WIDTH else 1.0
 
 
-def _to_screen(x: int, y: int) -> tuple[int, int]:
-    scale = _current_scale()
+def _to_screen(x: int, y: int, agent=None) -> tuple[int, int]:
+    scale = _current_scale(agent)
     return round(x / scale), round(y / scale)
 
 
@@ -290,13 +294,14 @@ def _send_combo(parts: list[str]) -> str | None:
     short_description="screenshot with coordinate grid",
     group="desktop",
 )
-def screenshot() -> ToolOutput:
-    b64, orig_w, orig_h, img_w, img_h, scale = take_screenshot()
+def screenshot(agent=None) -> ToolOutput:
+    b64, orig_w, orig_h, img_w, img_h, scale = take_screenshot(agent)
     cx, cy = pyautogui.position()
     text = (
         f"Экран: {orig_w}x{orig_h} | Изображение: {img_w}x{img_h} (scale={scale:.3f}) | "
         f"Курсор: экран ({cx}, {cy}) = изображение ({round(cx * scale)}, {round(cy * scale)}). "
-        "Координаты в подписях сетки — это аргументы mouse_move/mouse_click/scroll."
+        f"Разрешение экрана {orig_w}x{orig_h}, сетка на картинке {img_w}x{img_h}. "
+        "Координаты в подписях сетки (0..img_w, 0..img_h) передавай в mouse_move/mouse_click/scroll."
     )
     return ToolOutput(text=text, images=[b64])
 
@@ -311,8 +316,8 @@ def screenshot() -> ToolOutput:
     x=("int", "X-координата на изображении скриншота"),
     y=("int", "Y-координата на изображении скриншота"),
 )
-def mouse_move(x: int, y: int) -> str:
-    sx, sy = _to_screen(x, y)
+def mouse_move(agent=None, x: int = 0, y: int = 0) -> str:
+    sx, sy = _to_screen(x, y, agent)
     pyautogui.moveTo(sx, sy, duration=Config.MOUSE_MOVE_DURATION)
     return f"Курсор перемещён: экран ({sx}, {sy}) = изображение ({x}, {y})."
 
@@ -329,11 +334,11 @@ def mouse_move(x: int, y: int) -> str:
     button=("str", "optional: 'left' (по умолчанию), 'right' или 'middle'"),
     double=("bool", "optional: true — двойной клик"),
 )
-def mouse_click(x: int, y: int, button: str = "left", double: bool = False) -> str:
+def mouse_click(agent=None, x: int = 0, y: int = 0, button: str = "left", double: bool = False) -> str:
     btn = (button or "left").strip().lower()
     if btn not in ("left", "right", "middle"):
         return err(f": unknown button '{button}' — use left/right/middle")
-    sx, sy = _to_screen(x, y)
+    sx, sy = _to_screen(x, y, agent)
     if double:
         pyautogui.doubleClick(sx, sy, button=btn)
         kind = f"double {btn}"
@@ -356,11 +361,11 @@ def mouse_click(x: int, y: int, button: str = "left", double: bool = False) -> s
     x=("int", "optional: X-координата на изображении (иначе — под текущим курсором)"),
     y=("int", "optional: Y-координата на изображении (иначе — под текущим курсором)"),
 )
-def scroll(amount: int, x: int = None, y: int = None) -> str:
+def scroll(agent=None, amount: int = 0, x: int = None, y: int = None) -> str:
     if (x is None) != (y is None):
         return err(": укажите x и y вместе, либо не указывайте вовсе (прокрутка под курсором)")
     if x is not None:
-        x, y = _to_screen(x, y)
+        x, y = _to_screen(x, y, agent)
     pyautogui.scroll(amount, x, y)
     direction = "вверх" if amount > 0 else "вниз"
     where = f" в точке ({x}, {y})" if x is not None else " под курсором"

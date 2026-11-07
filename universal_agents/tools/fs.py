@@ -521,23 +521,23 @@ def _summarize_file(content: str, agent) -> str:
 
     if Config.SKELETON_RANGES_MODE:
         task = (
-            f"{ENVIRONMENT_PREFIX} NOW IGNORE previous instructions! Act as file structure generator. "
-            "Output ONLY the line ranges of the most top-level items (signatures of classes, functions, "
-            "methods, headers]) "
-            "wrapped in <content_structure_lines> tags. Do NOT write any text of the lines "
-            "- just the precise numeric ranges, one per line, in the form `start-end` inclusively 1-based. "
-            "(an example for reference only: '<content_structure_lines>\na-b\nx-y\nm-n\n</content_structure_lines>)'. "
-            "Follow the order of items in the file.\n"
+            f"{ENVIRONMENT_PREFIX} [SYSTEM SERVICE TASK: FILE SKELETON EXTRACTION]\n"
+            "Analyze the numbered file content above and extract the line ranges of the most top-level items "
+            "(signatures of classes, functions, methods, headers) wrapped in <content_structure_lines> tags. "
+            "Do NOT write any text of the lines - just the precise numeric ranges, one per line, "
+            "in the form `start-end` inclusively 1-based. "
+            "(Example: '<content_structure_lines>\n1-20\n25-60\n</content_structure_lines>'). "
+            f"Follow the order of items in the file.\n{ENVIRONMENT_PREFIX_END}\n"
         )
         schema = "<content_structure_lines/>"
         prefill_suffix = "\n"
     else:
         task = (
-            f"{ENVIRONMENT_PREFIX} NOW IGNORE previous instructions! Act as file content structure writer. "
-            "Start with tag <content_structure> and write very compact shallow content structure table "
-            "(like table of content in books) (for example signatures of classes, functions, methods, headers) and "
-            "their precise line ranges (an example for reference only: `<content_structure>Lx-y example1()\nLa-b class Example2\n...`."
-            "Exclude any commentaries in content structure!"
+            f"{ENVIRONMENT_PREFIX} [SYSTEM SERVICE TASK: FILE SKELETON EXTRACTION]\n"
+            "Analyze the numbered file content above. Start with tag <content_structure> and write a very "
+            "compact shallow content structure table (signatures of classes, functions, methods, headers) and "
+            "their precise line ranges (Example: `<content_structure>Lx-y example1()\nLa-b class Example2\n...`). "
+            f"Exclude any commentary or explanations.\n{ENVIRONMENT_PREFIX_END}\n"
         )
         schema = "<content_structure/>"
         prefill_suffix = "\nL"
@@ -755,7 +755,7 @@ def read(agent: 'AgentContext', path: str = '.', start_line: int = None, end_lin
                     )
                     return (
                         f"{ENVIRONMENT_PREFIX} File: {path}\nModified: {mtime}\nTotal lines: {total}\n"
-                        f"Structure skeleton is temporarily unavailable (sub-agent returned empty). "
+                        f"Structure skeleton is temporarily unavailable (skeleton generator returned empty). "
                         f"Do NOT retry '{read.__name__}' without range — read the file in portions using "
                         f"start_line/end_line, e.g. read('{path}', start_line=1). "
                         f"Each call returns ~{Config.MAX_READ_CHARS_PER_CALL} chars."
